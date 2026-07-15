@@ -1,25 +1,8 @@
 import Link from "next/link"
 import { SiteHeader } from "@/components/site-header"
-import { StatusGrid } from "@/components/status-grid"
-import { getStatus } from "@/lib/queries"
+import { StatusBoard } from "@/components/status-board"
 
-export const dynamic = "force-dynamic"
-export const revalidate = 0
-
-function overallHealth(cats: Awaited<ReturnType<typeof getStatus>>) {
-  const known = cats.filter((c) => c.health !== "unknown")
-  if (known.length === 0) return { label: "Awaiting first submissions", tone: "muted" as const }
-  if (known.every((c) => c.health === "operational")) return { label: "All systems operational", tone: "up" as const }
-  if (known.some((c) => c.health === "down")) return { label: "Partial outage", tone: "down" as const }
-  return { label: "Degraded performance", tone: "degraded" as const }
-}
-
-export default async function Page() {
-  const categories = await getStatus()
-  const overall = overallHealth(categories)
-  const totalAlive = categories.reduce((a, c) => a + c.alive, 0)
-  const totalPremium = categories.reduce((a, c) => a + c.premium, 0)
-
+export default function Page() {
   return (
     <main className="min-h-dvh">
       <SiteHeader active="status" />
@@ -38,36 +21,11 @@ export default async function Page() {
               schedule; only the ones that pass are served to the app. No credentials are shown here.
             </p>
           </div>
-
-          <div className="flex flex-col gap-4 rounded-lg border border-border bg-card p-5 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex items-center gap-3">
-              <span
-                className={`h-3 w-3 rounded-full ${
-                  overall.tone === "up"
-                    ? "bg-foreground animate-pulse"
-                    : overall.tone === "down"
-                      ? "bg-destructive"
-                      : overall.tone === "degraded"
-                        ? "bg-muted-foreground"
-                        : "bg-border"
-                }`}
-              />
-              <span className="text-lg font-medium">{overall.label}</span>
-            </div>
-            <div className="flex items-center gap-6 font-mono text-sm text-muted-foreground">
-              <span>
-                <span className="text-foreground">{totalAlive}</span> alive
-              </span>
-              <span>
-                <span className="text-foreground">{totalPremium}</span> premium
-              </span>
-            </div>
-          </div>
         </section>
 
-        <StatusGrid categories={categories} />
+        <StatusBoard />
 
-        <section className="mt-10 flex flex-col items-start gap-4 rounded-lg border border-dashed border-border p-6 sm:flex-row sm:items-center sm:justify-between">
+        <section className="mt-10 flex flex-col items-start gap-4 rounded-xl border border-dashed border-border p-6 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex flex-col gap-1">
             <h2 className="font-semibold">Have a working source?</h2>
             <p className="text-sm text-muted-foreground">
