@@ -74,3 +74,25 @@ export async function ingestSource(
     detail: result.detail,
   }
 }
+
+/**
+ * Turns a save/DB error into a human-readable cause. Most "could not save" failures in a fresh
+ * deploy are configuration problems (no DATABASE_URL, or the schema was never applied), so we
+ * detect those explicitly instead of returning a generic message.
+ */
+export function describeSaveError(e: unknown): string {
+  const msg = (e instanceof Error ? e.message : String(e ?? "")).toLowerCase()
+  if (!process.env.DATABASE_URL) {
+    return "The server has no DATABASE_URL set. Add your database connection string in the host's environment variables."
+  }
+  if (msg.includes('relation "source_entries" does not exist') || msg.includes("source_entries") && msg.includes("does not exist")) {
+    return "The database has no tables yet. Run scripts/schema.sql against it once, then try again."
+  }
+  if (msg.includes("no unique or exclusion constraint") || msg.includes("on conflict")) {
+    return "The database schema is out of date (missing the fingerprint unique constraint). Re-run scripts/schema.sql."
+  }
+  if (msg.includes("econnrefused") || msg.includes("timeout") || msg.includes("terminating connection") || msg.includes("connect")) {
+    return "Could not reach the database. Check that DATABASE_URL is correct and the database is reachable from the host."
+  }
+  return "Could not save to the database. Check the server logs for the underlying error."
+}

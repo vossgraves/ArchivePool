@@ -1,6 +1,6 @@
 import { revalidatePath } from "next/cache"
 import { NextResponse, type NextRequest } from "next/server"
-import { ingestSource } from "@/lib/ingest"
+import { describeSaveError, ingestSource } from "@/lib/ingest"
 import { pollDeviceToken } from "@/lib/tidal-oauth"
 
 export const dynamic = "force-dynamic"
@@ -51,9 +51,10 @@ export async function POST(req: NextRequest) {
       premium: result.premium,
       detail: result.detail,
     })
-  } catch {
+  } catch (e) {
+    console.log("[v0] tidal device poll ingest failed:", e instanceof Error ? e.stack : e)
     return NextResponse.json(
-      { state: "authorized", saved: false, detail: "Could not save the account." },
+      { state: "authorized", saved: false, detail: describeSaveError(e) },
       { status: 500 },
     )
   }

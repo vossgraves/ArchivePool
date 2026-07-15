@@ -1,7 +1,7 @@
 "use server"
 
 import { revalidatePath } from "next/cache"
-import { ingestSource } from "@/lib/ingest"
+import { describeSaveError, ingestSource } from "@/lib/ingest"
 import { isKind, isService, type Kind, type Service } from "@/lib/sources"
 
 export interface SubmitState {
@@ -69,8 +69,9 @@ export async function submitSource(_prev: SubmitState, form: FormData): Promise<
   let result
   try {
     result = await ingestSource(service, kind, payload)
-  } catch {
-    return { ok: false, message: "Could not save the submission. Try again." }
+  } catch (e) {
+    console.log("[v0] submit ingest failed:", e instanceof Error ? e.stack : e)
+    return { ok: false, message: describeSaveError(e) }
   }
 
   revalidatePath("/")
