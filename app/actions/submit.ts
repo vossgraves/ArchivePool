@@ -1,11 +1,8 @@
 "use server"
 
-import { sql } from "drizzle-orm"
 import { revalidatePath } from "next/cache"
-import { db } from "@/lib/db"
-import { sourceEntries } from "@/lib/db/schema"
-import { runCheck } from "@/lib/health"
-import { fingerprint, isKind, isService, maskLabel, type Kind, type Service } from "@/lib/sources"
+import { ingestSource } from "@/lib/ingest"
+import { isKind, isService, type Kind, type Service } from "@/lib/sources"
 
 export interface SubmitState {
   ok: boolean
@@ -68,48 +65,10 @@ export async function submitSource(_prev: SubmitState, form: FormData): Promise<
   const invalid = validate(service, kind, payload)
   if (invalid) return { ok: false, message: invalid }
 
-  const fp = fingerprint(service, kind, payload)
-  const label = maskLabel(service, kind, payload)
-
   // Validate immediately so the contributor gets instant feedback.
-  const result = await runCheck(service, kind, payload)
-
+  let result
   try {
-    await db
-      .insert(sourceEntries)
-      .values({
-        service,
-        kind,
-        label,
-        payload,
-        fingerprint: fp,
-        status: result.status,
-        premium: result.premium,
-        detail: result.detail,
-        latencyMs: result.latencyMs,
-        checkCount: 1,
-        okCount: result.ok ? 1 : 0,
-        consecutiveFailures: result.ok ? 0 : 1,
-        lastCheckedAt: new Date(),
-        removed: false,
-        disabled: false,
-      })
-      .onConflictDoUpdate({
-        target: sourceEntries.fingerprint,
-        set: {
-          payload,
-          label,
-          status: result.status,
-          premium: result.premium,
-          detail: result.detail,
-          latencyMs: result.latencyMs,
-          checkCount: sql`${sourceEntries.checkCount} + 1`,
-          okCount: sql`${sourceEntries.okCount} + ${result.ok ? 1 : 0}`,
-          consecutiveFailures: result.ok ? 0 : sql`${sourceEntries.consecutiveFailures} + 1`,
-          lastCheckedAt: new Date(),
-          removed: false,
-        },
-      })
+    result = await ingestSource(service, kind, payload)
   } catch {
     return { ok: false, message: "Could not save the submission. Try again." }
   }

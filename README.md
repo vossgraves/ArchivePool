@@ -6,7 +6,9 @@ on a schedule, auto-drops the dead/non-premium ones, and serves the surviving po
 app auto-discovers at runtime.
 
 - **Public status page** (`/`) — aggregate health only, no secrets ever shown.
-- **Anonymous submit** (`/submit`) — contribute an instance URL or account, no login.
+- **Anonymous submit** (`/submit`) — contribute an instance URL or account, no login. Tidal accounts
+  can be added with one click via **Sign in with Tidal** (OAuth device flow — no password touches
+  this site), or by pasting a token manually.
 - **Machine JSON** — `/api/sources` and `/api/discovery/*` feed the app.
 - **Automatic health checks** — a cron sweep disables entries after repeated failures and
   re-enables them if they recover.
@@ -47,6 +49,22 @@ See `.env.example` for a copy-paste template.
    `ADMIN_TOKEN` + `CRON_SECRET` in Project Settings → Environment Variables.
 3. Run the schema once against the production database: `psql "$DATABASE_URL" -f scripts/schema.sql`.
 4. The cron in `vercel.json` (`*/30 * * * *`) runs the health sweep automatically.
+
+## Deploy elsewhere (Railway, Fly, VPS, …)
+
+The app runs anywhere Next.js does — `pnpm build` then `pnpm start` (the platform's `PORT` is
+respected automatically). Set the same environment variables as above and run
+`scripts/schema.sql` once against your database.
+
+**Important:** `vercel.json` cron only runs on Vercel. On other hosts the health sweep will not
+fire on its own, so nothing auto-disables dead sources. Trigger it externally instead — a ready-made
+GitHub Action is included at `.github/workflows/health-cron.yml`:
+
+1. In this repo's **Settings → Secrets and variables → Actions**, add:
+   - `HEALTH_URL` = your deployment's base URL (e.g. `https://archivepool.up.railway.app`).
+   - `CRON_SECRET` = the same value you set on the deployment.
+2. The workflow pings `GET /api/cron/health` every 15 minutes (and can be run manually from the
+   Actions tab). Any external scheduler that sends `Authorization: Bearer <CRON_SECRET>` works too.
 
 ## API
 

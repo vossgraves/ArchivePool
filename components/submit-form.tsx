@@ -2,6 +2,7 @@
 
 import { useActionState, useState } from "react"
 import { submitSource, type SubmitState } from "@/app/actions/submit"
+import { TidalConnect } from "@/components/tidal-connect"
 import { KIND_LABELS, SERVICE_LABELS, type Kind, type Service } from "@/lib/sources"
 
 const initial: SubmitState = { ok: false, message: "" }
@@ -105,9 +106,20 @@ export function SubmitForm() {
         </div>
       ) : service === "tidal" ? (
         <div className="flex flex-col gap-4">
-          <Field label="Access token" name="token" required placeholder="Bearer token from a Tidal session" />
-          <Field label="Refresh token" name="refreshToken" placeholder="Optional" />
-          <Field label="Country code" name="countryCode" placeholder="US" />
+          <TidalConnect />
+          <details className="rounded-md border border-border">
+            <summary className="cursor-pointer px-3 py-2 text-sm text-muted-foreground">
+              Or paste a token manually
+            </summary>
+            <div className="flex flex-col gap-4 border-t border-border p-3">
+              <Field label="Access token" name="token" placeholder="Bearer token from a Tidal session" />
+              <Field label="Refresh token" name="refreshToken" placeholder="Optional" />
+              <Field label="Country code" name="countryCode" placeholder="US" />
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                Only needed if you already have a token. Sign-in above is the easy path.
+              </p>
+            </div>
+          </details>
         </div>
       ) : (
         <div className="flex flex-col gap-4">
