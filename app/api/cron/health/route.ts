@@ -1,5 +1,6 @@
 import { eq, sql } from "drizzle-orm"
 import { NextResponse, type NextRequest } from "next/server"
+import { decryptAtRest } from "@/lib/crypto"
 import { db } from "@/lib/db"
 import { healthLog, sourceEntries } from "@/lib/db/schema"
 import { runCheck } from "@/lib/health"
@@ -41,7 +42,7 @@ async function runHealthSweep() {
   let reenabled = 0
 
   await mapLimit(entries, CONCURRENCY, async (entry) => {
-    const result = await runCheck(entry.service as Service, entry.kind as Kind, entry.payload)
+    const result = await runCheck(entry.service as Service, entry.kind as Kind, decryptAtRest(entry.payload))
     checked++
 
     const nextConsecutive = result.ok ? 0 : entry.consecutiveFailures + 1

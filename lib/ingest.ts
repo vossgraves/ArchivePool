@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm"
+import { encryptAtRest } from "@/lib/crypto"
 import { db } from "@/lib/db"
 import { sourceEntries } from "@/lib/db/schema"
 import { runCheck, type CheckResult } from "@/lib/health"
@@ -22,9 +23,12 @@ export async function ingestSource(
   kind: Kind,
   payload: Record<string, unknown>,
 ): Promise<IngestResult> {
+  // Fingerprint, label and the live health check all run on the PLAINTEXT payload; only the value
+  // persisted to the database is encrypted, so dedupe and validation behaviour is unchanged.
   const fp = fingerprint(service, kind, payload)
   const label = maskLabel(service, kind, payload)
   const result: CheckResult = await runCheck(service, kind, payload)
+  const storedPayload = encryptAtRest(payload)
 
   await db
     .insert(sourceEntries)
@@ -32,7 +36,7 @@ export async function ingestSource(
       service,
       kind,
       label,
-      payload,
+      payload: storedPayload,
       fingerprint: fp,
       status: result.status,
       premium: result.premium,
@@ -48,7 +52,7 @@ export async function ingestSource(
     .onConflictDoUpdate({
       target: sourceEntries.fingerprint,
       set: {
-        payload,
+        payload: storedPayload,
         label,
         status: result.status,
         premium: result.premium,

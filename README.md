@@ -39,8 +39,28 @@ create a project and paste its connection string into `DATABASE_URL`.
 | `ADMIN_TOKEN`         | yes      | Bearer token for `/admin` + admin APIs. Generate: `openssl rand -base64 32`.            |
 | `CRON_SECRET`         | prod     | Secret the scheduled health check must present. On Vercel Cron it is sent automatically.|
 | `READ_KEYS_ENFORCED`  | no       | `"true"` requires a per-app read key for `/api/sources` and `/api/discovery/*`.         |
+| `POOL_ENCRYPTION_KEY` | no       | base64 32-byte AES key. Encrypts credentials at rest in the DB. `openssl rand -base64 32`. |
+| `POOL_CLIENT_KEY`     | no       | base64 32-byte AES key. End-to-end: `/api/sources` returns ciphertext; the app decrypts. |
 
 See `.env.example` for a copy-paste template.
+
+## Credential encryption
+
+Sensitive fields (Tidal/Qobuz tokens, Qobuz `appId`, etc.) can be encrypted with AES-256-GCM in two
+independent layers. Non-sensitive fields such as an instance `baseUrl` stay in the clear so discovery
+keeps working.
+
+- **At rest** — set `POOL_ENCRYPTION_KEY`. Credentials are stored encrypted in the database, so a DB
+  dump or backup leak exposes only ciphertext. The key never leaves the server.
+- **End-to-end** — set `POOL_CLIENT_KEY`. `/api/sources` re-encrypts sensitive fields with this key,
+  so anyone hitting the URL in a browser sees ciphertext. The response includes `"encrypted": true`,
+  and blobs use the format `enc:1:<iv-b64>:<ciphertext+tag-b64>`. The ArchiveTune app ships the same
+  key (its `POOL_CLIENT_KEY` build field) and decrypts locally.
+
+Both are optional and independent — leave either blank to disable that layer (values pass through in
+the clear, matching the original behaviour). **Note:** this raises the bar against DB leaks and casual
+scraping, but a key embedded in a distributed app can be extracted by decompiling it — true secrecy
+requires proxying playback through the server so tokens never reach clients.
 
 ## Deploy to Vercel
 

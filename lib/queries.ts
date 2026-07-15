@@ -1,5 +1,6 @@
 import "server-only"
 import { and, desc, eq, sql } from "drizzle-orm"
+import { decryptAtRest, encryptForClient } from "./crypto"
 import { db } from "./db"
 import { sourceEntries } from "./db/schema"
 import { CATEGORIES, type Kind, type Service } from "./sources"
@@ -85,6 +86,9 @@ export async function getAlivePool() {
     )
     .orderBy(desc(sourceEntries.premium), desc(sourceEntries.lastCheckedAt))
 
+  // Credentials are stored encrypted at rest. Decrypt with the server key, then re-encrypt the
+  // sensitive fields with the client key so the JSON leaving the server is ciphertext end-to-end
+  // (the ArchiveTune app decrypts locally). When POOL_CLIENT_KEY is unset this is a no-op.
   const group = (service: Service, kind: Kind) =>
     rows
       .filter((r) => r.service === service && r.kind === kind)
@@ -94,7 +98,7 @@ export async function getAlivePool() {
         status: r.status,
         latencyMs: r.latencyMs,
         lastCheckedAt: r.lastCheckedAt ? new Date(r.lastCheckedAt).toISOString() : null,
-        ...r.payload,
+        ...encryptForClient(decryptAtRest(r.payload)),
       }))
 
   return {

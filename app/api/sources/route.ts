@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server"
 import { verifyReadKey } from "@/lib/api-keys"
+import { clientEncryptionEnabled } from "@/lib/crypto"
 import { getAlivePool } from "@/lib/queries"
 
 export const dynamic = "force-dynamic"
@@ -20,6 +21,9 @@ export async function GET(req: NextRequest) {
     {
       version: 1,
       generatedAt: new Date().toISOString(),
+      // When true, sensitive fields (token/appId/…) are AES-256-GCM ciphertext in the
+      // `enc:1:<iv>:<ct+tag>` format and must be decrypted with POOL_CLIENT_KEY.
+      encrypted: clientEncryptionEnabled(),
       ...pool,
     },
     {
