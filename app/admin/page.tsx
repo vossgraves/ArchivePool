@@ -15,8 +15,8 @@ export default function AdminPage() {
         <div className="mb-8">
           <h1 className="text-balance text-2xl font-semibold tracking-tight">Admin</h1>
           <p className="mt-1 text-pretty text-sm leading-relaxed text-muted-foreground">
-            Manage per-app read keys. Apps must send a valid key to read the source pool and discovery
-            feeds. Keep your admin token private.
+            Force-check all pool entries, manage per-app read keys, and moderate contributed sources.
+            Keep your admin token private.
           </p>
         </div>
         <AdminKeys />

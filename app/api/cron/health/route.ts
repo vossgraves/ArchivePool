@@ -9,8 +9,11 @@ import type { Kind, Service } from "@/lib/sources"
 export const dynamic = "force-dynamic"
 export const maxDuration = 60
 
-const AUTO_DISABLE_AFTER = 5 // consecutive failures before an entry leaves the pool
+const AUTO_DISABLE_AFTER = 5  // consecutive failures before an entry leaves the pool
 const CONCURRENCY = 6
+// Only re-check an entry if it hasn't been checked in the last 6 hours. The cron fires
+// every 30 min but we don't need to hammer every entry that frequently.
+const STALE_AFTER_MS = 6 * 60 * 60 * 1000
 
 function authorized(req: NextRequest): boolean {
   // Vercel Cron requests include this header. Manual runs can pass the admin/cron secret.
@@ -34,9 +37,15 @@ async function mapLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<v
   await Promise.all(workers)
 }
 
-async function runHealthSweep() {
-  const entries = await db.select().from(sourceEntries).where(eq(sourceEntries.removed, false))
+export async function runHealthSweep(force = false) {
+  const allEntries = await db.select().from(sourceEntries).where(eq(sourceEntries.removed, false))
+  // Skip entries that were checked recently unless force=true (e.g. admin manual trigger).
+  const now = Date.now()
+  const entries = force
+    ? allEntries
+    : allEntries.filter((e) => !e.lastCheckedAt || now - new Date(e.lastCheckedAt).getTime() > STALE_AFTER_MS)
 
+  const skipped = allEntries.length - entries.length
   let checked = 0
   let disabled = 0
   let reenabled = 0
@@ -82,7 +91,7 @@ async function runHealthSweep() {
   // Trim old health-log rows to keep the table lean (keep ~30 days).
   await db.execute(sql`delete from health_log where checked_at < now() - interval '30 days'`)
 
-  return { checked, disabled, reenabled }
+  return { checked, skipped, disabled, reenabled }
 }
 
 export async function GET(req: NextRequest) {

@@ -21,6 +21,12 @@ export function AdminKeys() {
   const [createdKey, setCreatedKey] = useState<{ name: string; key: string } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [forceChecking, setForceChecking] = useState(false)
+  const [forceResult, setForceResult] = useState<{
+    sweep: { checked: number; skipped: number; disabled: number; reenabled: number }
+    monochrome: { fetched: number; checked: number; added: number; updated: number; failed: number }
+    ranAt: string
+  } | null>(null)
 
   // Restore the token for the session so a refresh doesn't force re-entry.
   useEffect(() => {
@@ -85,6 +91,27 @@ export function AdminKeys() {
     void loadKeys()
   }
 
+  async function forceCheck() {
+    setForceChecking(true)
+    setForceResult(null)
+    try {
+      const res = await fetch("/api/admin/force-check", {
+        method: "POST",
+        headers: authHeaders(),
+      })
+      if (!res.ok) {
+        setError("Force check failed.")
+        return
+      }
+      const data = await res.json()
+      setForceResult(data)
+    } catch {
+      setError("Force check failed.")
+    } finally {
+      setForceChecking(false)
+    }
+  }
+
   async function toggleRevoke(row: KeyRow) {
     await fetch("/api/admin/keys", {
       method: "PATCH",
@@ -127,6 +154,40 @@ export function AdminKeys() {
 
   return (
     <div className="flex flex-col gap-8">
+      <section className="rounded-lg border border-border p-5">
+        <h2 className="text-sm font-semibold">Force check</h2>
+        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+          Immediately re-checks every token and instance in the pool, bypassing the normal 6h
+          cooldown. Also triggers a fresh monochrome.tf sync to pick up new instances.
+        </p>
+        <Button
+          type="button"
+          className="mt-4"
+          disabled={forceChecking}
+          onClick={() => void forceCheck()}
+        >
+          {forceChecking ? "Checking…" : "Force check everything"}
+        </Button>
+        {forceResult ? (
+          <div className="mt-4 rounded-md border border-border bg-secondary px-4 py-3 font-mono text-xs leading-relaxed">
+            <p className="font-sans text-xs font-medium mb-2">
+              Done · {new Date(forceResult.ranAt).toLocaleString()}
+            </p>
+            <p>
+              <span className="text-muted-foreground">Sweep — </span>
+              checked {forceResult.sweep.checked}, skipped {forceResult.sweep.skipped}, disabled{" "}
+              {forceResult.sweep.disabled}, re-enabled {forceResult.sweep.reenabled}
+            </p>
+            <p>
+              <span className="text-muted-foreground">Monochrome — </span>
+              fetched {forceResult.monochrome.fetched}, checked {forceResult.monochrome.checked},
+              added {forceResult.monochrome.added}, updated {forceResult.monochrome.updated}, failed{" "}
+              {forceResult.monochrome.failed}
+            </p>
+          </div>
+        ) : null}
+      </section>
+
       <section className="rounded-lg border border-border p-5">
         <h2 className="text-sm font-semibold">Create a key</h2>
         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
