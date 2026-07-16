@@ -1,4 +1,8 @@
 import { createHash } from "node:crypto"
+import { sql } from "drizzle-orm"
+import { db } from "@/lib/db"
+import { sourceEntries } from "@/lib/db/schema"
+import { encryptAtRest } from "@/lib/crypto"
 import type { Kind, Service, Status } from "./sources"
 
 export interface CheckResult {
@@ -10,6 +14,15 @@ export interface CheckResult {
 }
 
 const TIMEOUT_MS = 12_000
+
+// Tidal device-flow OAuth client (same public credentials used by all open-source tooling).
+const TIDAL_CLIENT_ID = "zU4XHVVkc2tDPo4t"
+const TIDAL_CLIENT_SECRET = "VJKhDFqJPqvsPVNBV6ukXTJmwlvbttP7wlMlrc72se4="
+const TIDAL_TOKEN_ENDPOINT = "https://auth.tidal.com/v1/oauth2/token"
+
+// Tidal's own TV/device client UA — used for all Tidal API calls so sessions are not
+// flagged for appearing to come from an unrecognised user agent.
+const TIDAL_UA = "TIDAL/1000 (Linux; Android 10)"
 
 async function timedFetch(url: string, init?: RequestInit): Promise<{ res: Response; ms: number }> {
   const controller = new AbortController()
@@ -70,20 +83,104 @@ async function checkApi(service: Service, payload: Record<string, unknown>): Pro
   }
 }
 
-async function checkTidalAccount(payload: Record<string, unknown>): Promise<CheckResult> {
-  const token = String(payload.token ?? "").trim()
+/**
+ * Attempts to refresh a Tidal access token using the stored refresh token.
+ * Returns the new access token on success, null if the refresh token is absent or rejected.
+ * When successful, also updates the payload in the DB so future checks use the new token.
+ */
+async function tryRefreshTidalToken(
+  payload: Record<string, unknown>,
+  entryFingerprint?: string,
+): Promise<string | null> {
+  const refreshToken = String(payload.refreshToken ?? "").trim()
+  if (!refreshToken) return null
+
+  try {
+    const body = new URLSearchParams({
+      client_id: TIDAL_CLIENT_ID,
+      client_secret: TIDAL_CLIENT_SECRET,
+      refresh_token: refreshToken,
+      grant_type: "refresh_token",
+      scope: "r_usr+w_usr+w_sub",
+    })
+    const res = await fetch(TIDAL_TOKEN_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "user-agent": TIDAL_UA,
+      },
+      body,
+      cache: "no-store",
+    })
+    if (!res.ok) return null
+
+    const json = (await res.json()) as {
+      access_token?: string
+      refresh_token?: string
+      expires_in?: number
+    }
+    const newToken = json.access_token
+    if (!newToken) return null
+
+    // Persist the refreshed token back to the DB so it doesn't expire again on the next cycle.
+    if (entryFingerprint) {
+      const newPayload = {
+        ...payload,
+        token: newToken,
+        // Tidal sometimes rotates the refresh token; keep the new one if provided.
+        ...(json.refresh_token ? { refreshToken: json.refresh_token } : {}),
+      }
+      await db
+        .update(sourceEntries)
+        .set({ payload: encryptAtRest(newPayload) })
+        .where(sql`fingerprint = ${entryFingerprint}`)
+        .catch(() => { /* best-effort — don't fail health check on DB error */ })
+    }
+
+    return newToken
+  } catch {
+    return null
+  }
+}
+
+async function checkTidalAccount(
+  payload: Record<string, unknown>,
+  entryFingerprint?: string,
+): Promise<CheckResult> {
+  let token = String(payload.token ?? "").trim()
   if (!token) return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: "missing token" }
+
+  const tidalHeaders = (t: string) => ({
+    authorization: `Bearer ${t}`,
+    "user-agent": TIDAL_UA,
+  })
+
   try {
     // Validate the OAuth access token against Tidal's session endpoint.
-    const { res, ms } = await timedFetch("https://api.tidal.com/v1/sessions", {
-      headers: { authorization: `Bearer ${token}` },
+    let { res, ms } = await timedFetch("https://api.tidal.com/v1/sessions", {
+      headers: tidalHeaders(token),
     })
+
+    // On 401 — attempt a refresh before giving up.
+    if (res.status === 401) {
+      const refreshed = await tryRefreshTidalToken(payload, entryFingerprint)
+      if (refreshed) {
+        token = refreshed
+        const retry = await timedFetch("https://api.tidal.com/v1/sessions", {
+          headers: tidalHeaders(token),
+        })
+        res = retry.res
+        ms = retry.ms
+      }
+    }
+
     if (res.status === 401 || res.status === 403) {
       return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: "token rejected" }
     }
     if (!res.ok) {
       return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: `HTTP ${res.status}` }
     }
+
     // A valid session implies an active account; hi-res capability is best-effort.
     let premium = true
     try {
@@ -91,7 +188,7 @@ async function checkTidalAccount(payload: Record<string, unknown>): Promise<Chec
       if (session?.userId && session?.countryCode) {
         const sub = await timedFetch(
           `https://api.tidal.com/v1/users/${session.userId}/subscription?countryCode=${session.countryCode}`,
-          { headers: { authorization: `Bearer ${token}` } },
+          { headers: tidalHeaders(token) },
         )
         if (sub.res.ok) {
           const body = (await sub.res.text()).toLowerCase()
@@ -116,13 +213,16 @@ const QOBUZ_PROBE_FORMAT_ID = "5"
 // Qobuz authenticates API calls via headers, not just query params. Sending app_id/token only as
 // query params causes intermittent HTTP 401s; the official clients send these headers, so we mirror
 // that to avoid false "dead" results. We keep the query params too for maximum compatibility.
+// Same stable UA used in qobuz-oauth.ts — must stay in sync so all Qobuz API calls
+// appear to come from the same browser session and don't trigger UA-rotation detection.
+const QOBUZ_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
 function qobuzHeaders(appId: string, token: string): Record<string, string> {
   return {
     "X-App-Id": appId,
     "X-User-Auth-Token": token,
-    // A browser-like UA — Qobuz rejects some unrecognized agents with a 401.
-    "user-agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "user-agent": QOBUZ_UA,
   }
 }
 
@@ -194,9 +294,10 @@ export async function runCheck(
   service: Service,
   kind: Kind,
   payload: Record<string, unknown>,
+  entryFingerprint?: string,
 ): Promise<CheckResult> {
   if (kind === "api") return checkApi(service, payload)
-  if (service === "tidal") return checkTidalAccount(payload)
+  if (service === "tidal") return checkTidalAccount(payload, entryFingerprint)
   return checkQobuzAccount(payload)
 }
 

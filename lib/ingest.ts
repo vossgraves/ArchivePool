@@ -27,7 +27,7 @@ export async function ingestSource(
   // persisted to the database is encrypted, so dedupe and validation behaviour is unchanged.
   const fp = fingerprint(service, kind, payload)
   const label = maskLabel(service, kind, payload)
-  const result: CheckResult = await runCheck(service, kind, payload)
+  const result: CheckResult = await runCheck(service, kind, payload, fp)
   const storedPayload = encryptAtRest(payload)
 
   await db

@@ -11,6 +11,10 @@ const SCOPE = "r_usr+w_usr+w_sub"
 const DEVICE_AUTH_ENDPOINT = "https://auth.tidal.com/v1/oauth2/device_authorization"
 const TOKEN_ENDPOINT = "https://auth.tidal.com/v1/oauth2/token"
 
+// Matches the Tidal TV/device client UA used by the app's TidalAccountManager so all
+// requests in the device flow appear consistent from Tidal's perspective.
+const TIDAL_UA = "TIDAL/1000 (Linux; Android 10)"
+
 export interface DeviceStart {
   deviceCode: string
   userCode: string
@@ -39,7 +43,10 @@ export async function startDeviceAuth(): Promise<DeviceStart> {
   const body = new URLSearchParams({ client_id: CLIENT_ID, scope: SCOPE })
   const res = await fetch(DEVICE_AUTH_ENDPOINT, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      "user-agent": TIDAL_UA,
+    },
     body,
     cache: "no-store",
   })
@@ -75,7 +82,10 @@ export async function pollDeviceToken(deviceCode: string): Promise<PollOutcome> 
   })
   const res = await fetch(TOKEN_ENDPOINT, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      "user-agent": TIDAL_UA,
+    },
     body,
     cache: "no-store",
   })

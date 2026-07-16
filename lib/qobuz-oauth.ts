@@ -19,8 +19,11 @@ export const QOBUZ_APP_ID = "950096963"
 const LOGIN_URL = "https://www.qobuz.com/api.json/0.2/user/login"
 const PLAYER_URL = "https://play.qobuz.com/login"
 
+// A stable, versioned Chrome UA consistent with what the Qobuz web player itself sends.
+// Using a fixed string (not randomised per call) prevents Qobuz from flagging sessions for
+// apparent UA rotation, which is a known cause of early token invalidation.
 const UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 export interface QobuzLoginResult {
   userAuthToken: string

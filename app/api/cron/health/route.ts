@@ -51,7 +51,7 @@ export async function runHealthSweep(force = false) {
   let reenabled = 0
 
   await mapLimit(entries, CONCURRENCY, async (entry) => {
-    const result = await runCheck(entry.service as Service, entry.kind as Kind, decryptAtRest(entry.payload))
+    const result = await runCheck(entry.service as Service, entry.kind as Kind, decryptAtRest(entry.payload), entry.fingerprint)
     checked++
 
     const nextConsecutive = result.ok ? 0 : entry.consecutiveFailures + 1
