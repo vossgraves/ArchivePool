@@ -3,6 +3,7 @@
 import { useActionState, useState } from "react"
 import { submitSource, type SubmitState } from "@/app/actions/submit"
 import { TidalConnect } from "@/components/tidal-connect"
+import { QobuzConnect } from "@/components/qobuz-connect"
 import { KIND_LABELS, SERVICE_LABELS, type Kind, type Service } from "@/lib/sources"
 
 const initial: SubmitState = { ok: false, message: "" }
@@ -186,51 +187,59 @@ export function SubmitForm() {
         </div>
       ) : (
         <div className="flex flex-col gap-4">
-          <label className="flex flex-col gap-1.5">
-            <span className="text-sm font-medium">Paste from message</span>
-            <textarea
-              rows={4}
-              placeholder={"Paste the full Qobuz message here…\nToken ➠ …   app_id: …   app_secret: …"}
-              autoComplete="off"
-              onChange={(e) => applyQobuzPaste(e.target.value)}
-              onPaste={(e) => applyQobuzPaste(e.clipboardData.getData("text"))}
-              className="rounded-md border border-input bg-background px-3 py-2 font-mono text-xs leading-relaxed outline-none ring-ring focus:ring-2"
-            />
-            <span className="text-xs text-muted-foreground">
-              {pasteFeedback ?? "Auto-fills token, app_id, app_secret and user id from a share message."}
-            </span>
-          </label>
+          <QobuzConnect />
+          <details className="rounded-md border border-border">
+            <summary className="cursor-pointer px-3 py-2 text-sm text-muted-foreground">
+              Or paste a token manually
+            </summary>
+            <div className="flex flex-col gap-4 border-t border-border p-3">
+              <label className="flex flex-col gap-1.5">
+                <span className="text-sm font-medium">Paste from message</span>
+                <textarea
+                  rows={4}
+                  placeholder={"Paste the full Qobuz message here…\nToken ➠ …   app_id: …   app_secret: …"}
+                  autoComplete="off"
+                  onChange={(e) => applyQobuzPaste(e.target.value)}
+                  onPaste={(e) => applyQobuzPaste(e.clipboardData.getData("text"))}
+                  className="rounded-md border border-input bg-background px-3 py-2 font-mono text-xs leading-relaxed outline-none ring-ring focus:ring-2"
+                />
+                <span className="text-xs text-muted-foreground">
+                  {pasteFeedback ?? "Auto-fills token, app_id, app_secret and user id from a share message."}
+                </span>
+              </label>
 
-          <div className="h-px bg-border" />
+              <div className="h-px bg-border" />
 
-          <Field
-            key="qobuz-token"
-            label="User auth token"
-            name="token"
-            required
-            placeholder="Qobuz user_auth_token"
-            value={qToken}
-            onChange={setQToken}
-          />
-          <Field key="qobuz-appId" label="App ID" name="appId" required placeholder="Qobuz app_id" value={qAppId} onChange={setQAppId} />
-          <Field
-            key="qobuz-appSecret"
-            label="App Secret"
-            name="appSecret"
-            required
-            placeholder="Qobuz app_secret"
-            hint="Required to sign stream URLs. Without it, the app cannot resolve Qobuz FLAC."
-            value={qAppSecret}
-            onChange={setQAppSecret}
-          />
-          <Field
-            key="qobuz-username"
-            label="Username"
-            name="username"
-            placeholder="Optional label only"
-            value={qUsername}
-            onChange={setQUsername}
-          />
+              <Field
+                key="qobuz-token"
+                label="User auth token"
+                name="token"
+                required
+                placeholder="Qobuz user_auth_token"
+                value={qToken}
+                onChange={setQToken}
+              />
+              <Field key="qobuz-appId" label="App ID" name="appId" required placeholder="Qobuz app_id" value={qAppId} onChange={setQAppId} />
+              <Field
+                key="qobuz-appSecret"
+                label="App Secret"
+                name="appSecret"
+                required
+                placeholder="Qobuz app_secret"
+                hint="Required to sign stream URLs. Without it, the app cannot resolve Qobuz FLAC."
+                value={qAppSecret}
+                onChange={setQAppSecret}
+              />
+              <Field
+                key="qobuz-username"
+                label="Username"
+                name="username"
+                placeholder="Optional label only"
+                value={qUsername}
+                onChange={setQUsername}
+              />
+            </div>
+          </details>
         </div>
       )}
 
