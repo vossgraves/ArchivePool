@@ -21,6 +21,8 @@ export function AdminKeys() {
   const [createdKey, setCreatedKey] = useState<{ name: string; key: string } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [purging, setPurging] = useState(false)
+  const [purgeResult, setPurgeResult] = useState<{ removed: number } | null>(null)
   const [forceChecking, setForceChecking] = useState(false)
   const [forceResult, setForceResult] = useState<{
     sweep: { checked: number; skipped: number; disabled: number; reenabled: number }
@@ -89,6 +91,27 @@ export function AdminKeys() {
     setCreatedKey({ name: newName.trim(), key: data.key })
     setNewName("")
     void loadKeys()
+  }
+
+  async function purgeDead() {
+    setPurging(true)
+    setPurgeResult(null)
+    try {
+      const res = await fetch("/api/admin/purge-dead", {
+        method: "POST",
+        headers: authHeaders(),
+      })
+      if (!res.ok) {
+        setError("Purge failed.")
+        return
+      }
+      const data = await res.json()
+      setPurgeResult(data)
+    } catch {
+      setError("Purge failed.")
+    } finally {
+      setPurging(false)
+    }
   }
 
   async function forceCheck() {
@@ -185,6 +208,30 @@ export function AdminKeys() {
               {forceResult.monochrome.failed}
             </p>
           </div>
+        ) : null}
+      </section>
+
+      <section className="rounded-lg border border-border p-5">
+        <h2 className="text-sm font-semibold">Purge dead entries</h2>
+        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+          Permanently removes every entry whose status is{" "}
+          <span className="font-mono">dead</span> from the pool. Run a force check first to make
+          sure statuses are up to date before purging.
+        </p>
+        <Button
+          type="button"
+          variant="destructive"
+          className="mt-4"
+          disabled={purging}
+          onClick={() => void purgeDead()}
+        >
+          {purging ? "Purging…" : "Remove all dead"}
+        </Button>
+        {purgeResult ? (
+          <p className="mt-3 text-xs text-muted-foreground">
+            Done — removed <span className="font-semibold text-foreground">{purgeResult.removed}</span> dead{" "}
+            {purgeResult.removed === 1 ? "entry" : "entries"}.
+          </p>
         ) : null}
       </section>
 
