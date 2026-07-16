@@ -16,8 +16,9 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto"
  *    key and decrypts locally.
  *
  * Both keys are base64-encoded 32-byte values. Generate with: `openssl rand -base64 32`.
- * If a key is unset the corresponding layer is a transparent no-op (values pass through in the
- * clear) so an operator can roll encryption out gradually without breaking an existing deploy.
+ * Callers that handle account credentials must check the exported configuration helpers and fail
+ * closed when a key is absent. The transform functions retain plaintext compatibility only so an
+ * operator can migrate rows written by an older deployment after configuring the keys.
  *
  * Wire format (colon-delimited, all base64): `enc:1:<iv>:<ciphertext+authTag>`
  * The 16-byte GCM auth tag is appended to the ciphertext so the blob decrypts with Java's
@@ -37,6 +38,11 @@ const SENSITIVE_KEYS = new Set([
   "secret",
   "password",
   "cookie",
+  "username",
+  "email",
+  "userId",
+  "countryCode",
+  "note",
 ])
 
 function loadKey(envName: string): Buffer | null {
@@ -117,15 +123,20 @@ export function encryptAtRest(payload: Payload): Payload {
   return transformEncrypt(payload, loadKey("POOL_ENCRYPTION_KEY"))
 }
 
+/** True only when database credential encryption is correctly configured. */
+export function atRestEncryptionEnabled(): boolean {
+  return loadKey("POOL_ENCRYPTION_KEY") !== null
+}
+
 /** Decrypt at-rest fields back to plaintext for server-side use (health checks, re-encryption). */
 export function decryptAtRest(payload: Payload): Payload {
   return transformDecrypt(payload, loadKey("POOL_ENCRYPTION_KEY"))
 }
 
 /**
- * Re-encrypt sensitive fields with the client key for the end-to-end response layer. Input must be
- * plaintext (i.e. already `decryptAtRest`-ed). When `POOL_CLIENT_KEY` is unset this is a no-op and
- * the values are returned in the clear (matching the previous public behaviour).
+ * Re-encrypt sensitive fields with the client key for the response layer. Input must be plaintext
+ * (i.e. already `decryptAtRest`-ed). The source route verifies configuration before calling this;
+ * the transform's no-key compatibility exists only for migration and non-sensitive internal use.
  */
 export function encryptForClient(payload: Payload): Payload {
   return transformEncrypt(payload, loadKey("POOL_CLIENT_KEY"))

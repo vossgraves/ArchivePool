@@ -20,25 +20,24 @@ export function generateKey(): { key: string; keyHash: string; prefix: string } 
   return { key, keyHash: hashKey(key), prefix: key.slice(0, KEY_PREFIX.length + 6) }
 }
 
-/** Extract a candidate key from the request (Authorization: Bearer, or x-api-key). */
+/** Extract a candidate key from a header. Query-string keys leak into URLs, logs and history. */
 function extractKey(req: NextRequest): string | null {
   const auth = req.headers.get("authorization")
   if (auth?.startsWith("Bearer ")) return auth.slice("Bearer ".length).trim()
   const header = req.headers.get("x-api-key")
   if (header) return header.trim()
-  const query = new URL(req.url).searchParams.get("key")
-  return query?.trim() || null
+  return null
 }
 
 /**
  * Validate the request's read key against the api_keys table. Returns true when a
  * non-revoked key matches. Also bumps use_count / last_used_at (best-effort).
  *
- * When READ_KEYS_ENFORCED is not "true", access is allowed without a key so the
- * operator can roll out gating gradually. Set READ_KEYS_ENFORCED=true to require keys.
+ * [alwaysEnforce] is used by the credential-bearing source feed. Discovery feeds can remain public
+ * unless READ_KEYS_ENFORCED is set because they contain instance URLs rather than account secrets.
  */
-export async function verifyReadKey(req: NextRequest): Promise<boolean> {
-  const enforced = process.env.READ_KEYS_ENFORCED === "true"
+export async function verifyReadKey(req: NextRequest, alwaysEnforce = false): Promise<boolean> {
+  const enforced = alwaysEnforce || process.env.READ_KEYS_ENFORCED === "true"
 
   // When gating is off, always allow (lets the operator roll keys out gradually).
   if (!enforced) return true

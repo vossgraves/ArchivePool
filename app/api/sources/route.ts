@@ -5,14 +5,22 @@ import { getAlivePool } from "@/lib/queries"
 
 export const dynamic = "force-dynamic"
 
-// Sensitive pool consumed by apps. Reading requires a valid per-app key when
-// READ_KEYS_ENFORCED=true (send it as `Authorization: Bearer <key>`, `x-api-key`,
-// or `?key=`). The public status page never hits this route.
+// Sensitive pool consumed by apps. Reading always requires a valid per-app key sent as
+// `Authorization: Bearer <key>` or `x-api-key`. The public status page never hits this route.
 export async function GET(req: NextRequest) {
-  if (!(await verifyReadKey(req))) {
+  // Account credentials must never fall back to a public or plaintext response. Discovery feeds
+  // remain separately configurable because they contain only public instance URLs.
+  if (!clientEncryptionEnabled()) {
+    return NextResponse.json(
+      { error: "security_not_configured", detail: "Credential delivery is unavailable." },
+      { status: 503, headers: { "cache-control": "private, no-store" } },
+    )
+  }
+
+  if (!(await verifyReadKey(req, true))) {
     return NextResponse.json(
       { error: "unauthorized", detail: "A valid API key is required to read the source pool." },
-      { status: 401 },
+      { status: 401, headers: { "cache-control": "private, no-store" } },
     )
   }
 

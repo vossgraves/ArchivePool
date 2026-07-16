@@ -72,7 +72,7 @@ export async function getStatus(): Promise<CategoryStatus[]> {
   })
 }
 
-/** Full credential payloads for the app pool JSON (public per the chosen model). */
+/** Full credential payloads for the authenticated, encrypted app pool JSON. */
 export async function getAlivePool() {
   const rows = await db
     .select()
@@ -88,7 +88,7 @@ export async function getAlivePool() {
 
   // Credentials are stored encrypted at rest. Decrypt with the server key, then re-encrypt the
   // sensitive fields with the client key so the JSON leaving the server is ciphertext end-to-end
-  // (the ArchiveTune app decrypts locally). When POOL_CLIENT_KEY is unset this is a no-op.
+  // (the ArchiveTune app decrypts locally). The route fails closed when POOL_CLIENT_KEY is absent.
   const group = (service: Service, kind: Kind) =>
     rows
       .filter((r) => r.service === service && r.kind === kind)

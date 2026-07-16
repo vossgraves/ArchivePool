@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm"
-import { encryptAtRest } from "@/lib/crypto"
+import { atRestEncryptionEnabled, encryptAtRest } from "@/lib/crypto"
 import { db } from "@/lib/db"
 import { sourceEntries } from "@/lib/db/schema"
 import { runCheck, type CheckResult } from "@/lib/health"
@@ -23,6 +23,9 @@ export async function ingestSource(
   kind: Kind,
   payload: Record<string, unknown>,
 ): Promise<IngestResult> {
+  if (kind === "account" && !atRestEncryptionEnabled()) {
+    throw new Error("POOL_ENCRYPTION_KEY is required before account credentials can be accepted")
+  }
   // Fingerprint, label and the live health check all run on the PLAINTEXT payload; only the value
   // persisted to the database is encrypted, so dedupe and validation behaviour is unchanged.
   const fp = fingerprint(service, kind, payload)

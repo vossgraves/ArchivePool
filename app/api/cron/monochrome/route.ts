@@ -5,7 +5,6 @@ export const dynamic = "force-dynamic"
 export const maxDuration = 60
 
 function authorized(req: NextRequest): boolean {
-  if (req.headers.get("x-vercel-cron")) return true
   const auth = req.headers.get("authorization")
   const cronSecret = process.env.CRON_SECRET
   const adminToken = process.env.ADMIN_TOKEN

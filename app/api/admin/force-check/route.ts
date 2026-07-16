@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server"
-import { runHealthSweep } from "@/app/api/cron/health/route"
+import { runHealthSweep } from "@/lib/health-sweep"
 import { syncMonochromeInstances } from "@/lib/monochrome"
 
 export const dynamic = "force-dynamic"

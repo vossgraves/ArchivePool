@@ -38,17 +38,17 @@ create a project and paste its connection string into `DATABASE_URL`.
 | `DATABASE_URL`        | yes      | Postgres connection string.                                                             |
 | `ADMIN_TOKEN`         | yes      | Bearer token for `/admin` + admin APIs. Generate: `openssl rand -base64 32`.            |
 | `CRON_SECRET`         | prod     | Secret the scheduled health check must present. On Vercel Cron it is sent automatically.|
-| `READ_KEYS_ENFORCED`  | no       | `"true"` requires a per-app read key for `/api/sources` and `/api/discovery/*`.         |
-| `POOL_ENCRYPTION_KEY` | no       | base64 32-byte AES key. Encrypts credentials at rest in the DB. `openssl rand -base64 32`. |
-| `POOL_CLIENT_KEY`     | no       | base64 32-byte AES key. End-to-end: `/api/sources` returns ciphertext; the app decrypts. |
+| `READ_KEYS_ENFORCED`  | recommended | `"true"` also requires a per-app key for `/api/discovery/*`; `/api/sources` always requires one. |
+| `POOL_ENCRYPTION_KEY` | yes for accounts | base64 32-byte AES key. Encrypts credentials at rest in the DB. `openssl rand -base64 32`. |
+| `POOL_CLIENT_KEY`     | yes for accounts | separate base64 32-byte AES key. `/api/sources` returns ciphertext; the app decrypts. |
 
 See `.env.example` for a copy-paste template.
 
 ## Credential encryption
 
-Sensitive fields (Tidal/Qobuz tokens, Qobuz `appId`, etc.) can be encrypted with AES-256-GCM in two
-independent layers. Non-sensitive fields such as an instance `baseUrl` stay in the clear so discovery
-keeps working.
+Sensitive fields (Tidal/Qobuz tokens, Qobuz `appId`, usernames, notes, etc.) are encrypted with
+AES-256-GCM in two independent layers. Non-sensitive fields such as an instance `baseUrl` stay in
+the clear so discovery keeps working.
 
 - **At rest** — set `POOL_ENCRYPTION_KEY`. Credentials are stored encrypted in the database, so a DB
   dump or backup leak exposes only ciphertext. The key never leaves the server.
@@ -57,16 +57,16 @@ keeps working.
   and blobs use the format `enc:1:<iv-b64>:<ciphertext+tag-b64>`. The ArchiveTune app ships the same
   key (its `POOL_CLIENT_KEY` build field) and decrypts locally.
 
-Both are optional and independent — leave either blank to disable that layer (values pass through in
-the clear, matching the original behaviour). **Note:** this raises the bar against DB leaks and casual
-scraping, but a key embedded in a distributed app can be extracted by decompiling it — true secrecy
-requires proxying playback through the server so tokens never reach clients.
+Account submissions are rejected without the at-rest key. The credential feed returns HTTP 503
+without the client key and HTTP 401 without a read key; it never falls back to plaintext or public
+delivery. **Note:** a key embedded in a distributed app can be extracted by decompiling it — true
+secrecy from app users requires proxying playback through the server so tokens never reach clients.
 
 ## Deploy to Vercel
 
 1. Push this repo to your own GitHub, then "Import Project" on Vercel.
-2. Add a Postgres database (the Neon integration sets `DATABASE_URL` for you) and set
-   `ADMIN_TOKEN` + `CRON_SECRET` in Project Settings → Environment Variables.
+2. Add a Postgres database and set `ADMIN_TOKEN`, `CRON_SECRET`, `POOL_ENCRYPTION_KEY`, and
+   `POOL_CLIENT_KEY` in Project Settings → Environment Variables.
 3. Run the schema once against the production database: `psql "$DATABASE_URL" -f scripts/schema.sql`.
 4. The cron in `vercel.json` (`*/30 * * * *`) runs the health sweep automatically.
 
@@ -92,14 +92,14 @@ Public (no auth, CORS-open):
 
 - `GET /api/status` — aggregate health per service/kind for the status page.
 
-Pool JSON (open by default; requires a read key when `READ_KEYS_ENFORCED=true`):
+Pool JSON:
 
-- `GET /api/sources` — the full active pool.
+- `GET /api/sources` — encrypted account pool; always requires a read key.
 - `GET /api/discovery/tidal` — Tidal instances in ArchiveTune's `{ streaming, api }` discovery shape.
 - `GET /api/discovery/qobuz` — same for Qobuz.
 
-When gating is on, apps send the key as `Authorization: Bearer <key>` (also accepted:
-`x-api-key: <key>`).
+Apps send read keys as `Authorization: Bearer <key>` (also accepted: `x-api-key: <key>`). Keys in
+query strings are intentionally rejected because URLs are commonly logged.
 
 Admin (require `Authorization: Bearer $ADMIN_TOKEN`):
 
@@ -109,9 +109,9 @@ Admin (require `Authorization: Bearer $ADMIN_TOKEN`):
 - `POST /api/admin/remove` — hard-remove a source entry.
 - `GET /api/cron/health` — run a health sweep on demand.
 
-## Read keys (optional gating)
+## Read keys
 
-By default the pool JSON is public. To restrict it to specific apps:
+The credential feed is always restricted. To provision the app and optionally restrict discovery:
 
 1. Set `READ_KEYS_ENFORCED=true`.
 2. Open `/admin`, enter your `ADMIN_TOKEN`, and create a key per app. Copy it immediately —
@@ -124,7 +124,8 @@ By default the pool JSON is public. To restrict it to specific apps:
 In the ArchiveTune repo, set:
 
 - Actions **variable** `SOURCE_PROVIDER_URL` = your deployment URL (e.g. `https://archivepool.vercel.app`).
-- Actions **secret** `SOURCE_PROVIDER_KEY` = a read key from `/admin` (only needed if you enabled gating).
+- Actions **secret** `SOURCE_PROVIDER_KEY` = a read key from `/admin`.
+- Actions **secret** `POOL_CLIENT_KEY` = the same client-delivery key configured on ArchivePool.
 
 The app fetches `/api/discovery/tidal` and `/api/discovery/qobuz`, merges them with any of the
 user's own instances, and health-checks before use. A blank URL/key simply disables discovery.
