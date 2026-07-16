@@ -1,0 +1,42 @@
+name: Monochrome instance sync cron
+
+# Pings the deployed site's /api/cron/monochrome endpoint every 12 hours.
+# Use this when hosting somewhere that does not run vercel.json cron jobs
+# (e.g. Railway, Fly, a VPS). The endpoint fetches monochrome.tf/instances.json,
+# health-checks any new Tidal instances, and adds passing ones to the pool.
+#
+# Required repo secrets (Settings -> Secrets and variables -> Actions):
+#   HEALTH_URL   - Base URL of the deployed site, e.g. https://archivepool.up.railway.app
+#   CRON_SECRET  - Same value as the CRON_SECRET env var on the deployed site.
+
+on:
+  schedule:
+    # Every 12 hours at :00. GitHub cron is UTC and may run a few minutes late.
+    - cron: "0 */12 * * *"
+  workflow_dispatch: {} # allow manual runs from the Actions tab
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync monochrome.tf instances
+        env:
+          HEALTH_URL: ${{ secrets.HEALTH_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$HEALTH_URL" ] || [ -z "$CRON_SECRET" ]; then
+            echo "HEALTH_URL and CRON_SECRET secrets must be set." >&2
+            exit 1
+          fi
+          base="${HEALTH_URL%/}"
+          echo "Pinging $base/api/cron/monochrome"
+          code=$(curl -sS -o /tmp/body.txt -w "%{http_code}" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            "$base/api/cron/monochrome")
+          echo "HTTP $code"
+          cat /tmp/body.txt
+          echo
+          case "$code" in
+            2*) exit 0 ;;
+            *) echo "Monochrome sync failed with HTTP $code" >&2; exit 1 ;;
+          esac
