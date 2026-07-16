@@ -33,6 +33,7 @@ function buildPayload(service: Service, kind: Kind, form: FormData): Record<stri
   return {
     token: String(form.get("token") ?? "").trim(),
     appId: String(form.get("appId") ?? "").trim(),
+    appSecret: String(form.get("appSecret") ?? "").trim(),
     username: String(form.get("username") ?? "").trim() || undefined,
     note,
   }
@@ -50,7 +51,11 @@ function validate(service: Service, kind: Kind, payload: Record<string, unknown>
     return null
   }
   if (!String(payload.token ?? "").trim()) return "A token is required for account submissions."
-  if (service === "qobuz" && !String(payload.appId ?? "").trim()) return "Qobuz submissions need an app_id."
+  if (service === "qobuz") {
+    if (!String(payload.appId ?? "").trim()) return "Qobuz submissions need an app_id."
+    if (!String(payload.appSecret ?? "").trim())
+      return "Qobuz submissions need an app_secret (required to sign stream URLs)."
+  }
   return null
 }
 

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import type { Kind, Service, Status } from "./sources"
 
 export interface CheckResult {
@@ -106,11 +107,51 @@ async function checkTidalAccount(payload: Record<string, unknown>): Promise<Chec
   }
 }
 
+// A stable, widely-available public Qobuz track used only to verify that the app_secret produces a
+// valid request signature. format_id 5 (MP3 320) is not subscription-gated, so a rejection here is
+// due to a bad signature/secret rather than the account's plan.
+const QOBUZ_PROBE_TRACK_ID = "5966783"
+const QOBUZ_PROBE_FORMAT_ID = "5"
+
+/**
+ * Validates the app_secret by signing a `track/getFileUrl` request exactly the way the ArchiveTune
+ * app does — md5("trackgetFileUrlformat_id{fmt}intentstreamtrack_id{id}{ts}{secret}"). A wrong secret
+ * makes Qobuz return an InvalidRequestSignature error, which we surface as a clear failure so bad
+ * credentials are rejected at submit time instead of silently failing during playback.
+ */
+async function checkQobuzAppSecret(
+  appId: string,
+  appSecret: string,
+  token: string,
+): Promise<{ ok: boolean; detail: string; ms: number }> {
+  const ts = Math.floor(Date.now() / 1000).toString()
+  const sig = createHash("md5")
+    .update(`trackgetFileUrlformat_id${QOBUZ_PROBE_FORMAT_ID}intentstreamtrack_id${QOBUZ_PROBE_TRACK_ID}${ts}${appSecret}`)
+    .digest("hex")
+  const url =
+    `https://www.qobuz.com/api.json/0.2/track/getFileUrl?request_ts=${ts}&request_sig=${sig}` +
+    `&track_id=${QOBUZ_PROBE_TRACK_ID}&format_id=${QOBUZ_PROBE_FORMAT_ID}&intent=stream` +
+    `&app_id=${encodeURIComponent(appId)}&user_auth_token=${encodeURIComponent(token)}`
+  try {
+    const { res, ms } = await timedFetch(url)
+    const body = (await res.text()).toLowerCase()
+    // A bad app_secret yields a signature error (HTTP 400). Everything else (a signed URL, or a
+    // plan/geo restriction on this specific track) means the secret itself is valid.
+    if (body.includes("invalid request signature") || body.includes("invalidrequestsignature")) {
+      return { ok: false, detail: "invalid app_secret", ms }
+    }
+    return { ok: true, detail: "secret ok", ms }
+  } catch (e) {
+    return { ok: false, detail: reason(e), ms: 0 }
+  }
+}
+
 async function checkQobuzAccount(payload: Record<string, unknown>): Promise<CheckResult> {
   const token = String(payload.token ?? "").trim()
   const appId = String(payload.appId ?? "").trim()
-  if (!token || !appId) {
-    return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: "missing token/appId" }
+  const appSecret = String(payload.appSecret ?? "").trim()
+  if (!token || !appId || !appSecret) {
+    return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: "missing token/appId/appSecret" }
   }
   try {
     const { res, ms } = await timedFetch(
@@ -123,7 +164,13 @@ async function checkQobuzAccount(payload: Record<string, unknown>): Promise<Chec
     const valid = body.includes('"id"') || body.includes("credential")
     if (!valid) return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: "invalid user" }
     const premium = /lossless|hi-res|hires|studio|sublime|"format_id"\s*:\s*(6|7|27)/.test(body)
-    return { ok: true, premium, status: classify(true, premium), latencyMs: ms, detail: "user ok" }
+    // The user token is valid; now confirm the app_secret actually signs stream requests, since a
+    // token without a working secret cannot resolve any audio in the app.
+    const secretCheck = await checkQobuzAppSecret(appId, appSecret, token)
+    if (!secretCheck.ok) {
+      return { ok: false, premium, status: "dead", latencyMs: ms + secretCheck.ms, detail: secretCheck.detail }
+    }
+    return { ok: true, premium, status: classify(true, premium), latencyMs: ms + secretCheck.ms, detail: "user + secret ok" }
   } catch (e) {
     return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: reason(e) }
   }

@@ -125,6 +125,13 @@ export function SubmitForm() {
         <div className="flex flex-col gap-4">
           <Field label="User auth token" name="token" required placeholder="Qobuz user_auth_token" />
           <Field label="App ID" name="appId" required placeholder="Qobuz app_id" />
+          <Field
+            label="App Secret"
+            name="appSecret"
+            required
+            placeholder="Qobuz app_secret"
+            hint="Required to sign stream URLs. Without it, the app cannot resolve Qobuz FLAC."
+          />
           <Field label="Username" name="username" placeholder="Optional label only" />
         </div>
       )}
