@@ -113,6 +113,19 @@ async function checkTidalAccount(payload: Record<string, unknown>): Promise<Chec
 const QOBUZ_PROBE_TRACK_ID = "5966783"
 const QOBUZ_PROBE_FORMAT_ID = "5"
 
+// Qobuz authenticates API calls via headers, not just query params. Sending app_id/token only as
+// query params causes intermittent HTTP 401s; the official clients send these headers, so we mirror
+// that to avoid false "dead" results. We keep the query params too for maximum compatibility.
+function qobuzHeaders(appId: string, token: string): Record<string, string> {
+  return {
+    "X-App-Id": appId,
+    "X-User-Auth-Token": token,
+    // A browser-like UA — Qobuz rejects some unrecognized agents with a 401.
+    "user-agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+  }
+}
+
 /**
  * Validates the app_secret by signing a `track/getFileUrl` request exactly the way the ArchiveTune
  * app does — md5("trackgetFileUrlformat_id{fmt}intentstreamtrack_id{id}{ts}{secret}"). A wrong secret
@@ -133,7 +146,7 @@ async function checkQobuzAppSecret(
     `&track_id=${QOBUZ_PROBE_TRACK_ID}&format_id=${QOBUZ_PROBE_FORMAT_ID}&intent=stream` +
     `&app_id=${encodeURIComponent(appId)}&user_auth_token=${encodeURIComponent(token)}`
   try {
-    const { res, ms } = await timedFetch(url)
+    const { res, ms } = await timedFetch(url, { headers: qobuzHeaders(appId, token) })
     const body = (await res.text()).toLowerCase()
     // A bad app_secret yields a signature error (HTTP 400). Everything else (a signed URL, or a
     // plan/geo restriction on this specific track) means the secret itself is valid.
@@ -156,6 +169,7 @@ async function checkQobuzAccount(payload: Record<string, unknown>): Promise<Chec
   try {
     const { res, ms } = await timedFetch(
       `https://www.qobuz.com/api.json/0.2/user/get?app_id=${encodeURIComponent(appId)}&user_auth_token=${encodeURIComponent(token)}`,
+      { headers: qobuzHeaders(appId, token) },
     )
     if (!res.ok) {
       return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: `HTTP ${res.status}` }
