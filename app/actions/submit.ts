@@ -29,6 +29,15 @@ function buildPayload(service: Service, kind: Kind, form: FormData): Record<stri
       note,
     }
   }
+  if (service === "deezer") {
+    return {
+      arl: String(form.get("arl") ?? "").trim(),
+      // Optional override for the Blowfish key-derivation secret. The app ships a working
+      // default, so this only needs filling in if Deezer ever rotates it.
+      masterSecret: String(form.get("masterSecret") ?? "").trim() || undefined,
+      note,
+    }
+  }
   // qobuz account
   return {
     token: String(form.get("token") ?? "").trim(),
@@ -47,6 +56,16 @@ function validate(service: Service, kind: Kind, payload: Record<string, unknown>
       if (!/^https?:$/.test(u.protocol)) return "Base URL must be http(s)."
     } catch {
       return "Enter a valid base URL (including https://)."
+    }
+    return null
+  }
+  if (service === "deezer") {
+    // Deezer authenticates with an ARL cookie instead of a token, so it must be checked before
+    // the generic token requirement below.
+    const arl = String(payload.arl ?? "").trim()
+    if (!arl) return "Deezer submissions need an ARL cookie value."
+    if (!/^[a-f0-9]{100,}$/i.test(arl)) {
+      return "That doesn't look like an ARL — expected a long hexadecimal string."
     }
     return null
   }

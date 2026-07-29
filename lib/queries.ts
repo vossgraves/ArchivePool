@@ -104,6 +104,9 @@ export async function getAlivePool() {
   return {
     tidal: { apis: group("tidal", "api"), accounts: group("tidal", "account") },
     qobuz: { apis: group("qobuz", "api"), accounts: group("qobuz", "account") },
+    // Deezer is account-only. `apis` is kept as an empty list for shape symmetry so the app can
+    // parse every service with the same code path.
+    deezer: { apis: group("deezer", "api"), accounts: group("deezer", "account") },
   }
 }
 

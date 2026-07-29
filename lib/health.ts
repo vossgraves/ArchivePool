@@ -290,6 +290,73 @@ async function checkQobuzAccount(payload: Record<string, unknown>): Promise<Chec
   }
 }
 
+// Deezer's mobile gateway. The ARL cookie is exchanged for a session via getUserData, which also
+// reports the plan and the license_token needed to request stream URLs.
+const DEEZER_GATEWAY =
+  "https://www.deezer.com/ajax/gw-light.php?method=deezer.getUserData&input=3&api_version=1.0&api_token="
+const DEEZER_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
+/**
+ * Account check: an ARL is alive when getUserData returns a real user session. Premium is decided
+ * by whether the plan grants lossless, because only those accounts can serve FLAC — a free account
+ * resolves 30-second previews at best, so it is reported as "preview" rather than "alive", matching
+ * how a non-premium Tidal/Qobuz account is treated.
+ */
+async function checkDeezerAccount(payload: Record<string, unknown>): Promise<CheckResult> {
+  const arl = String(payload.arl ?? "").trim()
+  if (!arl) return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: "missing arl" }
+
+  try {
+    const { res, ms } = await timedFetch(DEEZER_GATEWAY, {
+      headers: { cookie: `arl=${arl}`, "user-agent": DEEZER_UA },
+    })
+    if (!res.ok) {
+      return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: `HTTP ${res.status}` }
+    }
+
+    const json = (await res.json()) as {
+      results?: {
+        USER?: {
+          USER_ID?: number
+          OPTIONS?: Record<string, unknown>
+        }
+        checkForm?: string
+      }
+    }
+    const user = json?.results?.USER
+    // An expired or invalid ARL still returns HTTP 200, but with USER_ID 0 and no session token.
+    const userId = Number(user?.USER_ID ?? 0)
+    if (!userId) {
+      return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: "arl rejected" }
+    }
+
+    const options = user?.OPTIONS ?? {}
+    const licenseToken = String(options.license_token ?? "").trim()
+    if (!licenseToken) {
+      return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: "no license_token" }
+    }
+
+    // web_sound_quality advertises the formats the plan allows; lossless implies FLAC access.
+    const quality = options.web_sound_quality
+    const lossless =
+      typeof quality === "object" && quality !== null
+        ? Boolean((quality as Record<string, unknown>).lossless)
+        : false
+    const premium = lossless || Boolean(options.web_hq)
+
+    return {
+      ok: true,
+      premium,
+      status: classify(true, premium),
+      latencyMs: ms,
+      detail: premium ? "session ok (lossless)" : "session ok (lossy only)",
+    }
+  } catch (e) {
+    return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: reason(e) }
+  }
+}
+
 export async function runCheck(
   service: Service,
   kind: Kind,
@@ -298,6 +365,7 @@ export async function runCheck(
 ): Promise<CheckResult> {
   if (kind === "api") return checkApi(service, payload)
   if (service === "tidal") return checkTidalAccount(payload, entryFingerprint)
+  if (service === "deezer") return checkDeezerAccount(payload)
   return checkQobuzAccount(payload)
 }
 

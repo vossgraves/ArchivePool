@@ -146,13 +146,24 @@ export function SubmitForm() {
 
       <div className="flex flex-col gap-3">
         <span className="text-sm font-medium">Service</span>
-        <Segmented options={["tidal", "qobuz"] as Service[]} value={service} onChange={setService} labels={SERVICE_LABELS} />
+        <Segmented
+          options={["tidal", "qobuz", "deezer"] as Service[]}
+          value={service}
+          onChange={(next) => {
+            setService(next)
+            // Deezer has no self-hosted instance tier, so an "api" submission is meaningless.
+            if (next === "deezer") setKind("account")
+          }}
+          labels={SERVICE_LABELS}
+        />
       </div>
 
-      <div className="flex flex-col gap-3">
-        <span className="text-sm font-medium">Type</span>
-        <Segmented options={["api", "account"] as Kind[]} value={kind} onChange={setKind} labels={KIND_LABELS} />
-      </div>
+      {service !== "deezer" && (
+        <div className="flex flex-col gap-3">
+          <span className="text-sm font-medium">Type</span>
+          <Segmented options={["api", "account"] as Kind[]} value={kind} onChange={setKind} labels={KIND_LABELS} />
+        </div>
+      )}
 
       <div className="h-px bg-border" />
 
@@ -184,6 +195,33 @@ export function SubmitForm() {
               </p>
             </div>
           </details>
+        </div>
+      ) : service === "deezer" ? (
+        <div className="flex flex-col gap-4">
+          <Field
+            key="deezer-arl"
+            label="ARL cookie"
+            name="arl"
+            required
+            placeholder="Long hexadecimal string"
+            hint="Log in to deezer.com, then copy the value of the `arl` cookie from your browser's dev tools (Application → Cookies)."
+          />
+          <details className="rounded-md border border-border">
+            <summary className="cursor-pointer px-3 py-2 text-sm text-muted-foreground">Advanced</summary>
+            <div className="flex flex-col gap-4 border-t border-border p-3">
+              <Field
+                key="deezer-masterSecret"
+                label="Master secret"
+                name="masterSecret"
+                placeholder="Leave blank unless Deezer rotated it"
+                hint="Overrides the decryption key the app ships with. Almost never needed."
+              />
+            </div>
+          </details>
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            A paid plan is required for lossless. Free accounts are accepted but only ever resolve
+            previews, so they are recorded as {'"'}preview{'"'} rather than {'"'}alive{'"'}.
+          </p>
         </div>
       ) : (
         <div className="flex flex-col gap-4">

@@ -36,6 +36,11 @@ const SENSITIVE_KEYS = new Set([
   "appId",
   "appSecret",
   "secret",
+  // Deezer: the ARL cookie is the entire credential, and masterSecret is the key-derivation
+  // secret. Both must be encrypted — this set is an explicit allowlist, not a heuristic, so
+  // omitting them would store the credential in plaintext.
+  "arl",
+  "masterSecret",
   "password",
   "cookie",
   "username",
