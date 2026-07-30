@@ -35,12 +35,16 @@ create a project and paste its connection string into `DATABASE_URL`.
 
 | Variable              | Required | Purpose                                                                                 |
 | --------------------- | -------- | --------------------------------------------------------------------------------------- |
-| `DATABASE_URL`        | yes      | Postgres connection string.                                                             |
-| `ADMIN_TOKEN`         | yes      | Bearer token for `/admin` + admin APIs. Generate: `openssl rand -base64 32`.            |
-| `CRON_SECRET`         | prod     | Secret the scheduled health check must present. On Vercel Cron it is sent automatically.|
+| `DATABASE_URL`        | yes      | Postgres connection string. Use a **pooled** one on serverless (see Deploy).             |
+| `ADMIN_TOKEN_HASH`    | yes\*    | SHA-256 hash of the admin token for `/admin` + admin APIs. `TOKEN=$(openssl rand -base64 32); printf %s "$TOKEN" \| sha256sum`. Store only the hash, keep the token yourself. |
+| `ADMIN_TOKEN`         | fallback\* | Legacy plaintext token, used only when `ADMIN_TOKEN_HASH` is unset. Prefer the hash.  |
+| `CRON_SECRET`         | prod     | Secret the scheduled health check must present as `Authorization: Bearer`.               |
 | `READ_KEYS_ENFORCED`  | recommended | `"true"` also requires a per-app key for `/api/discovery/*`; `/api/sources` always requires one. |
 | `POOL_ENCRYPTION_KEY` | yes for accounts | base64 32-byte AES key. Encrypts credentials at rest in the DB. `openssl rand -base64 32`. |
 | `POOL_CLIENT_KEY`     | yes for accounts | separate base64 32-byte AES key. `/api/sources` returns ciphertext; the app decrypts. |
+
+\* Set exactly one of `ADMIN_TOKEN_HASH` / `ADMIN_TOKEN`. If neither is set, every admin route
+returns 401 — it fails closed rather than opening up.
 
 See `.env.example` for a copy-paste template.
 
@@ -65,26 +69,39 @@ secrecy from app users requires proxying playback through the server so tokens n
 ## Deploy to Vercel
 
 1. Push this repo to your own GitHub, then "Import Project" on Vercel.
-2. Add a Postgres database and set `ADMIN_TOKEN`, `CRON_SECRET`, `POOL_ENCRYPTION_KEY`, and
-   `POOL_CLIENT_KEY` in Project Settings → Environment Variables.
+2. Set the environment variables from the table above in Project Settings → Environment
+   Variables. `DATABASE_URL` must be a **pooled** connection string — serverless functions open a
+   connection per invocation, so a direct (non-pooled) URL exhausts the database's connection
+   limit. On Neon that is the `-pooler` host; on Supabase, the port-6543 transaction pooler.
 3. Run the schema once against the production database: `psql "$DATABASE_URL" -f scripts/schema.sql`.
-4. The cron in `vercel.json` (`*/30 * * * *`) runs the health sweep automatically.
+4. Set up the health sweep — see below. It is **not** automatic.
 
-## Deploy elsewhere (Railway, Fly, VPS, …)
+### Scheduling the health sweep
 
-The app runs anywhere Next.js does — `pnpm build` then `pnpm start` (the platform's `PORT` is
-respected automatically). Set the same environment variables as above and run
-`scripts/schema.sql` once against your database.
+Without a scheduler nothing auto-disables dead sources, so this step is required.
 
-**Important:** `vercel.json` cron only runs on Vercel. On other hosts the health sweep will not
-fire on its own, so nothing auto-disables dead sources. Trigger it externally instead — a ready-made
-GitHub Action is included at `.github/workflows/health-cron.yml`:
+`vercel.json` deliberately contains **no `crons` block**. Vercel's Hobby plan caps cron jobs at
+once per day, and a more frequent expression there does not merely get throttled — it makes the
+deployment fail outright. Once a day is far too coarse for a pool health sweep.
+
+Use the included GitHub Actions workflows instead (`.github/workflows/health-cron.yml`, every 15
+minutes, and `monochrome-cron.yml`, every 12 hours). They only `curl` a URL, so they work on any
+host:
 
 1. In this repo's **Settings → Secrets and variables → Actions**, add:
-   - `HEALTH_URL` = your deployment's base URL (e.g. `https://archivepool.up.railway.app`).
+   - `HEALTH_URL` = your deployment's base URL (e.g. `https://archivepool.vercel.app`).
    - `CRON_SECRET` = the same value you set on the deployment.
-2. The workflow pings `GET /api/cron/health` every 15 minutes (and can be run manually from the
-   Actions tab). Any external scheduler that sends `Authorization: Bearer <CRON_SECRET>` works too.
+2. Both can also be run manually from the Actions tab. Any external scheduler that sends
+   `Authorization: Bearer <CRON_SECRET>` works too.
+
+On a **Pro** plan you may instead add a native `crons` block to `vercel.json` — if you do, delete
+these workflows so the sweep does not run twice.
+
+## Deploy elsewhere (Fly, VPS, …)
+
+The app runs anywhere Next.js does — `pnpm build` then `pnpm start` (the platform's `PORT` is
+respected automatically). Set the same environment variables, run `scripts/schema.sql` once
+against your database, and configure the same GitHub Actions scheduler described above.
 
 ## API
 

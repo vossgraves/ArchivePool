@@ -1,12 +1,16 @@
 name: Monochrome instance sync cron
 
-# Pings the deployed site's /api/cron/monochrome endpoint every 12 hours.
-# Use this when hosting somewhere that does not run vercel.json cron jobs
-# (e.g. Railway, Fly, a VPS). The endpoint fetches monochrome.tf/instances.json,
-# health-checks any new Tidal instances, and adds passing ones to the pool.
+# Pings the deployed site's /api/cron/monochrome endpoint every 12 hours. The endpoint fetches
+# monochrome.tf/instances.json, health-checks any new Tidal instances, and adds passing ones to
+# the pool. Host-agnostic: it just curls a URL, so it works on Vercel, Fly, a VPS, or anywhere.
+#
+# This is the scheduler even on Vercel. vercel.json crons are capped at once per DAY on the
+# Hobby plan -- and a more frequent expression there makes the deployment itself fail. Keep this
+# workflow as the real schedule; only move to a native vercel.json cron on Pro, and delete this
+# file if you do, so the sync does not run twice.
 #
 # Required repo secrets (Settings -> Secrets and variables -> Actions):
-#   HEALTH_URL   - Base URL of the deployed site, e.g. https://archivepool.up.railway.app
+#   HEALTH_URL   - Base URL of the deployed site, e.g. https://archivepool.vercel.app
 #   CRON_SECRET  - Same value as the CRON_SECRET env var on the deployed site.
 
 on:

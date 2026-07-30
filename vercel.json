@@ -1,12 +1,4 @@
 {
-  "crons": [
-    {
-      "path": "/api/cron/health",
-      "schedule": "*/30 * * * *"
-    },
-    {
-      "path": "/api/cron/monochrome",
-      "schedule": "0 */12 * * *"
-    }
-  ]
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs"
 }

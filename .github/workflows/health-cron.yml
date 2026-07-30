@@ -1,10 +1,16 @@
 name: Health check cron
 
-# Pings the deployed site's /api/cron/health endpoint on a schedule. Use this when hosting
-# somewhere that does not run vercel.json cron jobs (e.g. Railway, Fly, a VPS).
+# Pings the deployed site's /api/cron/health endpoint on a schedule. Host-agnostic: it just
+# curls a URL, so it works on Vercel, Fly, a VPS, or anywhere else.
+#
+# This is the scheduler even on Vercel. vercel.json crons are capped at once per DAY on the
+# Hobby plan -- and a more frequent expression there makes the deployment itself fail -- which
+# is far too coarse for a pool health sweep. Keep this workflow as the real schedule; only move
+# to a native vercel.json cron on Pro, and delete this file if you do, so the sweep does not
+# run twice.
 #
 # Required repo secrets (Settings -> Secrets and variables -> Actions):
-#   HEALTH_URL   - Base URL of the deployed site, e.g. https://archivepool.up.railway.app
+#   HEALTH_URL   - Base URL of the deployed site, e.g. https://archivepool.vercel.app
 #   CRON_SECRET  - Same value as the CRON_SECRET env var on the deployed site.
 
 on:
