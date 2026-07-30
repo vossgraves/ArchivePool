@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server"
 import { verifyReadKey } from "@/lib/api-keys"
 import { clientEncryptionEnabled } from "@/lib/crypto"
-import { getAlivePool } from "@/lib/queries"
+import { leasePool } from "@/lib/queries"
 
 export const dynamic = "force-dynamic"
 
@@ -24,7 +24,10 @@ export async function GET(req: NextRequest) {
     )
   }
 
-  const pool = await getAlivePool()
+  // Leases a few entries per category rather than returning the whole pool, so a leaked key
+  // (or the POOL_CLIENT_KEY baked into the APK) exposes a handful of credentials instead of
+  // every one we hold. See LEASE_PER_CATEGORY for why this is not 1.
+  const { pool } = await leasePool()
   return NextResponse.json(
     {
       version: 1,

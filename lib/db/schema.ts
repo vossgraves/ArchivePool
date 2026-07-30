@@ -40,11 +40,15 @@ export const sourceEntries = pgTable(
     disabled: boolean("disabled").notNull().default(false),
     removed: boolean("removed").notNull().default(false),
     lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
+    // When this entry was last handed to an app. Drives least-recently-leased rotation, so one
+    // entry does not absorb all traffic and get itself rate-limited or banned.
+    lastLeasedAt: timestamp("last_leased_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
     serviceKindIdx: index("idx_source_entries_service_kind").on(t.service, t.kind),
     activeIdx: index("idx_source_entries_active").on(t.status, t.disabled, t.removed),
+    leaseIdx: index("idx_source_entries_lease").on(t.service, t.kind, t.premium, t.lastLeasedAt),
   }),
 )
 
