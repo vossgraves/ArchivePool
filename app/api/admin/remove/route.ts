@@ -41,6 +41,13 @@ export async function GET(req: NextRequest) {
       removed: r.removed,
       consecutiveFailures: r.consecutiveFailures,
       lastCheckedAt: r.lastCheckedAt,
+      // Health metrics for the per-source admin tables. `payload` is deliberately never
+      // included: it holds the donor credential, and only the masked `label` may leave.
+      detail: r.detail,
+      latencyMs: r.latencyMs,
+      checkCount: r.checkCount,
+      okCount: r.okCount,
+      createdAt: r.createdAt,
     })),
   })
 }

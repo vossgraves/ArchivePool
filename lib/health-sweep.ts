@@ -84,3 +84,65 @@ export async function runHealthSweep(force = false) {
   await db.execute(sql`delete from health_log where checked_at < now() - interval '30 days'`)
   return { checked, skipped, disabled, reenabled }
 }
+
+/**
+ * Check exactly one entry and persist the result, using the same rules as the full sweep
+ * (auto-disable threshold, health_log append, at-rest payload migration). Used by the admin
+ * panel so a single suspect account can be re-verified without sweeping the whole pool.
+ */
+export async function checkEntryById(id: number) {
+  const [entry] = await db.select().from(sourceEntries).where(eq(sourceEntries.id, id)).limit(1)
+  if (!entry) return null
+  if (entry.kind === "account" && !atRestEncryptionEnabled()) {
+    throw new Error("POOL_ENCRYPTION_KEY is required to process account credentials")
+  }
+
+  const plaintextPayload = decryptAtRest(entry.payload)
+  // Migrate before checking: a Tidal check can rotate its refresh token, so writing the
+  // migrated payload afterwards would clobber the newly issued credential.
+  await db
+    .update(sourceEntries)
+    .set({ payload: encryptAtRest(plaintextPayload) })
+    .where(eq(sourceEntries.id, entry.id))
+
+  const result = await runCheck(entry.service as Service, entry.kind as Kind, plaintextPayload, entry.fingerprint)
+
+  const nextConsecutive = result.ok ? 0 : entry.consecutiveFailures + 1
+  let nextDisabled = entry.disabled
+  if (!result.ok && nextConsecutive >= AUTO_DISABLE_AFTER) nextDisabled = true
+  else if (result.ok && entry.disabled) nextDisabled = false
+
+  await db
+    .update(sourceEntries)
+    .set({
+      status: result.status,
+      premium: result.premium,
+      detail: result.detail,
+      latencyMs: result.latencyMs,
+      consecutiveFailures: nextConsecutive,
+      disabled: nextDisabled,
+      checkCount: sql`${sourceEntries.checkCount} + 1`,
+      okCount: sql`${sourceEntries.okCount} + ${result.ok ? 1 : 0}`,
+      lastCheckedAt: new Date(),
+    })
+    .where(eq(sourceEntries.id, entry.id))
+
+  await db.insert(healthLog).values({
+    entryId: entry.id,
+    ok: result.ok,
+    premium: result.premium,
+    latencyMs: result.latencyMs,
+    detail: result.detail,
+  })
+
+  return {
+    id: entry.id,
+    ok: result.ok,
+    status: result.status,
+    premium: result.premium,
+    detail: result.detail,
+    latencyMs: result.latencyMs,
+    consecutiveFailures: nextConsecutive,
+    disabled: nextDisabled,
+  }
+}
