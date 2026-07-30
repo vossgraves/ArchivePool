@@ -12,6 +12,13 @@ interface StatusPayload {
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json() as Promise<StatusPayload>)
 
+/*
+ * Number of skeleton placeholders to show before the first payload arrives. Mirrors
+ * CATEGORIES.length in lib/sources.ts — inlined rather than imported because that module pulls in
+ * node:crypto, which has no business in a client bundle. If a category is added there, bump this.
+ */
+const SKELETON_COUNT = 5
+
 const HEALTH: Record<
   CategoryStatus["health"],
   { label: string; dot: string; text: string; bar: string }
@@ -68,10 +75,16 @@ function SegmentBar({ cat }: { cat: CategoryStatus }) {
   const total = Math.max(cat.total, 1)
   const premium = cat.premium
   const aliveOnly = Math.max(cat.alive - cat.premium, 0)
+  /*
+   * Emphasis descends premium > alive > pending > dead. `aliveOnly` deliberately does NOT use a
+   * full-strength `bg-foreground`: white is the brightest token on the page, so a category of
+   * non-premium entries outshouted the green premium ones and an all-white bar on a DEGRADED card
+   * read as "all good". Dimming it puts the signal colours back on top.
+   */
   const segments = [
     { w: premium / total, cls: "bg-ok" },
-    { w: aliveOnly / total, cls: "bg-foreground" },
-    { w: cat.pending / total, cls: "bg-muted-foreground/40" },
+    { w: aliveOnly / total, cls: "bg-foreground/40" },
+    { w: cat.pending / total, cls: "bg-muted-foreground/30" },
     { w: cat.dead / total, cls: "bg-destructive/60" },
   ].filter((s) => s.w > 0)
 
@@ -102,7 +115,15 @@ function DetailStat({ label, value, tone }: { label: string; value: string | num
   )
 }
 
-function StatusCard({ cat, index }: { cat: CategoryStatus; index: number }) {
+function StatusCard({
+  cat,
+  index,
+  wide,
+}: {
+  cat: CategoryStatus
+  index: number
+  wide?: boolean
+}) {
   const [open, setOpen] = useState(false)
   const cfg = HEALTH[cat.health]
   return (
@@ -111,13 +132,15 @@ function StatusCard({ cat, index }: { cat: CategoryStatus; index: number }) {
       initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.4, delay: index * 0.06, ease: "easeOut" }}
-      className="overflow-hidden rounded-xl border border-border bg-card"
+      className={`overflow-hidden rounded-xl border border-border bg-card edge-lit ${
+        wide ? "sm:col-span-2" : ""
+      }`}
     >
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        className="flex w-full flex-col gap-4 p-5 text-left transition-colors hover:bg-secondary/40"
+        className="flex w-full flex-col gap-4 p-5 text-left transition-colors duration-200 hover:bg-secondary/40"
       >
         <div className="flex items-start justify-between gap-3">
           <div className="flex flex-col gap-1">
@@ -209,7 +232,7 @@ export function StatusBoard({ fallback }: { fallback?: StatusPayload }) {
         initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4, ease: "easeOut" }}
-        className="flex flex-col gap-4 rounded-xl border border-border bg-card p-6 sm:flex-row sm:items-center sm:justify-between"
+        className="flex flex-col gap-4 rounded-xl border border-border bg-card p-6 edge-lit sm:flex-row sm:items-center sm:justify-between"
       >
         <div className="flex items-center gap-3">
           <span className="relative flex h-3.5 w-3.5">
@@ -231,15 +254,29 @@ export function StatusBoard({ fallback }: { fallback?: StatusPayload }) {
       </motion.div>
 
       {isLoading && !data ? (
+        // Skeletons mirror the real card height and count so nothing shifts when data lands.
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          {[0, 1, 2, 3].map((i) => (
-            <div key={i} className="h-[152px] animate-pulse rounded-xl border border-border bg-card" />
+          {Array.from({ length: SKELETON_COUNT }).map((_, i) => (
+            <div
+              key={i}
+              className={`h-[152px] animate-pulse rounded-xl border border-border bg-card ${
+                i === SKELETON_COUNT - 1 && SKELETON_COUNT % 2 === 1 ? "sm:col-span-2" : ""
+              }`}
+            />
           ))}
         </div>
       ) : (
         <motion.div layout className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           {categories.map((cat, i) => (
-            <StatusCard key={`${cat.service}-${cat.kind}`} cat={cat} index={i} />
+            <StatusCard
+              key={`${cat.service}-${cat.kind}`}
+              cat={cat}
+              index={i}
+              // There are an odd number of categories (Deezer is account-only, so it has no API
+              // tier). Left alone the final card orphans in a half-width column; spanning it
+              // closes the row instead.
+              wide={i === categories.length - 1 && categories.length % 2 === 1}
+            />
           ))}
         </motion.div>
       )}

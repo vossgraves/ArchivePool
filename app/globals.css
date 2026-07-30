@@ -87,87 +87,112 @@
   --sidebar-ring: oklch(0.708 0 0);
 }
 
+/*
+ * Single dark definition. `layout.tsx` hardcodes `class="dark"` on <html>, so this is the only
+ * theme that ever renders. A second `@media (prefers-color-scheme: dark)` block used to live
+ * below this one targeting `:root:not(.light)` — specificity (0,2,0) against this block's
+ * (0,1,0) — so it silently WON and users saw a different background depending on their OS
+ * preference (0.145 tinted vs the 0 pure black set here). Collapsed into one source of truth.
+ *
+ * Neutrals carry a trace of cool chroma (hue 255) instead of being pure achromatic gray. Pure
+ * `oklch(x 0 0)` reads as flat and screen-like; a slight tint makes the surfaces feel intentional
+ * and lets the status colours sit on them without clashing.
+ *
+ * Note there is deliberately NO brand accent hue. On a status board the only saturated colour
+ * should be signal — ok / warn / destructive — so a decorative accent would compete with the
+ * exact thing the page exists to communicate. Identity comes from type, texture and surface.
+ */
 .dark {
   color-scheme: dark;
-  --background: oklch(0 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.16 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.16 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.985 0 0);
-  --primary-foreground: oklch(0.145 0 0);
-  --secondary: oklch(0.24 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.22 0 0);
-  --muted-foreground: oklch(0.65 0 0);
-  --accent: oklch(0.24 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --ok: oklch(0.72 0.15 155);
-  --warn: oklch(0.8 0.15 80);
-  --border: oklch(1 0 0 / 14%);
-  --input: oklch(1 0 0 / 18%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not(.light) {
-    color-scheme: dark;
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.922 0 0);
-    --primary-foreground: oklch(0.205 0 0);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --ok: oklch(0.72 0.15 155);
-    --warn: oklch(0.8 0.15 80);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.556 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.556 0 0);
-  }
+  --background: oklch(0.145 0.008 255);
+  --foreground: oklch(0.97 0.003 255);
+  --card: oklch(0.185 0.009 255);
+  --card-foreground: oklch(0.97 0.003 255);
+  --popover: oklch(0.185 0.009 255);
+  --popover-foreground: oklch(0.97 0.003 255);
+  --primary: oklch(0.97 0.003 255);
+  --primary-foreground: oklch(0.17 0.008 255);
+  --secondary: oklch(0.245 0.01 255);
+  --secondary-foreground: oklch(0.97 0.003 255);
+  --muted: oklch(0.235 0.01 255);
+  --muted-foreground: oklch(0.685 0.014 255);
+  --accent: oklch(0.245 0.01 255);
+  --accent-foreground: oklch(0.97 0.003 255);
+  /* Signal colours. Saturation stays under ~80% so they read as data, not alarm. */
+  --destructive: oklch(0.665 0.185 22);
+  --ok: oklch(0.74 0.142 158);
+  --warn: oklch(0.795 0.145 78);
+  --border: oklch(1 0 0 / 11%);
+  --input: oklch(1 0 0 / 16%);
+  --ring: oklch(0.685 0.014 255);
+  --chart-1: oklch(0.87 0.003 255);
+  --chart-2: oklch(0.6 0.012 255);
+  --chart-3: oklch(0.48 0.012 255);
+  --chart-4: oklch(0.38 0.011 255);
+  --chart-5: oklch(0.28 0.01 255);
+  --sidebar: oklch(0.185 0.009 255);
+  --sidebar-foreground: oklch(0.97 0.003 255);
+  --sidebar-primary: oklch(0.97 0.003 255);
+  --sidebar-primary-foreground: oklch(0.17 0.008 255);
+  --sidebar-accent: oklch(0.245 0.01 255);
+  --sidebar-accent-foreground: oklch(0.97 0.003 255);
+  --sidebar-border: oklch(1 0 0 / 11%);
+  --sidebar-ring: oklch(0.685 0.014 255);
 }
 
 @layer base {
   * {
     @apply border-border outline-ring/50;
   }
+
+  html {
+    /* In-page anchors glide instead of teleporting. */
+    scroll-behavior: smooth;
+  }
+
   body {
     @apply bg-background text-foreground;
+    /* Data-heavy page: keep digits the same width so counts don't jitter as they tick. */
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Keyboard users get an unmistakable ring; mouse users are not nagged by one. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer utilities {
+  /*
+   * Fine film grain, fixed to the viewport. Breaks the digital flatness of large empty dark
+   * surfaces without reading as a visible texture. `pointer-events-none` so it never eats clicks.
+   */
+  .grain::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    pointer-events: none;
+    opacity: 0.028;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  /* Hairline top highlight — suggests a single light source above the surface. */
+  .edge-lit {
+    box-shadow: inset 0 1px 0 0 oklch(1 0 0 / 6%);
   }
 }
