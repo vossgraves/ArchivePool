@@ -7,7 +7,12 @@ __v0_jsx-dev-runtime.ts
 .vercel/
 
 # Environment variables
-.env*.local
+# `.env*.local` alone does NOT match a bare `.env`, so a file created with that exact name
+# would have been committed with live credentials in it. Ignore every .env variant and
+# un-ignore only the checked-in template.
+.env
+.env.*
+!.env.example
 
 # Common ignores
 node_modules

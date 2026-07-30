@@ -157,7 +157,8 @@ export function AdminKeys() {
           Admin token
         </label>
         <p className="mb-3 mt-1 text-xs leading-relaxed text-muted-foreground">
-          The value of your ADMIN_TOKEN environment variable.
+          Your admin token. The server stores only its SHA-256 hash (ADMIN_TOKEN_HASH), so keep
+          this value somewhere safe &mdash; it cannot be recovered from the environment.
         </p>
         <input
           id="admin-token"

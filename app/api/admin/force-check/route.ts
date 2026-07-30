@@ -1,15 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server"
+import { isAdminAuthorized as authorized } from "@/lib/admin-auth"
 import { runHealthSweep } from "@/lib/health-sweep"
 import { syncMonochromeInstances } from "@/lib/monochrome"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 60
-
-function authorized(req: NextRequest): boolean {
-  const adminToken = process.env.ADMIN_TOKEN
-  if (!adminToken) return false
-  return req.headers.get("authorization") === `Bearer ${adminToken}`
-}
 
 /**
  * POST /api/admin/force-check

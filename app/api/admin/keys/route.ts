@@ -1,13 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server"
+import { isAdminAuthorized as authorized } from "@/lib/admin-auth"
 import { createApiKey, listApiKeys, setKeyRevoked } from "@/lib/api-keys"
 
 export const dynamic = "force-dynamic"
-
-function authorized(req: NextRequest): boolean {
-  const adminToken = process.env.ADMIN_TOKEN
-  if (!adminToken) return false
-  return req.headers.get("authorization") === `Bearer ${adminToken}`
-}
 
 // List all keys (no hashes / plaintext ever returned).
 export async function GET(req: NextRequest) {

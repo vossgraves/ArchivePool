@@ -1,15 +1,10 @@
 import { and, eq } from "drizzle-orm"
 import { NextResponse, type NextRequest } from "next/server"
+import { isAdminAuthorized as authorized } from "@/lib/admin-auth"
 import { db } from "@/lib/db"
 import { sourceEntries } from "@/lib/db/schema"
 
 export const dynamic = "force-dynamic"
-
-function authorized(req: NextRequest): boolean {
-  const adminToken = process.env.ADMIN_TOKEN
-  if (!adminToken) return false
-  return req.headers.get("authorization") === `Bearer ${adminToken}`
-}
 
 // Bulk-removes every entry whose status is "dead" and hasn't been removed yet.
 export async function POST(req: NextRequest) {
