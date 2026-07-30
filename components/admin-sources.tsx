@@ -44,11 +44,24 @@ type StatusFilter = "active" | "alive" | "problem" | "removed" | "all"
 
 const FILTERS: { value: StatusFilter; label: string }[] = [
   { value: "active", label: "Active" },
-  { value: "alive", label: "Alive" },
+  // "Serving" rather than "Alive": this includes preview-status entries and excludes disabled
+  // ones, matching what /api/sources actually hands out.
+  { value: "alive", label: "Serving" },
   { value: "problem", label: "Needs attention" },
   { value: "removed", label: "Removed" },
   { value: "all", label: "All" },
 ]
+
+/**
+ * Mirrors the getAlivePool() filter in lib/queries.ts, which is what /api/sources actually
+ * hands to the app: not removed, not disabled, status in ('alive','preview'). Tidal API keys
+ * commonly sit at "preview" while serving fine, and a disabled entry is never handed out even
+ * though its status may still read "alive" — so both cases must be honoured here or the counts
+ * and the last-entry warning disagree with what the pool really serves.
+ */
+function isServable(e: EntryRow): boolean {
+  return !e.removed && !e.disabled && (e.status === "alive" || e.status === "preview")
+}
 
 function relativeTime(iso: string | null): string {
   if (!iso) return "never"
@@ -172,13 +185,12 @@ export function AdminSources() {
 
   const category = CATEGORIES[activeTab]
 
+  // Counts what the app would actually be served, so the number matches reality rather than a
+  // looser "not removed" tally. See isServable: `preview` counts, `disabled` does not.
   const perTabCounts = useMemo(
     () =>
       CATEGORIES.map(
-        (c) =>
-          entries.filter(
-            (e) => e.service === c.service && e.kind === c.kind && !e.removed && e.status === "alive",
-          ).length,
+        (c) => entries.filter((e) => e.service === c.service && e.kind === c.kind && isServable(e)).length,
       ),
     [entries],
   )
@@ -189,7 +201,7 @@ export function AdminSources() {
       if (filter === "all") return true
       if (filter === "removed") return e.removed
       if (filter === "active") return !e.removed
-      if (filter === "alive") return !e.removed && e.status === "alive" && !e.disabled
+      if (filter === "alive") return isServable(e)
       return !e.removed && (e.disabled || e.status === "dead" || e.consecutiveFailures > 0)
     })
     // Surface the entries that need attention first, then the healthy ones.
@@ -199,10 +211,10 @@ export function AdminSources() {
     })
   }, [entries, category, filter])
 
-  // The last alive entry in a category is called out, because removing it takes the whole
+  // The last servable entry in a category is called out, because removing it takes the whole
   // source offline for every app until a replacement is contributed.
   const aliveInCategory = entries.filter(
-    (e) => e.service === category.service && e.kind === category.kind && !e.removed && e.status === "alive",
+    (e) => e.service === category.service && e.kind === category.kind && isServable(e),
   ).length
 
   if (!authed) {
@@ -297,7 +309,7 @@ export function AdminSources() {
 
       {aliveInCategory === 1 && filter !== "removed" ? (
         <p className="mx-5 mb-3 rounded-md border border-border bg-secondary px-3 py-2 text-xs leading-relaxed">
-          Only one alive entry remains in {category.label}. Removing it takes this source offline for
+          Only one serving entry remains in {category.label}. Removing it takes this source offline for
           every app until a replacement is contributed.
         </p>
       ) : null}
@@ -316,7 +328,7 @@ export function AdminSources() {
             const result = checked[row.id]
             const rate = row.checkCount > 0 ? Math.round((row.okCount / row.checkCount) * 100) : null
             const isBusy = busyId === row.id
-            const isLastAlive = aliveInCategory === 1 && !row.removed && row.status === "alive"
+            const isLastAlive = aliveInCategory === 1 && isServable(row)
             return (
               <li key={row.id} className="rounded-md border border-border p-3 text-xs">
                 <div className="flex items-baseline justify-between gap-2">
@@ -437,7 +449,7 @@ export function AdminSources() {
                 const result = checked[row.id]
                 const rate = row.checkCount > 0 ? Math.round((row.okCount / row.checkCount) * 100) : null
                 const isBusy = busyId === row.id
-                const isLastAlive = aliveInCategory === 1 && !row.removed && row.status === "alive"
+                const isLastAlive = aliveInCategory === 1 && isServable(row)
                 return (
                   <tr key={row.id} className="border-b border-border/60 last:border-0 align-top">
                     <td className="px-5 py-3">
