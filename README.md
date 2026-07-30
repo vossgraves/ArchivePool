@@ -66,7 +66,33 @@ without the client key and HTTP 401 without a read key; it never falls back to p
 delivery. **Note:** a key embedded in a distributed app can be extracted by decompiling it — true
 secrecy from app users requires proxying playback through the server so tokens never reach clients.
 
-## Deploy to Vercel
+## Deploy to Vercel (automated)
+
+`scripts/deploy-vercel.sh` does the whole migration in one run: sets every env var, applies the
+schema, deploys, verifies the admin auth fails closed, wires up the cron secrets, and points the
+Android app's CI at the new URL. It is idempotent, so re-running is safe.
+
+```bash
+export VERCEL_TOKEN=...          # https://vercel.com/account/tokens
+export DATABASE_URL=...          # POOLED connection string
+export POOL_ENCRYPTION_KEY=...   # copy VERBATIM from the old host
+export POOL_CLIENT_KEY=...       # copy VERBATIM from the old host
+./scripts/deploy-vercel.sh
+```
+
+It prints the generated admin token once at the end — save it, since only the SHA-256 hash is
+stored server-side and the token cannot be recovered.
+
+> **`POOL_ENCRYPTION_KEY` and `POOL_CLIENT_KEY` must be copied from the host you are migrating
+> off.** The script refuses to generate them: stored account payloads are AES-GCM ciphertext keyed
+> to `POOL_ENCRYPTION_KEY`, so a fresh key makes every existing Tidal/Qobuz account permanently
+> undecryptable, and `POOL_CLIENT_KEY` must match the app's `BuildConfig.POOL_CLIENT_KEY` or the
+> feed cannot be decrypted client-side.
+
+The script aborts if the deployed admin route accepts a wrong token, so a broken auth
+configuration can never get as far as being wired up and pointed at by the app.
+
+## Deploy to Vercel (manual)
 
 1. Push this repo to your own GitHub, then "Import Project" on Vercel.
 2. Set the environment variables from the table above in Project Settings → Environment
