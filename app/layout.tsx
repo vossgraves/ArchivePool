@@ -38,7 +38,9 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   colorScheme: "dark",
   // Matches --background so mobile browser chrome blends into the page instead of banding.
-  themeColor: "#0a0b0d",
+  // Sampled from the rendered body rather than guessed: --background is authored in oklch, and
+  // the hand-written value here was a shade off.
+  themeColor: "#080a0d",
 }
 
 export default function RootLayout({

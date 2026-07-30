@@ -1,4 +1,5 @@
 import Link from "next/link"
+import { BrandMark } from "@/components/brand-mark"
 
 const NAV = [
   { href: "/", label: "Status", key: "status" as const },
@@ -16,9 +17,9 @@ export function SiteHeader({ active }: { active?: "status" | "submit" }) {
           href="/"
           className="group flex items-center gap-2.5 rounded-md transition-opacity hover:opacity-80"
         >
-          <span className="flex h-7 w-7 items-center justify-center rounded-[7px] border border-border bg-secondary font-mono text-[0.7rem] font-semibold tracking-tight edge-lit">
-            AT
-          </span>
+          {/* The actual app icon, so the site reads as part of ArchiveTune rather than adjacent
+              to it. Replaces a text "AT" placeholder. */}
+          <BrandMark size={28} />
           <span className="flex flex-col leading-none">
             <span className="text-sm font-semibold tracking-tight">Source Pool</span>
             <span className="mt-0.5 font-mono text-[0.65rem] uppercase tracking-[0.14em] text-muted-foreground">

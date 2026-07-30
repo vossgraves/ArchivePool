@@ -1,4 +1,5 @@
 import { ImageResponse } from "next/og"
+import { BRAND_MARK } from "@/components/brand-mark"
 
 export const alt = "ArchiveTune Source Pool — live status for Tidal, Qobuz and Deezer sources"
 export const size = { width: 1200, height: 630 }
@@ -18,29 +19,32 @@ export default function OpengraphImage() {
         display: "flex",
         flexDirection: "column",
         justifyContent: "space-between",
-        backgroundColor: "#0a0b0d",
+        backgroundColor: "#080a0d",
         padding: "72px",
         fontFamily: "sans-serif",
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            width: "44px",
-            height: "44px",
-            borderRadius: "10px",
-            backgroundColor: "#22242a",
-            border: "1px solid rgba(255,255,255,0.14)",
-            color: "#f5f6f7",
-            fontSize: "18px",
-            fontWeight: 600,
-          }}
-        >
-          AT
-        </div>
+        {/* The real app mark, sharing its geometry with components/brand-mark.tsx and
+            app/icon.svg. Satori cannot import an SVG file or read CSS variables, so the paths and
+            colours come through the exported BRAND_MARK constants instead of being retyped. */}
+        <svg width="46" height="46" viewBox="0 0 185 185">
+          <circle cx="92.5" cy="92.5" r="92.5" fill={BRAND_MARK.disc} />
+          {/* Ring is invisible on this dark card, but kept so the mark is identical everywhere. */}
+          <circle
+            cx="92.5"
+            cy="92.5"
+            r="90.5"
+            fill="none"
+            stroke={BRAND_MARK.navy}
+            strokeOpacity="0.16"
+            strokeWidth="4"
+          />
+          <g fill={BRAND_MARK.navy} transform={BRAND_MARK.recentre}>
+            <path d={BRAND_MARK.PATH_BAR} />
+            <path d={BRAND_MARK.PATH_STEM} />
+          </g>
+        </svg>
         <div
           style={{
             display: "flex",
