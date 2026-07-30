@@ -16,6 +16,18 @@ export const metadata: Metadata = {
   description:
     "Live health for the community-contributed Tidal, Qobuz and Deezer sources behind ArchiveTune. Every entry is checked on a schedule; only passing entries are served.",
   applicationName: "ArchiveTune Source Pool",
+  // Without this, Next resolves the opengraph-image to http://localhost:3000 in production and
+  // the social preview silently breaks. Prefers an explicit site URL, then the deploy URL the
+  // host injects (VERCEL_URL on Vercel, RAILWAY_PUBLIC_DOMAIN on Railway, neither of which
+  // includes a scheme), and only falls back to localhost for local dev.
+  metadataBase: new URL(
+    process.env.NEXT_PUBLIC_SITE_URL ??
+      (process.env.VERCEL_PROJECT_PRODUCTION_URL
+        ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
+        : process.env.RAILWAY_PUBLIC_DOMAIN
+          ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+          : "http://localhost:3000"),
+  ),
   openGraph: {
     title: "ArchiveTune Source Pool",
     description:
