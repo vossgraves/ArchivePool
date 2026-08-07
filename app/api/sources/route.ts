@@ -5,11 +5,11 @@ import { leasePool } from "@/lib/queries"
 
 export const dynamic = "force-dynamic"
 
-// Sensitive pool consumed by apps. Reading always requires a valid per-app key sent as
-// `Authorization: Bearer <key>` or `x-api-key`. The public status page never hits this route.
+// Sensitive pool consumed by apps. Reading requires a valid per-app key when READ_KEYS_ENFORCED=true.
+// When READ_KEYS_ENFORCED is absent or false, the endpoint is open so APKs without a baked-in key
+// (Mhsm nightly, 4nx3b dev builds) can still fetch. Flip the env var to true to require keys.
 export async function GET(req: NextRequest) {
-  // Account credentials must never fall back to a public or plaintext response. Discovery feeds
-  // remain separately configurable because they contain only public instance URLs.
+  // Account credentials must never fall back to a plaintext response when client encryption is off.
   if (!clientEncryptionEnabled()) {
     return NextResponse.json(
       { error: "security_not_configured", detail: "Credential delivery is unavailable." },
@@ -17,7 +17,9 @@ export async function GET(req: NextRequest) {
     )
   }
 
-  if (!(await verifyReadKey(req, true))) {
+  // alwaysEnforce=false: honours the READ_KEYS_ENFORCED env var so the gate can be toggled
+  // without a code deploy. Default is open (READ_KEYS_ENFORCED unset or "false").
+  if (!(await verifyReadKey(req, false))) {
     return NextResponse.json(
       { error: "unauthorized", detail: "A valid API key is required to read the source pool." },
       { status: 401, headers: { "cache-control": "private, no-store" } },
