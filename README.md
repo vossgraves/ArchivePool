@@ -131,6 +131,9 @@ against your database, and configure the same GitHub Actions scheduler described
 
 ## API
 
+Full reference (endpoints, auth, encryption format, curl examples, error codes):
+**[`docs/API.md`](docs/API.md)**.
+
 Public (no auth, CORS-open):
 
 - `GET /api/status` — aggregate health per service/kind for the status page.
