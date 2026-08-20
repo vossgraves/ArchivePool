@@ -222,6 +222,35 @@ Request: `{ "id": 42 }` → `{ "ok": true, "result": { ... } }`. `404` when unkn
 
 ---
 
+## App feedback (open when `READ_KEYS_ENFORCED=false`)
+
+### `POST /api/report`
+
+Apps report what they observed at playback time, so dead or wrongly-flagged entries stop being
+leased without waiting for the next sweep — and without apps hammering the pool's database
+re-checking every credential.
+
+Request (`Authorization: Bearer <read key>` when enforcement is on; open otherwise):
+
+```json
+{ "service": "deezer", "kind": "account", "id": 42, "report": "dead" }
+```
+
+- `report: "dead"` — the credential refused playback (expired ARL, revoked token). The entry is
+  demoted to `pending`; after 3 reports it is disabled and no longer served. The hourly sweep
+  re-verifies and can re-enable it if the server-side check disagrees.
+- `report: "not_premium"` — the credential works but lacks the premium tier the pool believed it
+  had. Clears the `premium` flag so premium-first lease ordering stops preferring it.
+
+Target by `id` (from `/api/sources`) or `fingerprint`. Responses: `200 { ok, entryId, action }`,
+`400` invalid body/service/kind/report, `404` unknown entry, `401` key required and invalid.
+
+```bash
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"service":"deezer","kind":"account","id":42,"report":"dead"}' \
+  https://archivepool.vercel.app/api/report
+```
+
 ## Submissions
 
 Submissions are handled by the web UI (`/submit`) through a Next.js server action

@@ -153,6 +153,7 @@ Admin (require `Authorization: Bearer $ADMIN_TOKEN`):
 - `DELETE /api/admin/keys?id=<id>` — revoke a key.
 - `POST /api/admin/remove` — hard-remove a source entry.
 - `GET /api/cron/health` — run a health sweep on demand.
+- `POST /api/report` — apps declare dead / non-premium credentials (see `docs/API.md`).
 
 ## Read keys
 
