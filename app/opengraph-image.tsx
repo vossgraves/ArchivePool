@@ -82,7 +82,7 @@ export default function OpengraphImage() {
             }}
           />
           <div style={{ display: "flex", color: "#a2a6ad", fontSize: "28px" }}>
-            Tidal · Qobuz · Deezer — health-checked every 30 minutes
+            Tidal · Qobuz · Deezer — health-checked hourly
           </div>
         </div>
       </div>

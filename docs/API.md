@@ -146,7 +146,7 @@ so the app treats it as "no contributed instances" rather than crashing.
 ### `GET /api/cron/health`
 
 Runs one health sweep (and the monochrome instance sync). Used by the GitHub Actions
-workflow in this repo every 15 minutes.
+workflow in this repo hourly.
 
 ```json
 { "ok": true, "checked": 0, "skipped": 0, "disabled": 0, "reenabled": 0, "ranAt": "..." }
@@ -315,7 +315,7 @@ App consumption:
 
 - **Vercel cron cap** — `vercel.json` deliberately has no `crons` block (Hobby caps at one
   per day, and a more frequent expression fails the deployment). The real scheduler is
-  `.github/workflows/health-cron.yml` (every 15 min) + `monochrome-cron.yml` (every 12 h),
+  `.github/workflows/health-cron.yml` (hourly) + `monochrome-cron.yml` (every 12 h),
   which just `curl` the cron routes with `CRON_SECRET`.
 - **Secrets to keep in sync** — `POOL_CLIENT_KEY` must be byte-identical between this site
   and the app builds; `POOL_ENCRYPTION_KEY` must survive database migrations or stored

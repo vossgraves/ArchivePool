@@ -110,8 +110,7 @@ Without a scheduler nothing auto-disables dead sources, so this step is required
 once per day, and a more frequent expression there does not merely get throttled — it makes the
 deployment fail outright. Once a day is far too coarse for a pool health sweep.
 
-Use the included GitHub Actions workflows instead (`.github/workflows/health-cron.yml`, every 15
-minutes, and `monochrome-cron.yml`, every 12 hours). They only `curl` a URL, so they work on any
+Use the included GitHub Actions workflows instead (`.github/workflows/health-cron.yml`, hourly, and `monochrome-cron.yml`, every 12 hours). They only `curl` a URL, so they work on any
 host:
 
 1. In this repo's **Settings → Secrets and variables → Actions**, add:

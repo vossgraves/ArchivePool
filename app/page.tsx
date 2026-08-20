@@ -14,7 +14,7 @@ export default function Page() {
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-ok opacity-70" />
               <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-ok" />
             </span>
-            Checked every 30 minutes
+            Checked hourly
           </span>
 
           {/* Tighter tracking and a heavier weight give the display line real presence; the
