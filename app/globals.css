@@ -76,7 +76,7 @@
   --chart-3: oklch(0.439 0 0);
   --chart-4: oklch(0.371 0 0);
   --chart-5: oklch(0.269 0 0);
-  --radius: 0.625rem;
+  --radius: 1rem;
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
   --sidebar-primary: oklch(0.205 0 0);
@@ -110,8 +110,10 @@
   --card-foreground: oklch(0.97 0.003 255);
   --popover: oklch(0.185 0.009 255);
   --popover-foreground: oklch(0.97 0.003 255);
-  --primary: oklch(0.97 0.003 255);
-  --primary-foreground: oklch(0.17 0.008 255);
+  /* ArchiveTune violet: the one brand accent. Reserved for primary actions,
+     links and the signed-in identity — never for status (that stays ok/warn). */
+  --primary: oklch(0.62 0.19 295);
+  --primary-foreground: oklch(0.985 0.005 295);
   --secondary: oklch(0.245 0.01 255);
   --secondary-foreground: oklch(0.97 0.003 255);
   --muted: oklch(0.235 0.01 255);
@@ -124,7 +126,7 @@
   --warn: oklch(0.795 0.145 78);
   --border: oklch(1 0 0 / 11%);
   --input: oklch(1 0 0 / 16%);
-  --ring: oklch(0.685 0.014 255);
+  --ring: oklch(0.62 0.19 295);
   --chart-1: oklch(0.87 0.003 255);
   --chart-2: oklch(0.6 0.012 255);
   --chart-3: oklch(0.48 0.012 255);

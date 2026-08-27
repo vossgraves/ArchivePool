@@ -81,11 +81,27 @@ export const apiKeys = pgTable("api_keys", {
   keyHash: text("key_hash").notNull().unique(),
   prefix: text("prefix").notNull(),
   revoked: boolean("revoked").notNull().default(false),
+  // Owning user (NULL for legacy/admin-created keys, which only /admin sees).
+  userId: integer("user_id").references(() => users.id),
   lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
   useCount: integer("use_count").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+})
+
+/**
+ * A site account. Users sign up with username + password to request and manage
+ * their own API keys from /dashboard. Passwords are stored as scrypt hashes
+ * (see lib/users.ts); sessions are HMAC-signed cookies (see lib/sessions.ts).
+ */
+export const users = pgTable("users", {
+  id: serial("id").primaryKey(),
+  username: text("username").notNull().unique(),
+  passwordHash: text("password_hash").notNull(),
+  disabled: boolean("disabled").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 })
 
 export type SourceEntry = typeof sourceEntries.$inferSelect
 export type NewSourceEntry = typeof sourceEntries.$inferInsert
 export type ApiKey = typeof apiKeys.$inferSelect
+export type User = typeof users.$inferSelect

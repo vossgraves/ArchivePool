@@ -77,6 +77,49 @@ export async function createApiKey(name: string): Promise<{ id: number; key: str
   return { id: row.id, key, prefix }
 }
 
+/**
+ * User: create a key owned by [userId]. Returns the one-time plaintext key —
+ * only its hash is persisted, so the dashboard must show it exactly once.
+ */
+export async function createUserApiKey(
+  userId: number,
+  name: string,
+): Promise<{ id: number; key: string; prefix: string }> {
+  const { key, keyHash, prefix } = generateKey()
+  const [row] = await db
+    .insert(apiKeys)
+    .values({ name, keyHash, prefix, userId })
+    .returning({ id: apiKeys.id })
+  return { id: row.id, key, prefix }
+}
+
+/** All keys owned by one user, newest first. Never returns hashes or plaintext. */
+export async function listUserApiKeys(userId: number) {
+  return db
+    .select({
+      id: apiKeys.id,
+      name: apiKeys.name,
+      prefix: apiKeys.prefix,
+      revoked: apiKeys.revoked,
+      useCount: apiKeys.useCount,
+      lastUsedAt: apiKeys.lastUsedAt,
+      createdAt: apiKeys.createdAt,
+    })
+    .from(apiKeys)
+    .where(eq(apiKeys.userId, userId))
+    .orderBy(desc(apiKeys.createdAt))
+}
+
+/** Revoke (or restore) a key by id, scoped to its owner. Returns rows updated. */
+export async function setUserKeyRevoked(userId: number, id: number, revoked: boolean) {
+  const updated = await db
+    .update(apiKeys)
+    .set({ revoked })
+    .where(and(eq(apiKeys.id, id), eq(apiKeys.userId, userId)))
+    .returning({ id: apiKeys.id })
+  return updated.length > 0
+}
+
 /** Admin: list keys (never returns hashes or plaintext). */
 export async function listApiKeys() {
   return db

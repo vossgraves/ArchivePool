@@ -21,3 +21,6 @@ node_modules
 .DS_Store
 .vercel
 .env*
+
+# Playwright e2e screenshot output (scripts/e2e.cjs)
+.e2e-screens/
