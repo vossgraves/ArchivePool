@@ -112,8 +112,10 @@
   --popover-foreground: oklch(0.97 0.003 255);
   /* ArchiveTune violet: the one brand accent. Reserved for primary actions,
      links and the signed-in identity — never for status (that stays ok/warn). */
-  --primary: oklch(0.62 0.19 295);
-  --primary-foreground: oklch(0.985 0.005 295);
+  /* Pure monochrome: the primary accent is near-white, exactly like the light theme's near-black.
+     No hue anywhere — status keeps ok/warn, everything else is grayscale. */
+  --primary: oklch(0.97 0.003 255);
+  --primary-foreground: oklch(0.17 0.008 255);
   --secondary: oklch(0.245 0.01 255);
   --secondary-foreground: oklch(0.97 0.003 255);
   --muted: oklch(0.235 0.01 255);
@@ -126,7 +128,7 @@
   --warn: oklch(0.795 0.145 78);
   --border: oklch(1 0 0 / 11%);
   --input: oklch(1 0 0 / 16%);
-  --ring: oklch(0.62 0.19 295);
+  --ring: oklch(0.685 0.014 255);
   --chart-1: oklch(0.87 0.003 255);
   --chart-2: oklch(0.6 0.012 255);
   --chart-3: oklch(0.48 0.012 255);

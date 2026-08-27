@@ -49,7 +49,7 @@ export async function verifyReadKey(req: NextRequest, alwaysEnforce = false): Pr
   const [row] = await db
     .select({ id: apiKeys.id, keyHash: apiKeys.keyHash, revoked: apiKeys.revoked })
     .from(apiKeys)
-    .where(eq(apiKeys.keyHash, keyHash))
+    .where(and(eq(apiKeys.keyHash, keyHash), eq(apiKeys.deleted, false)))
     .limit(1)
 
   if (!row || row.revoked) return false
@@ -84,21 +84,23 @@ export async function createApiKey(name: string): Promise<{ id: number; key: str
 export async function createUserApiKey(
   userId: number,
   name: string,
+  reason = "",
 ): Promise<{ id: number; key: string; prefix: string }> {
   const { key, keyHash, prefix } = generateKey()
   const [row] = await db
     .insert(apiKeys)
-    .values({ name, keyHash, prefix, userId })
+    .values({ name, keyHash, prefix, userId, reason })
     .returning({ id: apiKeys.id })
   return { id: row.id, key, prefix }
 }
 
-/** All keys owned by one user, newest first. Never returns hashes or plaintext. */
+/** All keys owned by one user, newest first. Soft-deleted keys are hidden, never returned. */
 export async function listUserApiKeys(userId: number) {
   return db
     .select({
       id: apiKeys.id,
       name: apiKeys.name,
+      reason: apiKeys.reason,
       prefix: apiKeys.prefix,
       revoked: apiKeys.revoked,
       useCount: apiKeys.useCount,
@@ -106,8 +108,18 @@ export async function listUserApiKeys(userId: number) {
       createdAt: apiKeys.createdAt,
     })
     .from(apiKeys)
-    .where(eq(apiKeys.userId, userId))
+    .where(and(eq(apiKeys.userId, userId), eq(apiKeys.deleted, false)))
     .orderBy(desc(apiKeys.createdAt))
+}
+
+/** Soft delete: hide the key and stop it authenticating, but retain the row in the database. */
+export async function setUserKeyDeleted(userId: number, id: number) {
+  const updated = await db
+    .update(apiKeys)
+    .set({ deleted: true, revoked: true })
+    .where(and(eq(apiKeys.id, id), eq(apiKeys.userId, userId)))
+    .returning({ id: apiKeys.id })
+  return updated.length > 0
 }
 
 /** Revoke (or restore) a key by id, scoped to its owner. Returns rows updated. */

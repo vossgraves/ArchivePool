@@ -81,6 +81,10 @@ export const apiKeys = pgTable("api_keys", {
   keyHash: text("key_hash").notNull().unique(),
   prefix: text("prefix").notNull(),
   revoked: boolean("revoked").notNull().default(false),
+  // Optional one-line reason given when the key was requested (shown in the dashboard list).
+  reason: text("reason").notNull().default(""),
+  // Soft delete: hidden from every list (and rejected by verifyReadKey) but the row is retained.
+  deleted: boolean("deleted").notNull().default(false),
   // Owning user (NULL for legacy/admin-created keys, which only /admin sees).
   userId: integer("user_id").references(() => users.id),
   lastUsedAt: timestamp("last_used_at", { withTimezone: true }),

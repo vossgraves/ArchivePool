@@ -22,13 +22,14 @@ export async function POST(req: NextRequest) {
   const userId = await getSessionUserId()
   if (!userId) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
 
-  let body: { name?: string }
+  let body: { name?: string; reason?: string }
   try {
     body = await req.json()
   } catch {
     body = {}
   }
   const name = (body.name ?? "").trim().slice(0, 64) || "My key"
+  const reason = (body.reason ?? "").trim().slice(0, 280)
 
   const existing = await listUserApiKeys(userId)
   if (existing.filter((k) => !k.revoked).length >= MAX_KEYS_PER_USER) {
@@ -38,7 +39,7 @@ export async function POST(req: NextRequest) {
     )
   }
 
-  const created = await createUserApiKey(userId, name)
+  const created = await createUserApiKey(userId, name, reason)
   return NextResponse.json(
     {
       id: created.id,

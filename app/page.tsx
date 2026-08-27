@@ -20,7 +20,7 @@ export default function Page() {
 
           <h1 className="max-w-3xl text-balance text-[2.1rem] font-semibold leading-[1.06] tracking-[-0.03em] sm:text-5xl">
             Live streaming sources,{" "}
-            <span className="bg-gradient-to-r from-primary to-[oklch(0.72_0.16_320)] bg-clip-text text-transparent">
+            <span className="bg-gradient-to-r from-foreground to-muted-foreground bg-clip-text text-transparent">
               gated by keys
             </span>
           </h1>

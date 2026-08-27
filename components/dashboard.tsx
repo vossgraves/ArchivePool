@@ -6,6 +6,7 @@ import { AnimatePresence, motion } from "motion/react"
 interface KeyRow {
   id: number
   name: string
+  reason: string
   prefix: string
   revoked: boolean
   useCount: number
@@ -21,6 +22,7 @@ function formatDate(iso: string | null): string {
 export function Dashboard({ username }: { username: string }) {
   const [keys, setKeys] = useState<KeyRow[] | null>(null)
   const [newKeyName, setNewKeyName] = useState("")
+  const [newKeyReason, setNewKeyReason] = useState("")
   const [creating, setCreating] = useState(false)
   const [revealed, setRevealed] = useState<{ key: string; prefix: string } | null>(null)
   const [copied, setCopied] = useState(false)
@@ -44,7 +46,7 @@ export function Dashboard({ username }: { username: string }) {
       const res = await fetch("/api/keys", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: newKeyName || "My key" }),
+        body: JSON.stringify({ name: newKeyName || "My key", reason: newKeyReason }),
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
@@ -53,6 +55,7 @@ export function Dashboard({ username }: { username: string }) {
       }
       setRevealed({ key: data.key, prefix: data.prefix })
       setNewKeyName("")
+      setNewKeyReason("")
       await load()
     } finally {
       setCreating(false)
@@ -61,6 +64,11 @@ export function Dashboard({ username }: { username: string }) {
 
   async function revoke(id: number, undo = false) {
     await fetch(`/api/keys/${id}${undo ? "?undo=1" : ""}`, { method: "DELETE" })
+    await load()
+  }
+
+  async function remove(id: number) {
+    await fetch(`/api/keys/${id}?delete=1`, { method: "DELETE" })
     await load()
   }
 
@@ -91,22 +99,31 @@ export function Dashboard({ username }: { username: string }) {
           </div>
         </div>
 
-        <form onSubmit={createKey} className="mt-5 flex flex-col gap-3 sm:flex-row">
+        <form onSubmit={createKey} className="mt-5 flex flex-col gap-3">
+          <div className="flex flex-col gap-3 sm:flex-row">
+            <input
+              value={newKeyName}
+              onChange={(e) => setNewKeyName(e.target.value)}
+              placeholder="Key name (e.g. my phone)"
+              maxLength={64}
+              className="flex-1 rounded-full border border-input bg-input/40 px-4 py-2.5 text-sm outline-none transition-all placeholder:text-muted-foreground/60 focus:border-primary/60 focus:ring-2 focus:ring-primary/25"
+            />
+            <motion.button
+              whileTap={{ scale: 0.97 }}
+              type="submit"
+              disabled={creating}
+              className="rounded-full bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+            >
+              {creating ? "Creating…" : "Request API key"}
+            </motion.button>
+          </div>
           <input
-            value={newKeyName}
-            onChange={(e) => setNewKeyName(e.target.value)}
-            placeholder="Key name (e.g. my phone)"
-            maxLength={64}
-            className="flex-1 rounded-full border border-input bg-input/40 px-4 py-2.5 text-sm outline-none transition-all placeholder:text-muted-foreground/60 focus:border-primary/60 focus:ring-2 focus:ring-primary/25"
+            value={newKeyReason}
+            onChange={(e) => setNewKeyReason(e.target.value)}
+            placeholder="Why do you need this key? (optional, helps the admin)"
+            maxLength={280}
+            className="w-full rounded-2xl border border-input bg-input/40 px-4 py-2.5 text-sm outline-none transition-all placeholder:text-muted-foreground/60 focus:border-primary/60 focus:ring-2 focus:ring-primary/25"
           />
-          <motion.button
-            whileTap={{ scale: 0.97 }}
-            type="submit"
-            disabled={creating}
-            className="rounded-full bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
-          >
-            {creating ? "Creating…" : "Request API key"}
-          </motion.button>
         </form>
         {error && (
           <p className="mt-3 rounded-xl bg-destructive/10 px-3.5 py-2.5 text-sm text-destructive" role="alert">
@@ -177,17 +194,27 @@ export function Dashboard({ username }: { username: string }) {
                 <p className="mt-0.5 font-mono text-xs text-muted-foreground">
                   {k.prefix}… · used {k.useCount}× · last {formatDate(k.lastUsedAt)}
                 </p>
+                {k.reason && <p className="mt-1 text-xs text-muted-foreground/80">“{k.reason}”</p>}
               </div>
-              <button
-                onClick={() => revoke(k.id, k.revoked)}
-                className={`rounded-full px-4 py-1.5 text-xs font-medium transition-colors ${
-                  k.revoked
-                    ? "border border-border text-muted-foreground hover:text-foreground"
-                    : "bg-destructive/10 text-destructive hover:bg-destructive/20"
-                }`}
-              >
-                {k.revoked ? "Restore" : "Revoke"}
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => revoke(k.id, k.revoked)}
+                  className={`rounded-full px-4 py-1.5 text-xs font-medium transition-colors ${
+                    k.revoked
+                      ? "border border-border text-muted-foreground hover:text-foreground"
+                      : "bg-destructive/10 text-destructive hover:bg-destructive/20"
+                  }`}
+                >
+                  {k.revoked ? "Restore" : "Revoke"}
+                </button>
+                <button
+                  onClick={() => remove(k.id)}
+                  title="Hide this key. It stops working immediately; the record stays in the database."
+                  className="rounded-full border border-border px-4 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-destructive/40 hover:text-destructive"
+                >
+                  Delete
+                </button>
+              </div>
             </motion.div>
           ))
         )}
