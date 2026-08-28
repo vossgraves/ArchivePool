@@ -49,6 +49,10 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = {
   colorScheme: "dark",
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 5,
+  viewportFit: "cover",
   // Matches --background so mobile browser chrome blends into the page instead of banding.
   // Sampled from the rendered body rather than guessed: --background is authored in oklch, and
   // the hand-written value here was a shade off.

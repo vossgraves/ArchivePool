@@ -76,6 +76,24 @@ function parseQobuzMessage(text: string): { token?: string; appId?: string; appS
   return out
 }
 
+function parseTidalMessage(text: string): { token?: string; refreshToken?: string; countryCode?: string } {
+  const out: { token?: string; refreshToken?: string; countryCode?: string } = {}
+  const sep = "\\s*(?:➠|→|⇒|»|:|=|-)+\\s*"
+  const grab = (labels: string[], valuePattern: string): string | undefined => {
+    for (const label of labels) {
+      const re = new RegExp(`${label}${sep}(${valuePattern})`, "i")
+      const m = text.match(re)
+      if (m?.[1]) return m[1].trim()
+    }
+    return undefined
+  }
+  const jwtPat = "[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+"
+  out.token = grab(["access[\\s_]?token", "token", "bearer[\\s_]?token"], jwtPat)
+  out.refreshToken = grab(["refresh[\\s_]?token", "o2[\\s_]?refresh", "refresh"], jwtPat)
+  out.countryCode = grab(["country[\\s_]?code", "country", "region", "cc"], "[A-Za-z]{2}")
+  return out
+}
+
 function Segmented<T extends string>({
   options,
   value,
@@ -88,13 +106,13 @@ function Segmented<T extends string>({
   labels: Record<T, string>
 }) {
   return (
-    <div className="inline-flex rounded-md border border-border p-1">
+    <div className="inline-flex w-full flex-wrap rounded-md border border-border p-1 sm:w-auto">
       {options.map((opt) => (
         <button
           key={opt}
           type="button"
           onClick={() => onChange(opt)}
-          className={`rounded px-4 py-1.5 text-sm font-medium transition-colors ${
+          className={`flex-1 whitespace-nowrap rounded px-3 py-1.5 text-sm font-medium transition-colors sm:flex-none sm:px-4 ${
             value === opt ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
           }`}
         >
@@ -137,6 +155,30 @@ export function SubmitForm() {
       filled.push("user id")
     }
     setPasteFeedback(filled.length ? `Filled ${filled.join(", ")}.` : "Couldn't find any Qobuz fields in that text.")
+  }
+
+  // Tidal: same paste helper as Qobuz, but for Tidal's JWT access/refresh + country
+  const [tToken, setTToken] = useState("")
+  const [tRefresh, setTRefresh] = useState("")
+  const [tCountry, setTCountry] = useState("")
+  const [tPasteFeedback, setTPasteFeedback] = useState<string | null>(null)
+
+  function applyTidalPaste(text: string) {
+    const parsed = parseTidalMessage(text)
+    const filled: string[] = []
+    if (parsed.token) {
+      setTToken(parsed.token)
+      filled.push("access token")
+    }
+    if (parsed.refreshToken) {
+      setTRefresh(parsed.refreshToken)
+      filled.push("refresh token")
+    }
+    if (parsed.countryCode) {
+      setTCountry(parsed.countryCode.toUpperCase())
+      filled.push("country")
+    }
+    setTPasteFeedback(filled.length ? `Filled ${filled.join(", ")}.` : "Couldn't find any Tidal fields in that text.")
   }
 
   return (
@@ -187,11 +229,50 @@ export function SubmitForm() {
               Or paste a token manually
             </summary>
             <div className="flex flex-col gap-4 border-t border-border p-3">
-              <Field key="tidal-token" label="Access token" name="token" placeholder="Bearer token from a Tidal session" />
-              <Field key="tidal-refreshToken" label="Refresh token" name="refreshToken" placeholder="Optional" />
-              <Field key="tidal-countryCode" label="Country code" name="countryCode" placeholder="US" />
+              <label className="flex flex-col gap-1.5">
+                <span className="text-sm font-medium">Paste from message</span>
+                <textarea
+                  rows={4}
+                  placeholder={"Paste the full Tidal message here…\nAccess Token ➠ …   Refresh Token ➠ …   Country ➠ …"}
+                  autoComplete="off"
+                  onChange={(e) => applyTidalPaste(e.target.value)}
+                  onPaste={(e) => applyTidalPaste(e.clipboardData.getData("text"))}
+                  className="rounded-md border border-input bg-background px-3 py-2 font-mono text-xs leading-relaxed outline-none ring-ring focus:ring-2"
+                />
+                <span className="text-xs text-muted-foreground">
+                  {tPasteFeedback ?? "Auto-fills access token, refresh token and country from a share message — just like Qobuz."}
+                </span>
+              </label>
+
+              <div className="h-px bg-border" />
+
+              <Field
+                key="tidal-token"
+                label="Access token"
+                name="token"
+                required
+                placeholder="Bearer token (eyJ…)"
+                value={tToken}
+                onChange={setTToken}
+              />
+              <Field
+                key="tidal-refreshToken"
+                label="Refresh token"
+                name="refreshToken"
+                placeholder="Optional — refresh JWT"
+                value={tRefresh}
+                onChange={setTRefresh}
+              />
+              <Field
+                key="tidal-countryCode"
+                label="Country code"
+                name="countryCode"
+                placeholder="US"
+                value={tCountry}
+                onChange={(v) => setTCountry(v.toUpperCase())}
+              />
               <p className="text-xs text-muted-foreground leading-relaxed">
-                Only needed if you already have a token. Sign-in above is the easy path.
+                Only needed if you already have a token. Paste the full message above — the easy path is still Sign in with Tidal.
               </p>
             </div>
           </details>

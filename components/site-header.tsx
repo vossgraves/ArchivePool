@@ -17,6 +17,7 @@ export function SiteHeader({ active }: { active?: "status" | "docs" | "submit" }
   const [user, setUser] = useState<string | null>(null)
   const [loaded, setLoaded] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
 
   useEffect(() => {
     fetch("/api/auth/me", { cache: "no-store" })
@@ -38,32 +39,32 @@ export function SiteHeader({ active }: { active?: "status" | "docs" | "submit" }
     // needs its own background fallback: backdrop-filter silently does nothing in some browsers,
     // and without it the header would render transparent over scrolling content.
     <header className="sticky top-0 z-40 border-b border-border bg-background/80 backdrop-blur-md">
-      <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-5 py-3.5">
+      <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-4 py-3.5 sm:gap-4 sm:px-5">
         <Link
           href="/"
-          className="group flex items-center gap-2.5 rounded-md transition-opacity hover:opacity-80"
+          className="group flex shrink-0 items-center gap-2.5 rounded-md transition-opacity hover:opacity-80"
         >
-          {/* The actual app icon, so the site reads as part of ArchiveTune rather than adjacent
-              to it. Replaces a text "AT" placeholder. */}
           <BrandMark size={28} />
-          <span className="flex flex-col leading-none">
+          <span className="hidden flex-col leading-none sm:flex">
             <span className="text-sm font-semibold tracking-tight">Source Pool</span>
             <span className="mt-0.5 font-mono text-[0.65rem] uppercase tracking-[0.14em] text-muted-foreground">
               ArchiveTune
             </span>
           </span>
+          <span className="flex flex-col leading-none sm:hidden">
+            <span className="text-[0.95rem] font-semibold tracking-tight">Pool</span>
+          </span>
         </Link>
 
-        <div className="flex items-center gap-1">
-          <nav aria-label="Primary" className="flex items-center gap-1 text-sm">
+        <div className="flex items-center gap-1 sm:gap-1">
+          {/* Desktop nav */}
+          <nav aria-label="Primary" className="hidden items-center gap-1 text-sm md:flex">
             {NAV.map((item) => {
               const isActive = active === item.key
               return (
                 <Link
                   key={item.href}
                   href={item.href}
-                  // aria-current tells assistive tech which page is open; the colour change alone
-                  // does not convey that.
                   aria-current={isActive ? "page" : undefined}
                   className={`rounded-md px-3 py-1.5 transition-colors duration-200 ${
                     isActive
@@ -76,6 +77,18 @@ export function SiteHeader({ active }: { active?: "status" | "docs" | "submit" }
               )
             })}
           </nav>
+          {/* Mobile hamburger */}
+          <button
+            type="button"
+            aria-label={mobileNavOpen ? "Close menu" : "Open menu"}
+            aria-expanded={mobileNavOpen}
+            onClick={() => setMobileNavOpen((v) => !v)}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-transparent text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground md:hidden"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+              {mobileNavOpen ? <path d="M18 6 6 18M6 6l12 12" /> : <path d="M4 6h16M4 12h16M4 18h16" />}
+            </svg>
+          </button>
 
           {/* Top-right account button: Login when signed out, username menu when signed in. */}
           {!loaded ? (
@@ -135,6 +148,38 @@ export function SiteHeader({ active }: { active?: "status" | "docs" | "submit" }
           )}
         </div>
       </div>
+      {/* Mobile nav drawer */}
+      <AnimatePresence>
+        {mobileNavOpen && (
+          <motion.nav
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.22, ease: "easeInOut" }}
+            aria-label="Mobile navigation"
+            className="overflow-hidden border-t border-border bg-background/95 backdrop-blur-md md:hidden"
+          >
+            <div className="mx-auto flex max-w-5xl flex-col gap-1 px-4 py-3">
+              {NAV.map((item) => {
+                const isActive = active === item.key
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    aria-current={isActive ? "page" : undefined}
+                    onClick={() => setMobileNavOpen(false)}
+                    className={`rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
+                      isActive ? "bg-secondary text-foreground" : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground"
+                    }`}
+                  >
+                    {item.label}
+                  </Link>
+                )
+              })}
+            </div>
+          </motion.nav>
+        )}
+      </AnimatePresence>
     </header>
   )
 }

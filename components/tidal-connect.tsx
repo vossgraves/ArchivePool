@@ -2,6 +2,27 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 
+function parseTidalMessage(text: string): { token?: string; refreshToken?: string; countryCode?: string; userId?: string } {
+  const out: { token?: string; refreshToken?: string; countryCode?: string; userId?: string } = {}
+  const sep = "\\s*(?:➠|→|⇒|»|:|=|-)+\\s*"
+  const grab = (labels: string[], valuePattern: string): string | undefined => {
+    for (const label of labels) {
+      const re = new RegExp(`${label}${sep}(${valuePattern})`, "i")
+      const m = text.match(re)
+      if (m?.[1]) return m[1].trim()
+    }
+    return undefined
+  }
+  // Tidal tokens are JWTs (eyJ...), sometimes labeled just "Token" or "Access Token"
+  // JWT pattern: 3 base64url segments.
+  const jwtPat = "[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+"
+  out.token = grab(["access[\\s_]?token", "token", "bearer[\\s_]?token"], jwtPat)
+  out.refreshToken = grab(["refresh[\\s_]?token", "o2[\\s_]?refresh", "refresh"], jwtPat)
+  out.countryCode = grab(["country[\\s_]?code", "country", "region", "cc"], "[A-Za-z]{2}")
+  out.userId = grab(["user[\\s_]?id", "user", "uid"], "[0-9]{4,}")
+  return out
+}
+
 interface DeviceStart {
   deviceCode: string
   userCode: string
