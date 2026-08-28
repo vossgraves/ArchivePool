@@ -87,14 +87,19 @@ export const servableWhere = and(
 /**
  * How many entries a single request may hold per category.
  *
- * Deliberately not 1. The ArchiveTune app's only failure recovery is client-side:
- * LosslessStreamResolver iterates `PoolAccountManager.tidalAccounts()` and tries the next
- * credential when one fails. Leasing a single entry would turn any bad credential into a hard
- * playback failure on already-installed APKs, which cannot be fixed by a server change. A small
- * lease keeps that fallback working while cutting exposure from "the entire pool" to a handful.
- * Revisit once /api/report ships in the app and can request a replacement mid-session.
+ * Tokens (kind=account) are limited to 3 per app — the app caches them locally and only
+ * re-fetches when the cached token is dead (health sweep marks dead, client reports via
+ * /api/report). Instances (kind=api) are not limited the same way because they are
+ * stateless base URLs; the same instance can serve many apps. A new token is only leased
+ * when the app's locally cached one fails its health check, not on every request.
+ *
+ * Deliberately not 1 for tokens: LosslessStreamResolver iterates PoolAccountManager accounts
+ * and tries the next credential when one fails. Leasing a single token would turn any bad
+ * credential into a hard playback failure. Three gives fallback while cutting exposure.
  */
 export const LEASE_PER_CATEGORY = 3
+export const LEASE_PER_CATEGORY_ACCOUNT = 3 // tokens: 3 per app, only if dead
+export const LEASE_PER_CATEGORY_API = 10 // instances: more, stateless
 
 /**
  * Leases up to LEASE_PER_CATEGORY entries per category instead of returning the whole pool.
@@ -127,7 +132,8 @@ export async function leasePool() {
   // sensitive fields with the client key so the JSON leaving the server is ciphertext end-to-end
   // (the app decrypts locally). The route fails closed when POOL_CLIENT_KEY is absent.
   const group = (service: Service, kind: Kind) => {
-    const picked = rows.filter((r) => r.service === service && r.kind === kind).slice(0, LEASE_PER_CATEGORY)
+    const limit = kind === "account" ? LEASE_PER_CATEGORY_ACCOUNT : LEASE_PER_CATEGORY_API
+    const picked = rows.filter((r) => r.service === service && r.kind === kind).slice(0, limit)
     for (const r of picked) leasedIds.push(r.id)
     return picked.map((r) => ({
       id: r.id,
