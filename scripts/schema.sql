@@ -71,3 +71,30 @@ CREATE TABLE IF NOT EXISTS users (
 -- Keys belong to a user (NULL = legacy/admin-created key, visible only in /admin).
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS user_id integer REFERENCES users(id) ON DELETE CASCADE;
 CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys (user_id);
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS reason text NOT NULL DEFAULT '';
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS deleted boolean NOT NULL DEFAULT false;
+CREATE INDEX IF NOT EXISTS idx_api_keys_deleted ON api_keys (deleted);
+
+-- User IP/UA tracking for abuse prevention.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS created_ip text NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS created_ua text NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_ip text NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_ua text NOT NULL DEFAULT '';
+
+-- API key requests: subject + reason workflow with admin approval.
+-- Enforces 1 request per IP+UA (see lib/api-keys.ts countRequestsByIpUa).
+CREATE TABLE IF NOT EXISTS api_key_requests (
+  id               serial PRIMARY KEY,
+  user_id          integer NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  subject          text NOT NULL,
+  reason           text NOT NULL DEFAULT '',
+  status           text NOT NULL DEFAULT 'pending', -- pending | approved | rejected
+  ip_address       text NOT NULL DEFAULT '',
+  user_agent       text NOT NULL DEFAULT '',
+  resulting_key_id integer REFERENCES api_keys(id) ON DELETE SET NULL,
+  reviewed_at      timestamptz,
+  reviewed_by      integer REFERENCES users(id) ON DELETE SET NULL,
+  created_at       timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_api_key_requests_user ON api_key_requests (user_id, status);
+CREATE INDEX IF NOT EXISTS idx_api_key_requests_ip_ua ON api_key_requests (ip_address, user_agent, status);

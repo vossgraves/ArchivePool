@@ -93,6 +93,35 @@ export const apiKeys = pgTable("api_keys", {
 })
 
 /**
+ * An API key request. Users submit subject + reason; an admin approves or
+ * rejects. Only approved requests materialise into a real api_keys row.
+ * Enforces 1 pending/approved request per IP+UA to prevent spam.
+ */
+export const apiKeyRequests = pgTable(
+  "api_key_requests",
+  {
+    id: serial("id").primaryKey(),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    subject: text("subject").notNull(),
+    reason: text("reason").notNull().default(""),
+    status: text("status").notNull().default("pending"), // pending | approved | rejected
+    ipAddress: text("ip_address").notNull().default(""),
+    userAgent: text("user_agent").notNull().default(""),
+    // When approved, the generated key's id (for linking).
+    resultingKeyId: integer("resulting_key_id").references(() => apiKeys.id),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+    reviewedBy: integer("reviewed_by").references(() => users.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    userIdx: index("idx_api_key_requests_user").on(t.userId, t.status),
+    ipUaIdx: index("idx_api_key_requests_ip_ua").on(t.ipAddress, t.userAgent, t.status),
+  }),
+)
+
+/**
  * A site account. Users sign up with username + password to request and manage
  * their own API keys from /dashboard. Passwords are stored as scrypt hashes
  * (see lib/users.ts); sessions are HMAC-signed cookies (see lib/sessions.ts).
@@ -102,10 +131,17 @@ export const users = pgTable("users", {
   username: text("username").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
   disabled: boolean("disabled").notNull().default(false),
+  // IP + User-Agent at account creation, for abuse detection.
+  createdIp: text("created_ip").notNull().default(""),
+  createdUa: text("created_ua").notNull().default(""),
+  // Last successful login IP/UA, updated on each login.
+  lastLoginIp: text("last_login_ip").notNull().default(""),
+  lastLoginUa: text("last_login_ua").notNull().default(""),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 })
 
 export type SourceEntry = typeof sourceEntries.$inferSelect
 export type NewSourceEntry = typeof sourceEntries.$inferInsert
 export type ApiKey = typeof apiKeys.$inferSelect
+export type ApiKeyRequest = typeof apiKeyRequests.$inferSelect
 export type User = typeof users.$inferSelect

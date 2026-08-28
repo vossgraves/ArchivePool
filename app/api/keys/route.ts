@@ -1,35 +1,55 @@
 import { NextResponse, type NextRequest } from "next/server"
 import { getSessionUserId } from "@/lib/sessions"
-import { createUserApiKey, listUserApiKeys } from "@/lib/api-keys"
+import { countRequestsByIpUa, createKeyRequest, listUserApiKeys, listUserRequests } from "@/lib/api-keys"
 
 export const dynamic = "force-dynamic"
 
 const MAX_KEYS_PER_USER = 10
 
-/** List the signed-in user's API keys (never returns plaintext). */
+/** List the signed-in user's API keys and pending requests. */
 export async function GET() {
   const userId = await getSessionUserId()
   if (!userId) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
-  const keys = await listUserApiKeys(userId)
+  const [keys, requests] = await Promise.all([listUserApiKeys(userId), listUserRequests(userId)])
   return NextResponse.json(
-    { keys },
+    { keys, requests },
     { headers: { "cache-control": "private, no-store" } },
   )
 }
 
-/** Request (create) a new API key. The plaintext is returned exactly once. */
+/** Request a new API key (subject + reason). Admin must approve. Limited to 1 per IP+UA. */
 export async function POST(req: NextRequest) {
   const userId = await getSessionUserId()
   if (!userId) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
 
-  let body: { name?: string; reason?: string }
+  let body: { subject?: string; name?: string; reason?: string }
   try {
     body = await req.json()
   } catch {
     body = {}
   }
-  const name = (body.name ?? "").trim().slice(0, 64) || "My key"
-  const reason = (body.reason ?? "").trim().slice(0, 280)
+  const subject = (body.subject ?? body.name ?? "").trim().slice(0, 64)
+  const reason = (body.reason ?? "").trim().slice(0, 500)
+  if (!subject) {
+    return NextResponse.json({ error: "invalid_input", detail: "Subject is required." }, { status: 400 })
+  }
+  if (!reason || reason.length < 10) {
+    return NextResponse.json({ error: "invalid_input", detail: "Reason must be at least 10 characters." }, { status: 400 })
+  }
+
+  const ip = (req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? req.headers.get("x-real-ip") ?? "").slice(0, 64)
+  const ua = (req.headers.get("user-agent") ?? "").slice(0, 256)
+
+  // Enforce 1 active/pending request per IP+UA (30 days) to prevent spam
+  if (ip && ua) {
+    const recent = await countRequestsByIpUa(ip, ua, 720)
+    if (recent >= 1) {
+      return NextResponse.json(
+        { error: "rate_limited", detail: "One request per device/network. You already have a pending or recent request." },
+        { status: 429 },
+      )
+    }
+  }
 
   const existing = await listUserApiKeys(userId)
   if (existing.filter((k) => !k.revoked).length >= MAX_KEYS_PER_USER) {
@@ -39,14 +59,9 @@ export async function POST(req: NextRequest) {
     )
   }
 
-  const created = await createUserApiKey(userId, name, reason)
+  const created = await createKeyRequest(userId, subject, reason, ip, ua)
   return NextResponse.json(
-    {
-      id: created.id,
-      prefix: created.prefix,
-      // Shown ONCE. Only the SHA-256 hash is stored server-side.
-      key: created.key,
-    },
+    { id: created.id, status: "pending" },
     { headers: { "cache-control": "private, no-store" } },
   )
 }

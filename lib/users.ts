@@ -1,7 +1,7 @@
 import "server-only"
 import { scrypt as scryptCb, randomBytes, timingSafeEqual } from "node:crypto"
 import { promisify } from "node:util"
-import { eq } from "drizzle-orm"
+import { and, eq, gte } from "drizzle-orm"
 import { db } from "@/lib/db"
 import { users } from "@/lib/db/schema"
 
@@ -60,11 +60,25 @@ export async function findUserByUsername(username: string) {
   return row ?? null
 }
 
-export async function createUser(username: string, password: string) {
+export async function createUser(username: string, password: string, ip = "", ua = "") {
   const passwordHash = await hashPassword(password)
   const [row] = await db
     .insert(users)
-    .values({ username, passwordHash })
+    .values({ username, passwordHash, createdIp: ip, createdUa: ua, lastLoginIp: ip, lastLoginUa: ua })
     .returning({ id: users.id, username: users.username })
   return row
+}
+
+export async function updateLastLogin(userId: number, ip: string, ua: string) {
+  await db.update(users).set({ lastLoginIp: ip, lastLoginUa: ua }).where(eq(users.id, userId))
+}
+
+export async function countRecentUsersByIpUa(ip: string, ua: string, hours = 24): Promise<number> {
+  if (!ip || !ua) return 0
+  const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000)
+  const rows = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.createdIp, ip), eq(users.createdUa, ua), gte(users.createdAt, cutoff)))
+  return rows.length
 }

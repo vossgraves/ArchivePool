@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server"
 import { setSessionCookie } from "@/lib/sessions"
-import { findUserByUsername, verifyPassword } from "@/lib/users"
+import { findUserByUsername, updateLastLogin, verifyPassword } from "@/lib/users"
 
 export const dynamic = "force-dynamic"
 
@@ -24,6 +24,10 @@ export async function POST(req: NextRequest) {
   if (!user || user.disabled || !(await verifyPassword(password, user.passwordHash))) {
     return NextResponse.json({ error: "invalid_credentials" }, { status: 401 })
   }
+
+  const ip = (req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? req.headers.get("x-real-ip") ?? "").slice(0, 64)
+  const ua = (req.headers.get("user-agent") ?? "").slice(0, 256)
+  void updateLastLogin(user.id, ip, ua).catch(() => {})
 
   await setSessionCookie(user.id)
   return NextResponse.json({ username: user.username })
