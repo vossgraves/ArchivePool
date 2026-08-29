@@ -79,6 +79,30 @@ export async function createApiKey(name: string): Promise<{ id: number; key: str
 }
 
 /**
+ * Admin: create a key with a caller-chosen value (used to re-seed the baked
+ * SOURCE_PROVIDER_KEY after a database loss so clients keep working without rebuilds).
+ * Returns null when a key with this value already exists (unique hash).
+ */
+export async function createApiKeyWithValue(
+  name: string,
+  value: string,
+): Promise<{ id: number; prefix: string } | null> {
+  await ensureSchema()
+  const keyHash = hashKey(value)
+  const existing = await db
+    .select({ id: apiKeys.id })
+    .from(apiKeys)
+    .where(eq(apiKeys.keyHash, keyHash))
+    .limit(1)
+  if (existing.length > 0) return null
+  const [row] = await db
+    .insert(apiKeys)
+    .values({ name, keyHash, prefix: value.slice(0, KEY_PREFIX.length + 6) })
+    .returning({ id: apiKeys.id })
+  return { id: row.id, prefix: row.prefix }
+}
+
+/**
  * User: create a key owned by [userId]. Returns the one-time plaintext key —
  * only its hash is persisted, so the dashboard must show it exactly once.
  */
