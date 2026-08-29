@@ -15,8 +15,10 @@ name: Health check cron
 
 on:
   schedule:
-    # Every 15 minutes. GitHub cron is UTC and may run a few minutes late under load.
-    - cron: "*/15 * * * *"
+    # Every hour. GitHub cron is UTC and may run a few minutes late under load.
+    # Hourly keeps the Neon compute-wake burn low on free tier (15-min pings exhaust the
+    # 100h/month quota in ~3-4 weeks; hourly stretches it 4x).
+    - cron: "0 * * * *"
   workflow_dispatch: {} # allow manual runs from the Actions tab
 
 jobs:

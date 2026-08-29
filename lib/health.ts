@@ -95,30 +95,42 @@ async function tryRefreshTidalToken(
   const refreshToken = String(payload.refreshToken ?? "").trim()
   if (!refreshToken) return null
 
-  try {
-    const body = new URLSearchParams({
-      client_id: TIDAL_CLIENT_ID,
-      client_secret: TIDAL_CLIENT_SECRET,
-      refresh_token: refreshToken,
-      grant_type: "refresh_token",
-      scope: "r_usr+w_usr+w_sub",
-    })
-    const res = await fetch(TIDAL_TOKEN_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "content-type": "application/x-www-form-urlencoded",
-        "user-agent": TIDAL_UA,
-      },
-      body,
-      cache: "no-store",
-    })
-    if (!res.ok) return null
+  // Refresh tokens are granted with the scopes they were issued for; requesting a superset
+  // (the pool's device flow asks for `+w_sub`) makes Tidal answer 400 invalid_scope on tokens
+  // minted elsewhere (e.g. pasted by a contributor with only r_usr w_usr). Fall back to the
+  // narrower scope instead of treating the account as dead.
+  const scopes = ["r_usr+w_usr+w_sub", "r_usr+w_usr"]
 
-    const json = (await res.json()) as {
-      access_token?: string
-      refresh_token?: string
-      expires_in?: number
+  try {
+    let json: { access_token?: string; refresh_token?: string; expires_in?: number } | undefined
+    let ok = false
+    for (const scope of scopes) {
+      const body = new URLSearchParams({
+        client_id: TIDAL_CLIENT_ID,
+        client_secret: TIDAL_CLIENT_SECRET,
+        refresh_token: refreshToken,
+        grant_type: "refresh_token",
+        scope,
+      })
+      const res = await fetch(TIDAL_TOKEN_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          "user-agent": TIDAL_UA,
+        },
+        body,
+        cache: "no-store",
+      })
+      if (res.ok) {
+        json = (await res.json()) as { access_token?: string; refresh_token?: string; expires_in?: number }
+        ok = true
+        break
+      }
+      // Only a scope rejection is worth retrying; anything else (bad token, revoked) fails both.
+      const err = (await res.json().catch(() => ({}))) as { error?: string }
+      if (err.error !== "invalid_scope") return null
     }
+    if (!ok || !json) return null
     const newToken = json.access_token
     if (!newToken) return null
 

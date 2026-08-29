@@ -2,7 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 import { and, desc, eq, sql } from "drizzle-orm"
 import type { NextRequest } from "next/server"
 import { db } from "@/lib/db"
-import { apiKeys } from "@/lib/db/schema"
+import { apiKeys, apiKeyRequests } from "@/lib/db/schema"
 
 const KEY_PREFIX = "atp_"
 
@@ -49,7 +49,7 @@ export async function verifyReadKey(req: NextRequest, alwaysEnforce = false): Pr
   const [row] = await db
     .select({ id: apiKeys.id, keyHash: apiKeys.keyHash, revoked: apiKeys.revoked })
     .from(apiKeys)
-    .where(eq(apiKeys.keyHash, keyHash))
+    .where(and(eq(apiKeys.keyHash, keyHash), eq(apiKeys.deleted, false)))
     .limit(1)
 
   if (!row || row.revoked) return false
@@ -77,6 +77,61 @@ export async function createApiKey(name: string): Promise<{ id: number; key: str
   return { id: row.id, key, prefix }
 }
 
+/**
+ * User: create a key owned by [userId]. Returns the one-time plaintext key —
+ * only its hash is persisted, so the dashboard must show it exactly once.
+ */
+export async function createUserApiKey(
+  userId: number,
+  name: string,
+  reason = "",
+): Promise<{ id: number; key: string; prefix: string }> {
+  const { key, keyHash, prefix } = generateKey()
+  const [row] = await db
+    .insert(apiKeys)
+    .values({ name, keyHash, prefix, userId, reason })
+    .returning({ id: apiKeys.id })
+  return { id: row.id, key, prefix }
+}
+
+/** All keys owned by one user, newest first. Soft-deleted keys are hidden, never returned. */
+export async function listUserApiKeys(userId: number) {
+  return db
+    .select({
+      id: apiKeys.id,
+      name: apiKeys.name,
+      reason: apiKeys.reason,
+      prefix: apiKeys.prefix,
+      revoked: apiKeys.revoked,
+      useCount: apiKeys.useCount,
+      lastUsedAt: apiKeys.lastUsedAt,
+      createdAt: apiKeys.createdAt,
+    })
+    .from(apiKeys)
+    .where(and(eq(apiKeys.userId, userId), eq(apiKeys.deleted, false)))
+    .orderBy(desc(apiKeys.createdAt))
+}
+
+/** Soft delete: hide the key and stop it authenticating, but retain the row in the database. */
+export async function setUserKeyDeleted(userId: number, id: number) {
+  const updated = await db
+    .update(apiKeys)
+    .set({ deleted: true, revoked: true })
+    .where(and(eq(apiKeys.id, id), eq(apiKeys.userId, userId)))
+    .returning({ id: apiKeys.id })
+  return updated.length > 0
+}
+
+/** Revoke (or restore) a key by id, scoped to its owner. Returns rows updated. */
+export async function setUserKeyRevoked(userId: number, id: number, revoked: boolean) {
+  const updated = await db
+    .update(apiKeys)
+    .set({ revoked })
+    .where(and(eq(apiKeys.id, id), eq(apiKeys.userId, userId)))
+    .returning({ id: apiKeys.id })
+  return updated.length > 0
+}
+
 /** Admin: list keys (never returns hashes or plaintext). */
 export async function listApiKeys() {
   return db
@@ -96,4 +151,78 @@ export async function listApiKeys() {
 /** Admin: revoke (or restore) a key by id. */
 export async function setKeyRevoked(id: number, revoked: boolean) {
   await db.update(apiKeys).set({ revoked }).where(and(eq(apiKeys.id, id)))
+}
+
+// ─── API key request workflow (user subject+reason → admin approve) ───
+
+export async function createKeyRequest(
+  userId: number,
+  subject: string,
+  reason: string,
+  ip: string,
+  ua: string,
+) {
+  const [row] = await db
+    .insert(apiKeyRequests)
+    .values({ userId, subject, reason, ipAddress: ip, userAgent: ua, status: "pending" })
+    .returning({ id: apiKeyRequests.id })
+  return row
+}
+
+export async function listUserRequests(userId: number) {
+  return db
+    .select({
+      id: apiKeyRequests.id,
+      subject: apiKeyRequests.subject,
+      reason: apiKeyRequests.reason,
+      status: apiKeyRequests.status,
+      ipAddress: apiKeyRequests.ipAddress,
+      userAgent: apiKeyRequests.userAgent,
+      resultingKeyId: apiKeyRequests.resultingKeyId,
+      createdAt: apiKeyRequests.createdAt,
+      reviewedAt: apiKeyRequests.reviewedAt,
+    })
+    .from(apiKeyRequests)
+    .where(eq(apiKeyRequests.userId, userId))
+    .orderBy(desc(apiKeyRequests.createdAt))
+}
+
+export async function countRequestsByIpUa(ip: string, ua: string, hours = 720): Promise<number> {
+  if (!ip || !ua) return 0
+  const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000)
+  const rows = await db
+    .select({ id: apiKeyRequests.id })
+    .from(apiKeyRequests)
+    .where(and(eq(apiKeyRequests.ipAddress, ip), eq(apiKeyRequests.userAgent, ua)))
+  // Filter by time and non-rejected in JS to avoid date handling complexity
+  const filtered = await db
+    .select({ id: apiKeyRequests.id, createdAt: apiKeyRequests.createdAt, status: apiKeyRequests.status })
+    .from(apiKeyRequests)
+    .where(and(eq(apiKeyRequests.ipAddress, ip), eq(apiKeyRequests.userAgent, ua)))
+  return filtered.filter((r) => r.createdAt && r.createdAt > cutoff && r.status !== "rejected").length
+}
+
+export async function approveKeyRequest(requestId: number, adminId: number) {
+  const [req] = await db.select().from(apiKeyRequests).where(eq(apiKeyRequests.id, requestId)).limit(1)
+  if (!req || req.status !== "pending") return null
+  const { key, keyHash, prefix } = generateKey()
+  const [keyRow] = await db
+    .insert(apiKeys)
+    .values({ name: req.subject, keyHash, prefix, userId: req.userId, reason: req.reason })
+    .returning({ id: apiKeys.id })
+  await db
+    .update(apiKeyRequests)
+    .set({ status: "approved", resultingKeyId: keyRow.id, reviewedAt: new Date(), reviewedBy: adminId })
+    .where(eq(apiKeyRequests.id, requestId))
+  return { id: keyRow.id, key, prefix, requestId }
+}
+
+export async function rejectKeyRequest(requestId: number, adminId: number) {
+  const [req] = await db.select().from(apiKeyRequests).where(eq(apiKeyRequests.id, requestId)).limit(1)
+  if (!req || req.status !== "pending") return false
+  await db
+    .update(apiKeyRequests)
+    .set({ status: "rejected", reviewedAt: new Date(), reviewedBy: adminId })
+    .where(eq(apiKeyRequests.id, requestId))
+  return true
 }

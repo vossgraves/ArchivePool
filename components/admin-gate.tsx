@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { AdminKeys } from "@/components/admin-keys"
+import { AdminRequests } from "@/components/admin-requests"
 import { AdminSources } from "@/components/admin-sources"
 
 /**
@@ -84,8 +85,9 @@ export function AdminGate() {
           Lock
         </Button>
       </div>
-      <AdminSources />
+      <AdminRequests />
       <AdminKeys />
+      <AdminSources />
     </div>
   )
 }
