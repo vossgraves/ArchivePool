@@ -250,7 +250,6 @@ export function SubmitForm() {
                 key="tidal-token"
                 label="Access token"
                 name="token"
-                required
                 placeholder="Bearer token (eyJ…)"
                 value={tToken}
                 onChange={setTToken}
