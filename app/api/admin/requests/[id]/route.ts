@@ -1,11 +1,13 @@
 import { NextResponse, type NextRequest } from "next/server"
 import { isAdminAuthorized as authorized } from "@/lib/admin-auth"
+import { ensureSchema } from "@/lib/db/ensure"
 import { approveKeyRequest, rejectKeyRequest } from "@/lib/api-keys"
 
 export const dynamic = "force-dynamic"
 
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   if (!authorized(req)) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
+  await ensureSchema()
   const { id } = await ctx.params
   const requestId = Number.parseInt(id, 10)
   if (!Number.isFinite(requestId)) return NextResponse.json({ error: "invalid_id" }, { status: 400 })

@@ -2,6 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 import { and, desc, eq, sql } from "drizzle-orm"
 import type { NextRequest } from "next/server"
 import { db } from "@/lib/db"
+import { ensureSchema } from "@/lib/db/ensure"
 import { apiKeys, apiKeyRequests } from "@/lib/db/schema"
 
 const KEY_PREFIX = "atp_"
@@ -162,6 +163,7 @@ export async function createKeyRequest(
   ip: string,
   ua: string,
 ) {
+  await ensureSchema()
   const [row] = await db
     .insert(apiKeyRequests)
     .values({ userId, subject, reason, ipAddress: ip, userAgent: ua, status: "pending" })
@@ -170,6 +172,7 @@ export async function createKeyRequest(
 }
 
 export async function listUserRequests(userId: number) {
+  await ensureSchema()
   return db
     .select({
       id: apiKeyRequests.id,
@@ -189,6 +192,7 @@ export async function listUserRequests(userId: number) {
 
 export async function countRequestsByIpUa(ip: string, ua: string, hours = 720): Promise<number> {
   if (!ip || !ua) return 0
+  await ensureSchema()
   const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000)
   const rows = await db
     .select({ id: apiKeyRequests.id })
@@ -203,6 +207,7 @@ export async function countRequestsByIpUa(ip: string, ua: string, hours = 720): 
 }
 
 export async function approveKeyRequest(requestId: number, adminId: number) {
+  await ensureSchema()
   const [req] = await db.select().from(apiKeyRequests).where(eq(apiKeyRequests.id, requestId)).limit(1)
   if (!req || req.status !== "pending") return null
   const { key, keyHash, prefix } = generateKey()
@@ -218,6 +223,7 @@ export async function approveKeyRequest(requestId: number, adminId: number) {
 }
 
 export async function rejectKeyRequest(requestId: number, adminId: number) {
+  await ensureSchema()
   const [req] = await db.select().from(apiKeyRequests).where(eq(apiKeyRequests.id, requestId)).limit(1)
   if (!req || req.status !== "pending") return false
   await db
