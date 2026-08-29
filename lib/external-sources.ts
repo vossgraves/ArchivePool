@@ -97,3 +97,172 @@ export async function fetchQbdlxTokens(): Promise<FirehawkQobuzToken[] | null> {
   // Return null to signal "not a viable source" — caller should fall back to firehawk52.
   return null
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// Community shared-account feeds
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * citegptapi.f5.si — an n8n-backed community pool. The QobuzDownloaderX web UI
+ * (qbdlxui.alwaysdata.net) reads its "Free Accounts / Browse shared tokens" page from the
+ * webhook below, so hitting the same webhook gives us the community's live shared Qobuz
+ * accounts: `[{ token, country?, app_id?, app_secret?, createdAt? }, …]` (~150 entries).
+ */
+const CITEGPT_SHARED_URL = "https://citegptapi.f5.si/webhook/qbdlx/shared"
+
+export interface QobuzSharedAccount {
+  token: string
+  appId: string
+  appSecret: string
+  country?: string
+  note?: string
+}
+
+/** The most common (app_id, app_secret) pair in the feed, for entries missing credentials. */
+function dominantAppPair(entries: Record<string, unknown>[]): { appId: string; appSecret: string } | null {
+  const counts = new Map<string, number>()
+  for (const e of entries) {
+    const appId = String(e.app_id ?? "").trim()
+    const appSecret = String(e.app_secret ?? "").trim()
+    if (appId && appSecret) counts.set(`${appId}|${appSecret}`, (counts.get(`${appId}|${appSecret}`) ?? 0) + 1)
+  }
+  const best = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]
+  if (!best) return null
+  const [appId, appSecret] = best[0].split("|")
+  return { appId, appSecret }
+}
+
+export async function fetchQbdlxShared(): Promise<QobuzSharedAccount[] | null> {
+  try {
+    const res = await fetch(CITEGPT_SHARED_URL, {
+      headers: { "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/145.0.0.0 Safari/537.36" },
+      cache: "no-store",
+      signal: AbortSignal.timeout(20_000),
+    })
+    if (!res.ok) return null
+    const raw = (await res.json()) as Record<string, unknown>[]
+    if (!Array.isArray(raw)) return null
+
+    const fallback = dominantAppPair(raw) ?? { appId: QOBUZ_PROBE_APP_ID, appSecret: QOBUZ_PROBE_APP_SECRET }
+    const out: QobuzSharedAccount[] = []
+    for (const e of raw) {
+      const token = String(e.token ?? "").trim()
+      if (!token) continue
+      const appId = String(e.app_id ?? "").trim() || fallback.appId
+      const appSecret = String(e.app_secret ?? "").trim() || fallback.appSecret
+      const country = String(e.country ?? "").trim() || undefined
+      out.push({ token, appId, appSecret, country, note: "qbdlx-shared" })
+    }
+    return out
+  } catch {
+    return null
+  }
+}
+
+/**
+ * firehawk52.com (the rentry's replacement) sits behind a Cloudflare managed challenge that
+ * plain fetch AND curl_cffi-style TLS impersonation cannot clear (verified 2026-08 — the
+ * challenge requires real JS execution). The rentry's raw endpoint now demands an access
+ * code too. What still works is the *rendered* rentry page through a rendering proxy, which
+ * currently lists no tokens (they moved to firehawk52.com) — kept as a cheap opportunistic
+ * fallback in case tokens reappear there.
+ */
+const JINA_READER = "https://r.jina.ai/"
+
+export async function fetchFirehawkRendered(): Promise<{ qobuz: FirehawkQobuzToken[]; deezer: FirehawkDeezerArl[] } | null> {
+  try {
+    const res = await fetch(`${JINA_READER}https://rentry.co/firehawk52`, {
+      headers: { "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/145.0.0.0 Safari/537.36" },
+      cache: "no-store",
+      signal: AbortSignal.timeout(45_000),
+    })
+    if (!res.ok) return null
+    const text = await res.text()
+    if (!/qobuz/i.test(text) && !/deezer/i.test(text)) return null
+    const qobuz = parseFirehawkQobuzTokens(text)
+    const deezer = parseFirehawkDeezerArls(text)
+    if (qobuz.length === 0 && deezer.length === 0) return null
+    return { qobuz, deezer }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Fetch every external source and ingest the entries that are NOT already in the pool
+ * (dedupe by fingerprint — the same sha256 basis ingestSource persists). New entries run a
+ * live health check at ingest time; known ones cost one indexed SELECT, so the hourly cron
+ * never re-checks the whole feed. `maxNew` bounds the per-run work.
+ */
+export async function ingestExternalSources(
+  maxNew = 10,
+): Promise<{ fetched: number; inserted: number; skippedKnown: number; errors: string[] }> {
+  const { inArray } = await import("drizzle-orm")
+  const { ingestSource } = await import("@/lib/ingest")
+  const { fingerprint } = await import("@/lib/sources")
+  const { db } = await import("@/lib/db")
+  const { sourceEntries } = await import("@/lib/db/schema")
+  const errors: string[] = []
+  let fetched = 0
+  let inserted = 0
+  let skippedKnown = 0
+
+  type Candidate = { service: "qobuz" | "deezer"; kind: "account"; payload: Record<string, unknown> }
+  const candidates: Candidate[] = []
+
+  // 1) Community shared Qobuz accounts (n8n webhook behind qbdlxui).
+  const shared = await fetchQbdlxShared().catch(() => null)
+  if (shared && shared.length > 0) {
+    for (const a of shared) {
+      candidates.push({
+        service: "qobuz",
+        kind: "account",
+        payload: { token: a.token, appId: a.appId, appSecret: a.appSecret, country: a.country, note: a.note },
+      })
+    }
+  } else {
+    errors.push("citegptapi webhook unreachable or empty")
+  }
+
+  // 2) firehawk52 rendered rentry (opportunistic — see comment on the fetcher).
+  const firehawk = await fetchFirehawkRendered().catch(() => null)
+  if (firehawk) {
+    for (const t of firehawk.qobuz) {
+      candidates.push({ service: "qobuz", kind: "account", payload: { token: t.token } })
+    }
+    for (const a of firehawk.deezer) {
+      candidates.push({ service: "deezer", kind: "account", payload: { arl: a.arl } })
+    }
+  }
+
+  fetched = candidates.length
+  if (fetched === 0) return { fetched, inserted, skippedKnown, errors }
+
+  // Dedupe against the DB: fingerprints are unique per (service, kind, credential).
+  const fps = [...new Set(candidates.map((c) => fingerprint(c.service, c.kind, c.payload)))]
+  const existing = new Set<string>()
+  try {
+    for (let i = 0; i < fps.length; i += 100) {
+      const batch = fps.slice(i, i + 100)
+      const rows = await db
+        .select({ fingerprint: sourceEntries.fingerprint })
+        .from(sourceEntries)
+        .where(inArray(sourceEntries.fingerprint, batch))
+      for (const row of rows) existing.add(row.fingerprint)
+    }
+    skippedKnown = candidates.length - fps.filter((fp) => !existing.has(fp)).length
+  } catch (err) {
+    errors.push(`dedupe query failed: ${err instanceof Error ? err.message : "unknown"}`)
+  }
+
+  const fresh = candidates.filter((c) => !existing.has(fingerprint(c.service, c.kind, c.payload)))
+  for (const c of fresh.slice(0, maxNew)) {
+    try {
+      const result = await ingestSource(c.service, c.kind, c.payload)
+      if (result.saved) inserted += 1
+    } catch (err) {
+      errors.push(`ingest failed: ${err instanceof Error ? err.message : "unknown"}`)
+    }
+  }
+  return { fetched, inserted, skippedKnown, errors }
+}

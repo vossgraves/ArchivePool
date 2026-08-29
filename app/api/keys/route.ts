@@ -10,11 +10,19 @@ const MAX_KEYS_PER_USER = 10
 export async function GET() {
   const userId = await getSessionUserId()
   if (!userId) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
-  const [keys, requests] = await Promise.all([listUserApiKeys(userId), listUserRequests(userId)])
-  return NextResponse.json(
-    { keys, requests },
-    { headers: { "cache-control": "private, no-store" } },
-  )
+  try {
+    const [keys, requests] = await Promise.all([listUserApiKeys(userId), listUserRequests(userId)])
+    return NextResponse.json(
+      { keys, requests },
+      { headers: { "cache-control": "private, no-store" } },
+    )
+  } catch (err) {
+    console.error("[keys] list failed:", err)
+    return NextResponse.json(
+      { error: "internal_error", detail: "Could not load your keys. Please try again shortly." },
+      { status: 500 },
+    )
+  }
 }
 
 /** Request a new API key (subject + reason). Admin must approve. Limited to 1 per IP+UA. */
@@ -58,10 +66,19 @@ export async function POST(req: NextRequest) {
       { status: 409 },
     )
   }
-
-  const created = await createKeyRequest(userId, subject, reason, ip, ua)
-  return NextResponse.json(
-    { id: created.id, status: "pending" },
-    { headers: { "cache-control": "private, no-store" } },
-  )
+  try {
+    const created = await createKeyRequest(userId, subject, reason, ip, ua)
+    return NextResponse.json(
+      { id: created.id, status: "pending" },
+      { headers: { "cache-control": "private, no-store" } },
+    )
+  } catch (err) {
+    // Surface DB problems as structured JSON — an unhandled throw here rendered a generic
+    // "unknown error occurred" page for users whose deployments predated a schema migration.
+    console.error("[keys] createKeyRequest failed:", err)
+    return NextResponse.json(
+      { error: "internal_error", detail: "Could not save the request. Please try again shortly." },
+      { status: 500 },
+    )
+  }
 }
