@@ -24,6 +24,69 @@ const TIDAL_TOKEN_ENDPOINT = "https://auth.tidal.com/v1/oauth2/token"
 // flagged for appearing to come from an unrecognised user agent.
 const TIDAL_UA = "TIDAL/1000 (Linux; Android 10)"
 
+// Apple Music AMP API. Probing a Media-User-Token requires a dev (Bearer) JWT; the pool
+// self-scrapes the current web-player token (same source the ArchiveTune app uses) instead
+// of asking contributors to paste a second credential.
+const AMP_BASE = "https://amp-api.music.apple.com"
+const APPLE_MUSIC_HOME = "https://music.apple.com/"
+const APPLE_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+const AMP_TOKEN_TTL_MS = 24 * 60 * 60 * 1000
+let ampTokenCache: { token: string; exp: number; at: number } | null = null
+
+/** Decode a JWT payload without verifying the signature (token freshness check only). */
+function decodeJwtPayload(jwt: string): Record<string, unknown> | null {
+  try {
+    const part = jwt.split(".")[1]
+    if (!part) return null
+    const json = Buffer.from(part.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8")
+    return JSON.parse(json) as Record<string, unknown>
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Returns a usable Apple Music web-player dev JWT, scraping a fresh one from
+ * music.apple.com when the cached token is older than 24h or already expired.
+ * Mirrors the app-side scraper: home page → JS bundle → ES256 JWTs → `iss: AMPWebPlay`.
+ */
+async function ampDevToken(): Promise<string | null> {
+  const now = Date.now() / 1000
+  if (ampTokenCache && ampTokenCache.exp - 60 > now && Date.now() - ampTokenCache.at < AMP_TOKEN_TTL_MS) {
+    return ampTokenCache.token
+  }
+  try {
+    const home = await fetch(APPLE_MUSIC_HOME, {
+      headers: { "user-agent": APPLE_UA },
+      cache: "no-store",
+    })
+    if (!home.ok) return ampTokenCache?.token ?? null
+    const html = await home.text()
+    const bundle = /assets\/index-[^"']+\.js/.exec(html)?.[0]
+    if (!bundle) return ampTokenCache?.token ?? null
+    const jsRes = await fetch(`https://music.apple.com/${bundle}`, {
+      headers: { "user-agent": APPLE_UA },
+      cache: "no-store",
+    })
+    if (!jsRes.ok) return ampTokenCache?.token ?? null
+    const js = await jsRes.text()
+    const candidates = js.match(/eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g) ?? []
+    for (const candidate of candidates) {
+      const payload = decodeJwtPayload(candidate)
+      const exp = typeof payload?.exp === "number" ? payload.exp : 0
+      const iss = typeof payload?.iss === "string" ? payload.iss : ""
+      if (iss === "AMPWebPlay" && exp - 60 > now) {
+        ampTokenCache = { token: candidate, exp, at: Date.now() }
+        return candidate
+      }
+    }
+    return ampTokenCache?.token ?? null
+  } catch {
+    return ampTokenCache?.token ?? null
+  }
+}
+
 async function timedFetch(url: string, init?: RequestInit): Promise<{ res: Response; ms: number }> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
@@ -315,6 +378,51 @@ const DEEZER_UA =
  * resolves 30-second previews at best, so it is reported as "preview" rather than "alive", matching
  * how a non-premium Tidal/Qobuz account is treated.
  */
+async function checkAppleMusicAccount(payload: Record<string, unknown>): Promise<CheckResult> {
+  const token = String(payload.token ?? "").trim()
+  // Media-User-Tokens always start with "0." — anything else is a paste error.
+  if (!token.startsWith("0.")) {
+    return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: "missing or invalid media-user-token" }
+  }
+
+  try {
+    const devToken = await ampDevToken()
+    if (!devToken) {
+      // Cannot probe without a dev JWT; report pending rather than dead so a transient
+      // scraping failure does not wipe healthy entries from rotation.
+      return { ok: false, premium: false, status: "pending", latencyMs: 0, detail: "no dev token available" }
+    }
+    const { res, ms } = await timedFetch(`${AMP_BASE}/v1/me/storefront`, {
+      headers: {
+        authorization: `Bearer ${devToken}`,
+        "media-user-token": token,
+        origin: "https://music.apple.com",
+        referer: "https://music.apple.com/",
+        "user-agent": APPLE_UA,
+      },
+    })
+    if (!res.ok) {
+      return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: `HTTP ${res.status}` }
+    }
+    const json = (await res.json()) as { data?: { id?: string; attributes?: { name?: string } }[] }
+    const storefront = json?.data?.[0]?.id
+    if (!storefront) {
+      return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: "no storefront in response" }
+    }
+    // Active-subscription detection: a storefront resolving is the strongest cheap signal we
+    // have (anonymous/invalid tokens are rejected outright with 401/403).
+    return { ok: true, premium: true, status: "alive", latencyMs: ms, detail: `storefront ${storefront}` }
+  } catch (err) {
+    return {
+      ok: false,
+      premium: false,
+      status: "pending",
+      latencyMs: 0,
+      detail: `probe error: ${err instanceof Error ? err.message : "unknown"}`,
+    }
+  }
+}
+
 async function checkDeezerAccount(payload: Record<string, unknown>): Promise<CheckResult> {
   const arl = String(payload.arl ?? "").trim()
   if (!arl) return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: "missing arl" }
@@ -378,6 +486,7 @@ export async function runCheck(
   if (kind === "api") return checkApi(service, payload)
   if (service === "tidal") return checkTidalAccount(payload, entryFingerprint)
   if (service === "deezer") return checkDeezerAccount(payload)
+  if (service === "apple-music") return checkAppleMusicAccount(payload)
   return checkQobuzAccount(payload)
 }
 

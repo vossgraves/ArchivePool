@@ -1,16 +1,17 @@
 import { createHash } from "crypto"
 
-export type Service = "tidal" | "qobuz" | "deezer"
+export type Service = "tidal" | "qobuz" | "deezer" | "apple-music"
 export type Kind = "api" | "account"
 export type Status = "pending" | "alive" | "preview" | "dead"
 
-export const SERVICES: Service[] = ["tidal", "qobuz", "deezer"]
+export const SERVICES: Service[] = ["tidal", "qobuz", "deezer", "apple-music"]
 export const KINDS: Kind[] = ["api", "account"]
 
 export const SERVICE_LABELS: Record<Service, string> = {
   tidal: "Tidal",
   qobuz: "Qobuz",
   deezer: "Deezer",
+  "apple-music": "Apple Music",
 }
 
 export const KIND_LABELS: Record<Kind, string> = {
@@ -27,10 +28,13 @@ export const CATEGORIES: { service: Service; kind: Kind; label: string }[] = [
   // Deezer is account-only: there is no self-hosted instance/restream tier for it, so no
   // "Deezer API" category exists.
   { service: "deezer", kind: "account", label: "Deezer Account" },
+  // Apple Music is account-only too: the credential is the personal Media-User-Token
+  // (0.Ap…) from a contributor's Apple Music web session.
+  { service: "apple-music", kind: "account", label: "Apple Music Account" },
 ]
 
 export function isService(v: unknown): v is Service {
-  return v === "tidal" || v === "qobuz" || v === "deezer"
+  return v === "tidal" || v === "qobuz" || v === "deezer" || v === "apple-music"
 }
 export function isKind(v: unknown): v is Kind {
   return v === "api" || v === "account"

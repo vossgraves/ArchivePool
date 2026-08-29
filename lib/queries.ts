@@ -151,6 +151,11 @@ export async function leasePool() {
     // Deezer is account-only. `apis` stays an empty list for shape symmetry so the app can parse
     // every service with the same code path.
     deezer: { apis: group("deezer", "api"), accounts: group("deezer", "account") },
+    // Apple Music is account-only as well: the credential is the personal Media-User-Token
+    // (0.Ap…) from a contributor's web session. The dev (Bearer) JWT is deliberately NOT
+    // pooled — apps self-scrape a fresh web token, so pooling a long-lived JWT would only
+    // widen the blast radius.
+    "apple-music": { apis: group("apple-music", "api"), accounts: group("apple-music", "account") },
   }
 
   // Stamp after selection so rotation advances.
