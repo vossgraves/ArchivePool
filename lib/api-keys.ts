@@ -98,7 +98,7 @@ export async function createApiKeyWithValue(
   const [row] = await db
     .insert(apiKeys)
     .values({ name, keyHash, prefix: value.slice(0, KEY_PREFIX.length + 6) })
-    .returning({ id: apiKeys.id })
+    .returning({ id: apiKeys.id, prefix: apiKeys.prefix })
   return { id: row.id, prefix: row.prefix }
 }
 
