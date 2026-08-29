@@ -38,6 +38,12 @@ function buildPayload(service: Service, kind: Kind, form: FormData): Record<stri
       note,
     }
   }
+  if (service === "apple-music") {
+    return {
+      token: String(form.get("token") ?? "").trim(),
+      note,
+    }
+  }
   // qobuz account
   return {
     token: String(form.get("token") ?? "").trim(),
@@ -67,6 +73,12 @@ function validate(service: Service, kind: Kind, payload: Record<string, unknown>
     if (!/^[a-f0-9]{100,}$/i.test(arl)) {
       return "That doesn't look like an ARL — expected a long hexadecimal string."
     }
+    return null
+  }
+  if (service === "apple-music") {
+    const token = String(payload.token ?? "").trim()
+    if (!token) return "Apple Music submissions need a Media-User-Token."
+    if (!token.startsWith("0.")) return "That doesn't look like a Media-User-Token — it should start with \"0.\"."
     return null
   }
   if (!String(payload.token ?? "").trim()) return "A token is required for account submissions."

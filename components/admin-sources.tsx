@@ -11,6 +11,7 @@ const CATEGORIES: { service: string; kind: string; label: string }[] = [
   { service: "qobuz", kind: "api", label: "Qobuz API" },
   { service: "qobuz", kind: "account", label: "Qobuz Account" },
   { service: "deezer", kind: "account", label: "Deezer Account" },
+  { service: "apple-music", kind: "account", label: "Apple Music Account" },
 ]
 
 type EntryRow = {

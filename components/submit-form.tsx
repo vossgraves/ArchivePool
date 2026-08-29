@@ -189,18 +189,19 @@ export function SubmitForm() {
       <div className="flex flex-col gap-3">
         <span className="text-sm font-medium">Service</span>
         <Segmented
-          options={["tidal", "qobuz", "deezer"] as Service[]}
+          options={["tidal", "qobuz", "deezer", "apple-music"] as Service[]}
           value={service}
           onChange={(next) => {
             setService(next)
-            // Deezer has no self-hosted instance tier, so an "api" submission is meaningless.
-            if (next === "deezer") setKind("account")
+            // Deezer and Apple Music have no self-hosted instance tier, so an "api"
+            // submission is meaningless for them.
+            if (next === "deezer" || next === "apple-music") setKind("account")
           }}
           labels={SERVICE_LABELS}
         />
       </div>
 
-      {service !== "deezer" && (
+      {service !== "deezer" && service !== "apple-music" && (
         <div className="flex flex-col gap-3">
           <span className="text-sm font-medium">Type</span>
           <Segmented options={["api", "account"] as Kind[]} value={kind} onChange={setKind} labels={KIND_LABELS} />
@@ -275,6 +276,23 @@ export function SubmitForm() {
               </p>
             </div>
           </details>
+        </div>
+      ) : service === "apple-music" ? (
+        <div className="flex flex-col gap-4">
+          <Field
+            key="apple-music-token"
+            label="Media-User-Token"
+            name="token"
+            required
+            placeholder="0.Ap…"
+            hint="Your personal Apple Music web token (always starts with 0.). Sign in at music.apple.com, then copy the `media-user-token` value from your browser's dev tools (Application → Cookies) or from any authenticated API request header."
+          />
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            The token unlocks user-scoped Apple Music features (lyrics, storefront) and — with an
+            active subscription — full-track playback. It expires when you sign out of the web
+            player, so re-submit if your token stops working. The dev (Bearer) JWT is not needed:
+            apps fetch their own.
+          </p>
         </div>
       ) : service === "deezer" ? (
         <div className="flex flex-col gap-4">
