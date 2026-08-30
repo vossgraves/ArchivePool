@@ -11,6 +11,24 @@ import { db } from "./index"
  * `CREATE TABLE IF NOT EXISTS` here, executed once per process (memoized below).
  */
 const STATEMENTS: string[] = [
+  // Added 2026-08-30: users IP/UA columns. Discovered on production: the database was recreated
+  // from an older schema.sql that predated these ALTERs, so `select *`-shaped Drizzle queries on
+  // users (login, signup) failed with "column does not exist" → HTTP 500 on the entire auth
+  // flow while every other table kept working. Schema drift on any recreated database now
+  // self-heals on first request instead of taking the dashboard down.
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS created_ip text NOT NULL DEFAULT ''`,
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS created_ua text NOT NULL DEFAULT ''`,
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_ip text NOT NULL DEFAULT ''`,
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_ua text NOT NULL DEFAULT ''`,
+  // Same drift class for api_keys (reason/deleted/user_id were added post-release; the key
+  // dashboard and per-user key ownership 500 without them on an old-schema database). The
+  // ADD COLUMN form carries its FK constraint along when the column is genuinely missing.
+  `ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS user_id integer REFERENCES users(id) ON DELETE CASCADE`,
+  `ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS reason text NOT NULL DEFAULT ''`,
+  `ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS deleted boolean NOT NULL DEFAULT false`,
+  `CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys (user_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_api_keys_deleted ON api_keys (deleted)`,
+
   // Added 2026-08: API key request workflow (request → admin approval).
   `CREATE TABLE IF NOT EXISTS api_key_requests (
     id               serial PRIMARY KEY,
