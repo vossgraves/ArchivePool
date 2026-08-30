@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server"
-import { verifyReadKey } from "@/lib/api-keys"
-import { clientEncryptionEnabled } from "@/lib/crypto"
+import { readKeyFromRequest, verifyReadKey } from "@/lib/api-keys"
+import { clientEncryptionEnabled, deriveClientKey } from "@/lib/crypto"
 import { leasePool } from "@/lib/queries"
 
 export const dynamic = "force-dynamic"
@@ -16,11 +16,15 @@ export const dynamic = "force-dynamic"
  *
  * Reading ALWAYS requires a valid per-app read key — the credential feed is never public, no
  * env toggle. Keys are created by user accounts on /dashboard (or admin-created for legacy CI
- * builds); the app presents one as Bearer.
+ * builds); the app presents one as a Bearer token.
+ *
+ * One-secret design (X-Pool-Client: v2): sensitive fields are encrypted with a key derived from
+ * the presented read key, so a v2 client needs ONLY that key. Legacy clients (no header) keep
+ * receiving POOL_CLIENT_KEY ciphertext.
  */
 export async function GET(req: NextRequest) {
-  // Account credentials must never fall back to a plaintext response when client encryption is off.
-  if (!clientEncryptionEnabled()) {
+  const v2 = req.headers.get("x-pool-client")?.trim().toLowerCase() === "v2"
+  if (!v2 && !clientEncryptionEnabled()) {
     return NextResponse.json(
       { error: "security_not_configured", detail: "Credential delivery is unavailable." },
       { status: 503, headers: { "cache-control": "private, no-store" } },
@@ -37,16 +41,20 @@ export async function GET(req: NextRequest) {
   }
 
   // Leases a few entries per category rather than returning the whole pool, so a leaked key
-  // (or the POOL_CLIENT_KEY baked into the APK) exposes a handful of credentials instead of
-  // every one we hold. See LEASE_PER_CATEGORY_ACCOUNT for why this is not 1.
-  const { pool } = await leasePool()
+  // (or a baked-in build key) exposes a handful of credentials instead of every one we hold.
+  // See LEASE_PER_CATEGORY_ACCOUNT for why this is not 1.
+  const readKey = readKeyFromRequest(req)
+  const clientKey = v2 && readKey ? deriveClientKey(readKey) : null
+  const { pool } = await leasePool(clientKey)
   return NextResponse.json(
     {
       version: 1,
       generatedAt: new Date().toISOString(),
       // When true, sensitive fields (token/appId/…) are AES-256-GCM ciphertext in the
-      // `enc:1:<iv>:<ct+tag>` format and must be decrypted with POOL_CLIENT_KEY.
-      encrypted: clientEncryptionEnabled(),
+      // `enc:1:<iv>:<ct+tag>` format. `encryption` says which key protects them — see
+      // /api/accounts for the two schemes.
+      encrypted: true,
+      encryption: v2 ? "read-key" : "client-key",
       // The split feeds that replace this combined response.
       accountsFeed: "/api/accounts",
       instancesFeed: "/api/instances/{service}",

@@ -137,24 +137,28 @@ interface LeasedEntry {
   [key: string]: unknown
 }
 
-function toLeased(row: {
-  id: number
-  premium: boolean
-  status: string
-  latencyMs: number | null
-  lastCheckedAt: Date | null
-  payload: Record<string, unknown>
-}): LeasedEntry {
+function toLeased(
+  row: {
+    id: number
+    premium: boolean
+    status: string
+    latencyMs: number | null
+    lastCheckedAt: Date | null
+    payload: Record<string, unknown>
+  },
+  clientKey?: Buffer | null,
+): LeasedEntry {
   // Credentials are stored encrypted at rest. Decrypt with the server key, then re-encrypt the
-  // sensitive fields with the client key so the JSON leaving the server is ciphertext end-to-end
-  // (the app decrypts locally). The routes fail closed when POOL_CLIENT_KEY is absent.
+  // sensitive fields with the client key (per-requester derived key for v2 clients, static
+  // POOL_CLIENT_KEY for legacy ones) so the JSON leaving the server is ciphertext end-to-end
+  // (the app decrypts locally). The routes fail closed when no key is available.
   return {
     id: row.id,
     premium: row.premium,
     status: row.status,
     latencyMs: row.latencyMs,
     lastCheckedAt: row.lastCheckedAt ? new Date(row.lastCheckedAt).toISOString() : null,
-    ...encryptForClient(decryptAtRest(row.payload)),
+    ...encryptForClient(decryptAtRest(row.payload), clientKey),
   }
 }
 
@@ -164,7 +168,7 @@ function toLeased(row: {
  * selection. Availability is never traded for exposure: a thin pool degrades (fewer entries)
  * instead of erroring.
  */
-export async function leaseAccounts() {
+export async function leaseAccounts(clientKey?: Buffer | null) {
   await ensureSchema()
   const rows = await db
     .select()
@@ -184,7 +188,7 @@ export async function leaseAccounts() {
   const group = (service: Service) => {
     const picked = rows.filter((r) => r.service === service).slice(0, LEASE_PER_CATEGORY_ACCOUNT)
     for (const r of picked) leasedIds.push(r.id)
-    return picked.map(toLeased)
+    return picked.map((r) => toLeased(r, clientKey))
   }
 
   const accounts = {
@@ -209,7 +213,7 @@ export async function leaseAccounts() {
  * instances. Instance payloads are not secret (baseUrl must be readable), so the entries pass
  * through `toLeased` unchanged apart from any optional encrypted extras (e.g. note).
  */
-export async function leaseInstances() {
+export async function leaseInstances(clientKey?: Buffer | null) {
   await ensureSchema()
   const rows = await db
     .select()
@@ -225,7 +229,7 @@ export async function leaseInstances() {
   const group = (service: Service) => {
     const picked = rows.filter((r) => r.service === service).slice(0, LEASE_PER_CATEGORY_API)
     for (const r of picked) leasedIds.push(r.id)
-    return picked.map(toLeased)
+    return picked.map((r) => toLeased(r, clientKey))
   }
 
   const apis = {
@@ -244,8 +248,11 @@ export async function leaseInstances() {
  * predating the split. New clients should consume /api/accounts (tokens) and
  * /api/instances/[service] (URLs) separately.
  */
-export async function leasePool() {
-  const [{ accounts }, { apis }] = await Promise.all([leaseAccounts(), leaseInstances()])
+export async function leasePool(clientKey?: Buffer | null) {
+  const [{ accounts }, { apis }] = await Promise.all([
+    leaseAccounts(clientKey),
+    leaseInstances(clientKey),
+  ])
   return {
     pool: {
       tidal: { apis: apis.tidal, accounts: accounts.tidal },

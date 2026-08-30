@@ -31,6 +31,16 @@ function extractKey(req: NextRequest): string | null {
 }
 
 /**
+ * The raw read key this request presented (Authorization: Bearer … or X-Api-Key), or null.
+ * Used by feed routes to derive the per-requester client-encryption key after verifyReadKey
+ * has authenticated it — the value is never persisted, only hashed (verifyReadKey) or used
+ * as key material (deriveClientKey) within the request's lifetime.
+ */
+export function readKeyFromRequest(req: NextRequest): string | null {
+  return extractKey(req)
+}
+
+/**
  * Validate the request's read key against the api_keys table. Returns true when a
  * non-revoked key matches. Also bumps use_count / last_used_at (best-effort).
  *

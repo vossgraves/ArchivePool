@@ -1,5 +1,5 @@
 import "server-only"
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto"
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto"
 
 /**
  * Field-level AES-256-GCM encryption for sensitive credential values.
@@ -143,12 +143,36 @@ export function decryptAtRest(payload: Payload): Payload {
 }
 
 /**
+ * Domain separator for per-requester client-key derivation. Must match the Android
+ * implementation in PoolCrypto.kt byte-for-byte.
+ */
+const CLIENT_KEY_DOMAIN = "archivepool-client:"
+
+/**
+ * Derives the per-requester client-encryption key from the read key the requester presented.
+ *
+ * This is the "one secret" design: an app that holds a valid read key can always decrypt its
+ * own feed, because the encryption key is a pure function of the read key it sends. No
+ * separately-distributed POOL_CLIENT_KEY has to match between the server deployment and the
+ * APK build — the class of "key drift" outages (old database deleted, secret rotated on one
+ * side only, CI secret ≠ Vercel env) disappears for clients that opt in (X-Pool-Client: v2).
+ *
+ * E2E property is preserved — and actually improved: ciphertext captured in transit can only
+ * be decrypted by holders of that read key, instead of by holders of one global client key.
+ */
+export function deriveClientKey(readKey: string): Buffer {
+  return createHash("sha256").update(CLIENT_KEY_DOMAIN + readKey).digest()
+}
+
+/**
  * Re-encrypt sensitive fields with the client key for the response layer. Input must be plaintext
  * (i.e. already `decryptAtRest`-ed). The source route verifies configuration before calling this;
  * the transform's no-key compatibility exists only for migration and non-sensitive internal use.
+ * [keyOverride] carries a per-requester derived key (v2 clients) so the static POOL_CLIENT_KEY
+ * is only needed for legacy clients that predate the scheme.
  */
-export function encryptForClient(payload: Payload): Payload {
-  return transformEncrypt(payload, loadKey("POOL_CLIENT_KEY"))
+export function encryptForClient(payload: Payload, keyOverride?: Buffer | null): Payload {
+  return transformEncrypt(payload, keyOverride ?? loadKey("POOL_CLIENT_KEY"))
 }
 
 /** True when a client key is configured, i.e. `/api/sources` will return ciphertext. */
