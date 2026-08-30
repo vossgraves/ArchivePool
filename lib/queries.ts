@@ -28,6 +28,7 @@ export async function getStatus(): Promise<CategoryStatus[]> {
       service: accountEntries.service,
       status: accountEntries.status,
       premium: accountEntries.premium,
+      disabled: accountEntries.disabled,
       checkCount: accountEntries.checkCount,
       okCount: accountEntries.okCount,
       lastCheckedAt: accountEntries.lastCheckedAt,
@@ -39,6 +40,7 @@ export async function getStatus(): Promise<CategoryStatus[]> {
       service: instanceEntries.service,
       status: instanceEntries.status,
       premium: instanceEntries.premium,
+      disabled: instanceEntries.disabled,
       checkCount: instanceEntries.checkCount,
       okCount: instanceEntries.okCount,
       lastCheckedAt: instanceEntries.lastCheckedAt,
@@ -53,8 +55,10 @@ export async function getStatus(): Promise<CategoryStatus[]> {
 
   return CATEGORIES.map((cat) => {
     const items = rows.filter((r) => r.service === cat.service && r.kind === cat.kind)
-    const alive = items.filter((r) => r.status === "alive" || r.status === "preview").length
-    const premium = items.filter((r) => r.status === "alive" && r.premium).length
+    // Disabled entries (auto-disabled by the sweep, or non-premium per pool policy) are not
+    // served to anyone, so they must not count as alive/premium on the public page.
+    const alive = items.filter((r) => !r.disabled && (r.status === "alive" || r.status === "preview")).length
+    const premium = items.filter((r) => !r.disabled && r.status === "alive" && r.premium).length
     const dead = items.filter((r) => r.status === "dead").length
     const pending = items.filter((r) => r.status === "pending").length
     const totalChecks = items.reduce((a, r) => a + r.checkCount, 0)

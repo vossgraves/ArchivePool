@@ -45,7 +45,7 @@ export async function POST(req: NextRequest) {
     revalidatePath("/")
     return NextResponse.json({
       state: "authorized",
-      saved: true,
+      saved: result.saved,
       ok: result.ok,
       status: result.status,
       premium: result.premium,

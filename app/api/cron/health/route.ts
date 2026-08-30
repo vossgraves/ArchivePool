@@ -21,6 +21,7 @@ export async function GET(req: NextRequest) {
       fetched: 0,
       inserted: 0,
       skippedKnown: 0,
+      rejected: 0,
       errors: [err instanceof Error ? err.message : "unknown ingestion error"],
     }
   }

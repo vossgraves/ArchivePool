@@ -23,6 +23,7 @@ export interface MonochromeSyncResult {
   added: number     // passed check, newly inserted
   updated: number   // already existed, status updated
   failed: number    // health check did not pass
+  rejected: number  // reachable but not premium/hi-res — not added (new) per pool policy
 }
 
 /**
@@ -67,6 +68,7 @@ export async function syncMonochromeInstances(): Promise<MonochromeSyncResult> {
     added: 0,
     updated: 0,
     failed: 0,
+    rejected: 0,
   }
 
   if (allUrls.length === 0) return result
@@ -142,7 +144,31 @@ export async function syncMonochromeInstances(): Promise<MonochromeSyncResult> {
       return
     }
 
-    // 5. Upsert the passing instance.
+    // Pool policy: instances must be premium (hi-res capable) too. A reachable instance
+    // without hi-res markers is never added; an existing one is disabled so discovery and
+    // the lease feed stop serving it. It re-enables automatically if a later sync or sweep
+    // detects premium capability.
+    if (!check.premium) {
+      result.rejected++
+      if (existing && !existing.removed) {
+        await db
+          .update(instanceEntries)
+          .set({
+            status: check.status,
+            premium: false,
+            detail: `reachable but not premium (${check.detail})`,
+            latencyMs: check.latencyMs,
+            disabled: true,
+            checkCount: sql`${instanceEntries.checkCount} + 1`,
+            lastCheckedAt: new Date(),
+          })
+          .where(eq(instanceEntries.fingerprint, fp))
+        result.updated++
+      }
+      return
+    }
+
+    // 5. Upsert the passing (premium) instance.
     const label = maskLabel("tidal", "api", payload)
     const storedPayload = encryptAtRest(payload)
 

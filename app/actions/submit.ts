@@ -112,21 +112,22 @@ export async function submitSource(_prev: SubmitState, form: FormData): Promise<
 
   revalidatePath("/")
 
-  if (!result.ok) {
+  if (!result.saved) {
+    // Pool admission policy: rejected because the live check failed, or because the source
+    // works but has no premium/lossless entitlement. Nothing was stored.
     return {
-      ok: true,
+      ok: false,
       status: result.status,
       premium: result.premium,
-      message: `Saved, but the live check failed (${result.detail}). It will be retried automatically and excluded from the pool until it passes.`,
+      message: result.ok
+        ? "Not added: this source works but has no premium/lossless entitlement. The pool only accepts premium sources."
+        : `Not added: the live check failed (${result.detail}). Only working, premium sources are accepted.`,
     }
   }
   return {
     ok: true,
     status: result.status,
     premium: result.premium,
-    message:
-      result.status === "alive"
-        ? "Verified and added to the pool as a premium source. Thank you!"
-        : "Added to the pool. It works but was not detected as premium/lossless.",
+    message: "Verified as working and premium — added to the pool. Thank you!",
   }
 }

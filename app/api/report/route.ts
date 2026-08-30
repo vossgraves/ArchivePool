@@ -135,10 +135,14 @@ export async function POST(req: NextRequest) {
       await db.update(table).set({ disabled: true }).where(eq(table.id, entry.id))
     }
   } else if (reportType === "not_premium") {
+    // Pool policy: non-premium entries are not served, so the report both clears the flag
+    // and disables the entry. The sweep re-verifies hourly and re-enables it if the
+    // server-side check still sees a premium entitlement (false reports self-heal).
     await db
       .update(table)
       .set({
         premium: false,
+        disabled: true,
         checkCount: sql`${table.checkCount} + 1`,
       })
       .where(eq(table.id, entry.id))

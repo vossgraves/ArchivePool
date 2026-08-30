@@ -196,7 +196,7 @@ export async function fetchFirehawkRendered(): Promise<{ qobuz: FirehawkQobuzTok
  */
 export async function ingestExternalSources(
   maxNew = 10,
-): Promise<{ fetched: number; inserted: number; skippedKnown: number; errors: string[] }> {
+): Promise<{ fetched: number; inserted: number; skippedKnown: number; rejected: number; errors: string[] }> {
   const { inArray } = await import("drizzle-orm")
   const { ingestSource } = await import("@/lib/ingest")
   const { fingerprint } = await import("@/lib/sources")
@@ -208,6 +208,7 @@ export async function ingestExternalSources(
   let fetched = 0
   let inserted = 0
   let skippedKnown = 0
+  let rejected = 0
 
   type Candidate = { service: "qobuz" | "deezer"; kind: "account"; payload: Record<string, unknown> }
   const candidates: Candidate[] = []
@@ -238,7 +239,7 @@ export async function ingestExternalSources(
   }
 
   fetched = candidates.length
-  if (fetched === 0) return { fetched, inserted, skippedKnown, errors }
+  if (fetched === 0) return { fetched, inserted, skippedKnown, rejected, errors }
 
   // Dedupe against the DB: fingerprints are unique per (service, kind, credential).
   const fps = [...new Set(candidates.map((c) => fingerprint(c.service, c.kind, c.payload)))]
@@ -271,6 +272,7 @@ export async function ingestExternalSources(
       try {
         const result = await ingestSource(c.service, c.kind, c.payload)
         if (result.saved) inserted += 1
+        else rejected += 1 // working-but-not-premium or failed live check — not stored
       } catch (err) {
         errors.push(`ingest failed: ${err instanceof Error ? err.message : "unknown"}`)
       }
@@ -278,5 +280,5 @@ export async function ingestExternalSources(
   })
   await Promise.all(workers)
 
-  return { fetched, inserted, skippedKnown, errors }
+  return { fetched, inserted, skippedKnown, rejected, errors }
 }

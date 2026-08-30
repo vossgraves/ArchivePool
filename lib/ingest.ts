@@ -15,10 +15,13 @@ export interface IngestResult {
 }
 
 /**
- * Runs a live health check on a candidate source and upserts it into the pool, deduped by
- * fingerprint. Shared by the manual submit form, the Tidal OAuth device flow and the external
- * community-token ingester so all paths behave identically (same validation, same dedupe, same
- * auto-disable accounting).
+ * Runs a live health check on a candidate source and — only when it is BOTH working and
+ * premium — upserts it into the pool, deduped by fingerprint. Shared by the manual submit
+ * form, the Tidal/Qobuz OAuth device flows and the external community-token ingester so all
+ * paths behave identically (same validation, same dedupe, same admission policy).
+ *
+ * Admission policy: `!ok || !premium` ⇒ `saved: false` and nothing is persisted. Dead or
+ * free-tier candidates never enter the database.
  *
  * Storage is split by kind: account credentials go to `account_entries` (always encrypted at
  * rest), instance base URLs to `instance_entries`.
@@ -37,6 +40,24 @@ export async function ingestSource(
   const fp = fingerprint(service, kind, payload)
   const label = maskLabel(service, kind, payload)
   const result: CheckResult = await runCheck(service, kind, payload, fp)
+
+  // Pool admission policy: only WORKING + PREMIUM sources are stored. A candidate that fails
+  // its live check, or one that works but carries no premium/lossless entitlement, is rejected
+  // outright (saved: false) instead of being persisted as a dead/preview row. Applies to both
+  // accounts and instances — a reachable restream instance without hi-res capability is just as
+  // useless to a lossless pool as a free-tier credential.
+  if (!result.ok || !result.premium) {
+    return {
+      ok: result.ok,
+      saved: false,
+      status: result.status,
+      premium: result.premium,
+      detail: !result.ok
+        ? `rejected — live check failed (${result.detail})`
+        : `rejected — working but no premium/lossless entitlement (${result.detail})`,
+    }
+  }
+
   const storedPayload = encryptAtRest(payload)
   const table = kind === "account" ? accountEntries : instanceEntries
 

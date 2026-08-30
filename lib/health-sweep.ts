@@ -84,6 +84,12 @@ export async function runHealthSweep(force = false) {
     if (!result.ok && nextConsecutive >= AUTO_DISABLE_AFTER) {
       if (!entry.disabled) disabled++
       nextDisabled = true
+    } else if (result.ok && !result.premium) {
+      // Working but no premium entitlement (free tier / lossy-only instance): disable
+      // immediately — the pool only serves premium sources. Applies to every kind; the
+      // entry self-heals on a later sweep if the entitlement returns (ok && premium).
+      if (!entry.disabled) disabled++
+      nextDisabled = true
     } else if (result.ok && entry.disabled) {
       nextDisabled = false
       reenabled++
@@ -152,6 +158,7 @@ export async function checkEntryById(id: number) {
   const nextConsecutive = result.ok ? 0 : entry.consecutiveFailures + 1
   let nextDisabled = entry.disabled
   if (!result.ok && nextConsecutive >= AUTO_DISABLE_AFTER) nextDisabled = true
+  else if (result.ok && !result.premium) nextDisabled = true // premium-only pool policy
   else if (result.ok && entry.disabled) nextDisabled = false
 
   await db
