@@ -1,22 +1,19 @@
 import { NextResponse, type NextRequest } from "next/server"
 import { verifyReadKey } from "@/lib/api-keys"
 import { clientEncryptionEnabled } from "@/lib/crypto"
-import { leasePool } from "@/lib/queries"
+import { leaseAccounts } from "@/lib/queries"
 
 export const dynamic = "force-dynamic"
 
 /**
- * LEGACY combined pool feed. Kept byte-compatible for app builds predating the account/instance
- * split — it returns both `apis` (instance URLs) and `accounts` (credentials) per service, from
- * the now-separate account_entries / instance_entries tables.
- *
- * New clients should consume the split feeds instead:
- *  - /api/accounts             → account credentials only (tokens/ARLs)
- *  - /api/instances/[service]  → instance base URLs only
+ * ACCOUNT-CREDENTIALS-ONLY feed. This is the token half of the split pool:
+ *  - /api/accounts  → this route. Account tokens/ARLs only. Never contains instance URLs.
+ *  - /api/instances/[service] → instance base URLs only. Never contains credentials.
  *
  * Reading ALWAYS requires a valid per-app read key — the credential feed is never public, no
  * env toggle. Keys are created by user accounts on /dashboard (or admin-created for legacy CI
- * builds); the app presents one as Bearer.
+ * builds); the app presents one as Bearer. Response shape matches the `accounts` half of the
+ * legacy /api/sources feed, so the same client parser handles both.
  */
 export async function GET(req: NextRequest) {
   // Account credentials must never fall back to a plaintext response when client encryption is off.
@@ -36,21 +33,18 @@ export async function GET(req: NextRequest) {
     )
   }
 
-  // Leases a few entries per category rather than returning the whole pool, so a leaked key
+  // Leases a few accounts per service rather than returning the whole pool, so a leaked key
   // (or the POOL_CLIENT_KEY baked into the APK) exposes a handful of credentials instead of
   // every one we hold. See LEASE_PER_CATEGORY_ACCOUNT for why this is not 1.
-  const { pool } = await leasePool()
+  const { accounts } = await leaseAccounts()
   return NextResponse.json(
     {
-      version: 1,
+      version: 2,
       generatedAt: new Date().toISOString(),
       // When true, sensitive fields (token/appId/…) are AES-256-GCM ciphertext in the
       // `enc:1:<iv>:<ct+tag>` format and must be decrypted with POOL_CLIENT_KEY.
       encrypted: clientEncryptionEnabled(),
-      // The split feeds that replace this combined response.
-      accountsFeed: "/api/accounts",
-      instancesFeed: "/api/instances/{service}",
-      ...pool,
+      ...accounts,
     },
     {
       headers: {

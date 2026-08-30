@@ -1,7 +1,8 @@
 import { eq, sql } from "drizzle-orm"
 import { atRestEncryptionEnabled, decryptAtRest, encryptAtRest } from "@/lib/crypto"
 import { db } from "@/lib/db"
-import { healthLog, sourceEntries } from "@/lib/db/schema"
+import { accountEntries, healthLog, instanceEntries } from "@/lib/db/schema"
+import { ensureSchema } from "@/lib/db/ensure"
 import { runCheck } from "@/lib/health"
 import type { Kind, Service } from "@/lib/sources"
 
@@ -20,8 +21,38 @@ async function mapLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<v
   await Promise.all(workers)
 }
 
+type PoolEntry = {
+  id: number
+  service: string
+  label: string
+  payload: Record<string, unknown>
+  fingerprint: string
+  status: string
+  premium: boolean
+  detail: string | null
+  latencyMs: number | null
+  consecutiveFailures: number
+  checkCount: number
+  okCount: number
+  disabled: boolean
+  removed: boolean
+  lastCheckedAt: Date | null
+  lastLeasedAt: Date | null
+  createdAt: Date
+} & { kind: "account" | "api" }
+
+async function allPoolEntries(): Promise<PoolEntry[]> {
+  const accounts = await db.select().from(accountEntries).where(eq(accountEntries.removed, false))
+  const instances = await db.select().from(instanceEntries).where(eq(instanceEntries.removed, false))
+  return [
+    ...accounts.map((e) => ({ ...e, kind: "account" as const })),
+    ...instances.map((e) => ({ ...e, kind: "api" as const })),
+  ]
+}
+
 export async function runHealthSweep(force = false) {
-  const allEntries = await db.select().from(sourceEntries).where(eq(sourceEntries.removed, false))
+  await ensureSchema()
+  const allEntries = await allPoolEntries()
   if (allEntries.some((entry) => entry.kind === "account") && !atRestEncryptionEnabled()) {
     throw new Error("POOL_ENCRYPTION_KEY is required to process account credentials")
   }
@@ -37,13 +68,14 @@ export async function runHealthSweep(force = false) {
   let reenabled = 0
 
   await mapLimit(entries, CONCURRENCY, async (entry) => {
+    const table = entry.kind === "account" ? accountEntries : instanceEntries
     const plaintextPayload = decryptAtRest(entry.payload)
     // Migrate rows written by older deployments before checking. A Tidal check may rotate its
     // refresh token, so migrating afterwards could overwrite the newly issued credential.
     await db
-      .update(sourceEntries)
+      .update(table)
       .set({ payload: encryptAtRest(plaintextPayload) })
-      .where(eq(sourceEntries.id, entry.id))
+      .where(eq(table.id, entry.id))
     const result = await runCheck(entry.service as Service, entry.kind as Kind, plaintextPayload, entry.fingerprint)
     checked++
 
@@ -58,7 +90,7 @@ export async function runHealthSweep(force = false) {
     }
 
     await db
-      .update(sourceEntries)
+      .update(table)
       .set({
         status: result.status,
         premium: result.premium,
@@ -66,11 +98,11 @@ export async function runHealthSweep(force = false) {
         latencyMs: result.latencyMs,
         consecutiveFailures: nextConsecutive,
         disabled: nextDisabled,
-        checkCount: sql`${sourceEntries.checkCount} + 1`,
-        okCount: sql`${sourceEntries.okCount} + ${result.ok ? 1 : 0}`,
+        checkCount: sql`${table.checkCount} + 1`,
+        okCount: sql`${table.okCount} + ${result.ok ? 1 : 0}`,
         lastCheckedAt: new Date(),
       })
-      .where(eq(sourceEntries.id, entry.id))
+      .where(eq(table.id, entry.id))
 
     await db.insert(healthLog).values({
       entryId: entry.id,
@@ -89,21 +121,31 @@ export async function runHealthSweep(force = false) {
  * Check exactly one entry and persist the result, using the same rules as the full sweep
  * (auto-disable threshold, health_log append, at-rest payload migration). Used by the admin
  * panel so a single suspect account can be re-verified without sweeping the whole pool.
+ *
+ * Ids are globally unique across account_entries/instance_entries (shared sequence), so the
+ * table is resolved by trying both.
  */
 export async function checkEntryById(id: number) {
-  const [entry] = await db.select().from(sourceEntries).where(eq(sourceEntries.id, id)).limit(1)
+  await ensureSchema()
+  const [account] = await db.select().from(accountEntries).where(eq(accountEntries.id, id)).limit(1)
+  let entry: PoolEntry | undefined = account ? { ...account, kind: "account" } : undefined
+  if (!entry) {
+    const [instance] = await db.select().from(instanceEntries).where(eq(instanceEntries.id, id)).limit(1)
+    if (instance) entry = { ...instance, kind: "api" }
+  }
   if (!entry) return null
   if (entry.kind === "account" && !atRestEncryptionEnabled()) {
     throw new Error("POOL_ENCRYPTION_KEY is required to process account credentials")
   }
 
+  const table = entry.kind === "account" ? accountEntries : instanceEntries
   const plaintextPayload = decryptAtRest(entry.payload)
   // Migrate before checking: a Tidal check can rotate its refresh token, so writing the
   // migrated payload afterwards would clobber the newly issued credential.
   await db
-    .update(sourceEntries)
+    .update(table)
     .set({ payload: encryptAtRest(plaintextPayload) })
-    .where(eq(sourceEntries.id, entry.id))
+    .where(eq(table.id, entry.id))
 
   const result = await runCheck(entry.service as Service, entry.kind as Kind, plaintextPayload, entry.fingerprint)
 
@@ -113,7 +155,7 @@ export async function checkEntryById(id: number) {
   else if (result.ok && entry.disabled) nextDisabled = false
 
   await db
-    .update(sourceEntries)
+    .update(table)
     .set({
       status: result.status,
       premium: result.premium,
@@ -121,11 +163,11 @@ export async function checkEntryById(id: number) {
       latencyMs: result.latencyMs,
       consecutiveFailures: nextConsecutive,
       disabled: nextDisabled,
-      checkCount: sql`${sourceEntries.checkCount} + 1`,
-      okCount: sql`${sourceEntries.okCount} + ${result.ok ? 1 : 0}`,
+      checkCount: sql`${table.checkCount} + 1`,
+      okCount: sql`${table.okCount} + ${result.ok ? 1 : 0}`,
       lastCheckedAt: new Date(),
     })
-    .where(eq(sourceEntries.id, entry.id))
+    .where(eq(table.id, entry.id))
 
   await db.insert(healthLog).values({
     entryId: entry.id,

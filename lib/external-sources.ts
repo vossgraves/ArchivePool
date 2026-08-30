@@ -11,7 +11,7 @@
  *    contains no token JSON). We therefore treat qbdlxui as *not* a viable pool source and keep firehawk52 as primary.
  *
  * Health checks (lib/health.ts) already verify Qobuz (appId+appSecret+token via track/getFileUrl signature) and Deezer (ARL via gw-light.php).
- * External tokens should be inserted as `sourceEntries` with `status='pending'` and let the cron sweep promote them to `alive`/`dead`.
+ * External tokens should be inserted as `accountEntries` with `status='pending'` and let the cron sweep promote them to `alive`/`dead`.
  *
  * Usage: call `fetchFirehawkTokens()` from an admin cron or manual trigger, then insert via `insertExternalTokens()`.
  */
@@ -201,7 +201,9 @@ export async function ingestExternalSources(
   const { ingestSource } = await import("@/lib/ingest")
   const { fingerprint } = await import("@/lib/sources")
   const { db } = await import("@/lib/db")
-  const { sourceEntries } = await import("@/lib/db/schema")
+  const { accountEntries } = await import("@/lib/db/schema")
+  const { ensureSchema } = await import("@/lib/db/ensure")
+  await ensureSchema() // account_entries must exist before the dedupe query below runs
   const errors: string[] = []
   let fetched = 0
   let inserted = 0
@@ -245,9 +247,9 @@ export async function ingestExternalSources(
     for (let i = 0; i < fps.length; i += 100) {
       const batch = fps.slice(i, i + 100)
       const rows = await db
-        .select({ fingerprint: sourceEntries.fingerprint })
-        .from(sourceEntries)
-        .where(inArray(sourceEntries.fingerprint, batch))
+        .select({ fingerprint: accountEntries.fingerprint })
+        .from(accountEntries)
+        .where(inArray(accountEntries.fingerprint, batch))
       for (const row of rows) existing.add(row.fingerprint)
     }
     skippedKnown = candidates.length - fps.filter((fp) => !existing.has(fp)).length

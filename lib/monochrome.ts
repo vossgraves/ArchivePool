@@ -2,7 +2,8 @@ import "server-only"
 import { eq, sql } from "drizzle-orm"
 import { encryptAtRest } from "@/lib/crypto"
 import { db } from "@/lib/db"
-import { sourceEntries } from "@/lib/db/schema"
+import { instanceEntries } from "@/lib/db/schema"
+import { ensureSchema } from "@/lib/db/ensure"
 import { runCheck } from "@/lib/health"
 import { fingerprint, maskLabel, normalizeUrl } from "@/lib/sources"
 
@@ -33,6 +34,7 @@ export interface MonochromeSyncResult {
  * Returns a summary so the cron route can log and return it.
  */
 export async function syncMonochromeInstances(): Promise<MonochromeSyncResult> {
+  await ensureSchema()
   // 1. Fetch the feed.
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
@@ -73,14 +75,14 @@ export async function syncMonochromeInstances(): Promise<MonochromeSyncResult> {
   //    recently checked (avoid hammering instances on every 12h sweep).
   const existingRows = await db
     .select({
-      fingerprint: sourceEntries.fingerprint,
-      lastCheckedAt: sourceEntries.lastCheckedAt,
-      status: sourceEntries.status,
-      disabled: sourceEntries.disabled,
-      removed: sourceEntries.removed,
+      fingerprint: instanceEntries.fingerprint,
+      lastCheckedAt: instanceEntries.lastCheckedAt,
+      status: instanceEntries.status,
+      disabled: instanceEntries.disabled,
+      removed: instanceEntries.removed,
     })
-    .from(sourceEntries)
-    .where(sql`${sourceEntries.service} = 'tidal' and ${sourceEntries.kind} = 'api'`)
+    .from(instanceEntries)
+    .where(sql`${instanceEntries.service} = 'tidal'`)
 
   const fingerprintMap = new Map(existingRows.map((r) => [r.fingerprint, r]))
 
@@ -116,17 +118,17 @@ export async function syncMonochromeInstances(): Promise<MonochromeSyncResult> {
       // it accurate even when discovered via monochrome.
       if (existing && !existing.removed) {
         await db
-          .update(sourceEntries)
+          .update(instanceEntries)
           .set({
             status: check.status,
             premium: check.premium,
             detail: check.detail,
             latencyMs: check.latencyMs,
-            consecutiveFailures: sql`${sourceEntries.consecutiveFailures} + 1`,
-            checkCount: sql`${sourceEntries.checkCount} + 1`,
+            consecutiveFailures: sql`${instanceEntries.consecutiveFailures} + 1`,
+            checkCount: sql`${instanceEntries.checkCount} + 1`,
             lastCheckedAt: new Date(),
           })
-          .where(eq(sourceEntries.fingerprint, fp))
+          .where(eq(instanceEntries.fingerprint, fp))
         result.updated++
       }
       continue
@@ -138,10 +140,9 @@ export async function syncMonochromeInstances(): Promise<MonochromeSyncResult> {
 
     const isNew = !existing
     await db
-      .insert(sourceEntries)
+      .insert(instanceEntries)
       .values({
         service: "tidal",
-        kind: "api",
         label,
         payload: storedPayload,
         fingerprint: fp,
@@ -157,7 +158,7 @@ export async function syncMonochromeInstances(): Promise<MonochromeSyncResult> {
         removed: false,
       })
       .onConflictDoUpdate({
-        target: sourceEntries.fingerprint,
+        target: instanceEntries.fingerprint,
         set: {
           status: check.status,
           premium: check.premium,
@@ -166,8 +167,8 @@ export async function syncMonochromeInstances(): Promise<MonochromeSyncResult> {
           consecutiveFailures: 0,
           disabled: false,
           removed: false,
-          checkCount: sql`${sourceEntries.checkCount} + 1`,
-          okCount: sql`${sourceEntries.okCount} + 1`,
+          checkCount: sql`${instanceEntries.checkCount} + 1`,
+          okCount: sql`${instanceEntries.okCount} + 1`,
           lastCheckedAt: new Date(),
         },
       })

@@ -1,7 +1,8 @@
 import { sql } from "drizzle-orm"
 import { atRestEncryptionEnabled, encryptAtRest } from "@/lib/crypto"
 import { db } from "@/lib/db"
-import { sourceEntries } from "@/lib/db/schema"
+import { accountEntries, instanceEntries } from "@/lib/db/schema"
+import { ensureSchema } from "@/lib/db/ensure"
 import { runCheck, type CheckResult } from "@/lib/health"
 import { fingerprint, maskLabel, type Kind, type Service } from "@/lib/sources"
 
@@ -15,14 +16,19 @@ export interface IngestResult {
 
 /**
  * Runs a live health check on a candidate source and upserts it into the pool, deduped by
- * fingerprint. Shared by the manual submit form and the Tidal OAuth device flow so both paths
- * behave identically (same validation, same dedupe, same auto-disable accounting).
+ * fingerprint. Shared by the manual submit form, the Tidal OAuth device flow and the external
+ * community-token ingester so all paths behave identically (same validation, same dedupe, same
+ * auto-disable accounting).
+ *
+ * Storage is split by kind: account credentials go to `account_entries` (always encrypted at
+ * rest), instance base URLs to `instance_entries`.
  */
 export async function ingestSource(
   service: Service,
   kind: Kind,
   payload: Record<string, unknown>,
 ): Promise<IngestResult> {
+  await ensureSchema()
   if (kind === "account" && !atRestEncryptionEnabled()) {
     throw new Error("POOL_ENCRYPTION_KEY is required before account credentials can be accepted")
   }
@@ -32,12 +38,12 @@ export async function ingestSource(
   const label = maskLabel(service, kind, payload)
   const result: CheckResult = await runCheck(service, kind, payload, fp)
   const storedPayload = encryptAtRest(payload)
+  const table = kind === "account" ? accountEntries : instanceEntries
 
   await db
-    .insert(sourceEntries)
+    .insert(table)
     .values({
       service,
-      kind,
       label,
       payload: storedPayload,
       fingerprint: fp,
@@ -53,7 +59,7 @@ export async function ingestSource(
       disabled: false,
     })
     .onConflictDoUpdate({
-      target: sourceEntries.fingerprint,
+      target: table.fingerprint,
       set: {
         payload: storedPayload,
         label,
@@ -61,9 +67,9 @@ export async function ingestSource(
         premium: result.premium,
         detail: result.detail,
         latencyMs: result.latencyMs,
-        checkCount: sql`${sourceEntries.checkCount} + 1`,
-        okCount: sql`${sourceEntries.okCount} + ${result.ok ? 1 : 0}`,
-        consecutiveFailures: result.ok ? 0 : sql`${sourceEntries.consecutiveFailures} + 1`,
+        checkCount: sql`${table.checkCount} + 1`,
+        okCount: sql`${table.okCount} + ${result.ok ? 1 : 0}`,
+        consecutiveFailures: result.ok ? 0 : sql`${table.consecutiveFailures} + 1`,
         lastCheckedAt: new Date(),
         removed: false,
       },
@@ -88,8 +94,10 @@ export function describeSaveError(e: unknown): string {
   if (!process.env.DATABASE_URL) {
     return "The server has no DATABASE_URL set. Add your database connection string in the host's environment variables."
   }
-  if (msg.includes('relation "source_entries" does not exist') || msg.includes("source_entries") && msg.includes("does not exist")) {
-    return "The database has no tables yet. Run scripts/schema.sql against it once, then try again."
+  for (const table of ["account_entries", "instance_entries", "source_entries"]) {
+    if (msg.includes(`relation "${table}" does not exist`) || (msg.includes(table) && msg.includes("does not exist"))) {
+      return "The database has no tables yet. Run scripts/schema.sql against it once, then try again."
+    }
   }
   if (msg.includes("no unique or exclusion constraint") || msg.includes("on conflict")) {
     return "The database schema is out of date (missing the fingerprint unique constraint). Re-run scripts/schema.sql."

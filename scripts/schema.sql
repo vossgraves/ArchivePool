@@ -2,13 +2,29 @@
 -- Run this once against your Postgres database (Neon, Supabase, plain Postgres, etc.)
 -- e.g.  psql "$DATABASE_URL" -f scripts/schema.sql
 
--- Contributed source entries (Tidal/Qobuz API instances + accounts).
-CREATE TABLE IF NOT EXISTS source_entries (
-  id                   serial PRIMARY KEY,
-  service              text NOT NULL,                       -- 'tidal' | 'qobuz'
-  kind                 text NOT NULL,                       -- 'api' | 'account'
-  label                text NOT NULL,
-  payload              jsonb NOT NULL,                       -- sensitive material, never shown publicly
+-- ============================================================================
+-- Pool storage is SPLIT BY CREDENTIAL TYPE (2026-08-30):
+--   account_entries  → contributed account credentials (tokens/ARLs/secrets). Payloads are
+--                      AES-256-GCM encrypted at rest with POOL_ENCRYPTION_KEY (field-level;
+--                      see lib/crypto.ts). Only /api/accounts serves them, re-encrypted
+--                      end-to-end with POOL_CLIENT_KEY.
+--   instance_entries → contributed instance base URLs. baseUrl stays readable for discovery;
+--                      sensitive extras (note) are encrypted.
+--
+-- Both tables share the `source_entry_id_seq` sequence so an id is globally unique across
+-- them — health_log.entry_id, /api/report and the admin endpoints stay unambiguous.
+--
+-- The legacy mixed `source_entries` table is NOT created for fresh installs. Deployments
+-- upgrading from the pre-split schema: see "Upgrading from the original schema" below.
+-- ============================================================================
+
+CREATE SEQUENCE IF NOT EXISTS source_entry_id_seq;
+
+CREATE TABLE IF NOT EXISTS account_entries (
+  id                   integer PRIMARY KEY DEFAULT nextval('source_entry_id_seq'),
+  service              text NOT NULL,                       -- 'tidal' | 'qobuz' | 'deezer' | 'apple-music'
+  label                text NOT NULL,                       -- masked, safe to show publicly
+  payload              jsonb NOT NULL,                       -- ENCRYPTED credentials, never shown publicly
   fingerprint          text NOT NULL UNIQUE,                 -- dedupe key
   status               text NOT NULL DEFAULT 'pending',      -- pending | alive | preview | dead
   premium              boolean NOT NULL DEFAULT false,
@@ -24,15 +40,37 @@ CREATE TABLE IF NOT EXISTS source_entries (
   created_at           timestamptz NOT NULL DEFAULT now()
 );
 
--- Added after the initial release; safe to re-run on an existing database.
-ALTER TABLE source_entries ADD COLUMN IF NOT EXISTS last_leased_at timestamptz;
+CREATE TABLE IF NOT EXISTS instance_entries (
+  id                   integer PRIMARY KEY DEFAULT nextval('source_entry_id_seq'),
+  service              text NOT NULL,                       -- 'tidal' | 'qobuz'
+  label                text NOT NULL,
+  payload              jsonb NOT NULL,                       -- { baseUrl, healthPath?, note? }
+  fingerprint          text NOT NULL UNIQUE,
+  status               text NOT NULL DEFAULT 'pending',
+  premium              boolean NOT NULL DEFAULT false,
+  detail               text,
+  latency_ms           integer,
+  consecutive_failures integer NOT NULL DEFAULT 0,
+  check_count          integer NOT NULL DEFAULT 0,
+  ok_count             integer NOT NULL DEFAULT 0,
+  disabled             boolean NOT NULL DEFAULT false,
+  removed              boolean NOT NULL DEFAULT false,
+  last_checked_at      timestamptz,
+  last_leased_at       timestamptz,
+  created_at           timestamptz NOT NULL DEFAULT now()
+);
 
-CREATE INDEX IF NOT EXISTS idx_source_entries_service_kind ON source_entries (service, kind);
-CREATE INDEX IF NOT EXISTS idx_source_entries_active ON source_entries (status, disabled, removed);
+CREATE INDEX IF NOT EXISTS idx_account_entries_service ON account_entries (service);
+CREATE INDEX IF NOT EXISTS idx_account_entries_active ON account_entries (status, disabled, removed);
 -- Supports the lease query's "premium first, then least recently leased" ordering.
-CREATE INDEX IF NOT EXISTS idx_source_entries_lease ON source_entries (service, kind, premium DESC, last_leased_at NULLS FIRST);
+CREATE INDEX IF NOT EXISTS idx_account_entries_lease ON account_entries (service, premium DESC, last_leased_at NULLS FIRST);
 
--- Per-check health history (used for the aggregate public status).
+CREATE INDEX IF NOT EXISTS idx_instance_entries_service ON instance_entries (service);
+CREATE INDEX IF NOT EXISTS idx_instance_entries_active ON instance_entries (status, disabled, removed);
+CREATE INDEX IF NOT EXISTS idx_instance_entries_lease ON instance_entries (service, premium DESC, last_leased_at NULLS FIRST);
+
+-- Per-check health history (used for the aggregate public status). entry_id is globally unique
+-- across account_entries + instance_entries thanks to the shared id sequence.
 CREATE TABLE IF NOT EXISTS health_log (
   id         serial PRIMARY KEY,
   entry_id   integer NOT NULL,
@@ -45,8 +83,10 @@ CREATE TABLE IF NOT EXISTS health_log (
 
 CREATE INDEX IF NOT EXISTS idx_health_log_entry ON health_log (entry_id, checked_at);
 
--- Per-app read keys. Apps present these to read the sensitive pool JSON.
--- Only the SHA-256 hash is stored; the plaintext is shown once at creation.
+-- Per-app read keys. Apps present these to read the sensitive pool JSON (/api/accounts,
+-- /api/sources, /api/discovery/*). User identity lives ONLY in `users`; pool tables never
+-- reference it — the two data domains are fully separate.
+-- Only the SHA-256 hash of the key is stored; the plaintext is shown once at creation.
 CREATE TABLE IF NOT EXISTS api_keys (
   id           serial PRIMARY KEY,
   name         text NOT NULL,
@@ -58,8 +98,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
   created_at   timestamptz NOT NULL DEFAULT now()
 );
 
--- Added 2026-08-26: user accounts + ownership of API keys.
--- Users sign up on the site (username + password) and request API keys from /dashboard.
+-- Site accounts: username + password (scrypt hash), used to request/manage API keys.
 CREATE TABLE IF NOT EXISTS users (
   id            serial PRIMARY KEY,
   username      text NOT NULL UNIQUE,
@@ -98,3 +137,38 @@ CREATE TABLE IF NOT EXISTS api_key_requests (
 );
 CREATE INDEX IF NOT EXISTS idx_api_key_requests_user ON api_key_requests (user_id, status);
 CREATE INDEX IF NOT EXISTS idx_api_key_requests_ip_ua ON api_key_requests (ip_address, user_agent, status);
+
+-- ============================================================================
+-- Upgrading from the original (pre-split) schema
+-- ============================================================================
+-- The app also runs this migration automatically on first request after deploy (see
+-- lib/db/ensure.ts), so running it manually is optional. Manual equivalent:
+--
+--   INSERT INTO account_entries (id, service, label, payload, fingerprint, status, premium,
+--       detail, latency_ms, consecutive_failures, check_count, ok_count, disabled, removed,
+--       last_checked_at, last_leased_at, created_at)
+--     SELECT id, service, label, payload, fingerprint, status, premium,
+--       detail, latency_ms, consecutive_failures, check_count, ok_count, disabled, removed,
+--       last_checked_at, last_leased_at, created_at
+--     FROM source_entries WHERE kind = 'account'
+--     ON CONFLICT (fingerprint) DO NOTHING;
+--
+--   INSERT INTO instance_entries (id, service, label, payload, fingerprint, status, premium,
+--       detail, latency_ms, consecutive_failures, check_count, ok_count, disabled, removed,
+--       last_checked_at, last_leased_at, created_at)
+--     SELECT id, service, label, payload, fingerprint, status, premium,
+--       detail, latency_ms, consecutive_failures, check_count, ok_count, disabled, removed,
+--       last_checked_at, last_leased_at, created_at
+--     FROM source_entries WHERE kind = 'api'
+--     ON CONFLICT (fingerprint) DO NOTHING;
+--
+--   SELECT setval('source_entry_id_seq',
+--       GREATEST((SELECT COALESCE(MAX(id),0) FROM account_entries),
+--                (SELECT COALESCE(MAX(id),0) FROM instance_entries),
+--                (SELECT COALESCE(MAX(id),0) FROM source_entries)) + 1, false);
+--
+-- After verifying the row counts match, drop the legacy table (application code no longer
+-- reads or writes it):
+--
+--   DROP TABLE source_entries;
+-- ============================================================================

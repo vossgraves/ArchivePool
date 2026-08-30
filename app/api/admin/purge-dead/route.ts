@@ -2,27 +2,39 @@ import { and, eq } from "drizzle-orm"
 import { NextResponse, type NextRequest } from "next/server"
 import { isAdminAuthorized as authorized } from "@/lib/admin-auth"
 import { db } from "@/lib/db"
-import { sourceEntries } from "@/lib/db/schema"
+import { accountEntries, instanceEntries } from "@/lib/db/schema"
+import { ensureSchema } from "@/lib/db/ensure"
 
 export const dynamic = "force-dynamic"
 
-// Bulk-removes every entry whose status is "dead" and hasn't been removed yet.
+// Bulk-removes every entry whose status is "dead" and hasn't been removed yet, across both
+// split tables (account credentials and instance URLs).
 export async function POST(req: NextRequest) {
   if (!authorized(req)) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
 
-  const rows = await db
-    .select({ id: sourceEntries.id })
-    .from(sourceEntries)
-    .where(and(eq(sourceEntries.status, "dead"), eq(sourceEntries.removed, false)))
+  await ensureSchema()
+  const accounts = await db
+    .select({ id: accountEntries.id })
+    .from(accountEntries)
+    .where(and(eq(accountEntries.status, "dead"), eq(accountEntries.removed, false)))
+  const instances = await db
+    .select({ id: instanceEntries.id })
+    .from(instanceEntries)
+    .where(and(eq(instanceEntries.status, "dead"), eq(instanceEntries.removed, false)))
 
-  if (rows.length === 0) {
+  const removed = accounts.length + instances.length
+  if (removed === 0) {
     return NextResponse.json({ ok: true, removed: 0 })
   }
 
   await db
-    .update(sourceEntries)
+    .update(accountEntries)
     .set({ removed: true })
-    .where(and(eq(sourceEntries.status, "dead"), eq(sourceEntries.removed, false)))
+    .where(and(eq(accountEntries.status, "dead"), eq(accountEntries.removed, false)))
+  await db
+    .update(instanceEntries)
+    .set({ removed: true })
+    .where(and(eq(instanceEntries.status, "dead"), eq(instanceEntries.removed, false)))
 
-  return NextResponse.json({ ok: true, removed: rows.length })
+  return NextResponse.json({ ok: true, removed })
 }

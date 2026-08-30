@@ -2,7 +2,8 @@ import { NextResponse, type NextRequest } from "next/server"
 import { eq, sql } from "drizzle-orm"
 import { verifyReadKey } from "@/lib/api-keys"
 import { db } from "@/lib/db"
-import { healthLog, sourceEntries } from "@/lib/db/schema"
+import { accountEntries, healthLog, instanceEntries } from "@/lib/db/schema"
+import { ensureSchema } from "@/lib/db/ensure"
 import { isKind, isService } from "@/lib/sources"
 
 export const dynamic = "force-dynamic"
@@ -27,113 +28,129 @@ const REPORT_TYPES: Record<string, true> = { dead: true, not_premium: true }
  * This is deliberately a *side channel*, not a truth source: nothing is deleted, and the hourly
  * sweep re-checks every entry from the server side (Tidal tokens even rotate there), so false
  * reports decay on their own.
+ *
+ * Ids are globally unique across account_entries/instance_entries (shared id sequence); the
+ * table is resolved by kind when provided (the app knows it) and by lookup otherwise.
  */
 export async function POST(req: NextRequest) {
   // Mirrors the sources/discovery gate: read-key enforced only when READ_KEYS_ENFORCED=true, so a
   // build without a baked-in key can still report.
   if (!(await verifyReadKey(req, false))) {
     return NextResponse.json(
-      { error: "unauthorized", detail: "A valid read key is required to report." },
+      { error: "unauthorized" },
       { status: 401, headers: { "cache-control": "private, no-store" } },
     )
   }
 
-  let body: { service?: unknown; kind?: unknown; report?: unknown; id?: unknown; fingerprint?: unknown }
+  let body: {
+    service?: string
+    kind?: string
+    id?: number
+    fingerprint?: string
+    report?: string
+  }
   try {
     body = await req.json()
   } catch {
-    return NextResponse.json({ error: "invalid body" }, { status: 400, headers: { "cache-control": "private, no-store" } })
+    return NextResponse.json({ error: "invalid body" }, { status: 400 })
   }
 
-  const { service, kind } = body
-  if (!isService(service) || !isKind(kind)) {
-    return NextResponse.json(
-      { error: "invalid service/kind" },
-      { status: 400, headers: { "cache-control": "private, no-store" } },
-    )
-  }
-  const report = String(body.report ?? "")
-  if (!REPORT_TYPES[report]) {
-    return NextResponse.json(
-      { error: "invalid report type", detail: 'expected "dead" or "not_premium"' },
-      { status: 400, headers: { "cache-control": "private, no-store" } },
-    )
+  const reportType = String(body.report ?? "")
+  if (!REPORT_TYPES[reportType]) {
+    return NextResponse.json({ error: "unknown report type" }, { status: 400 })
   }
 
-  // Locate the entry compactly: prefer the numeric id from /api/sources, fall back to the
-  // deterministic fingerprint used at submission time.
-  const id = Number(body.id)
-  const fingerprint = String(body.fingerprint ?? "").trim()
-  if (!Number.isInteger(id) || id <= 0) {
-    if (!fingerprint) {
-      return NextResponse.json(
-        { error: "id or fingerprint required" },
-        { status: 400, headers: { "cache-control": "private, no-store" } },
-      )
+  await ensureSchema()
+
+  const id = Number(body.id ?? 0) || null
+  const fingerprint = String(body.fingerprint ?? "").trim() || null
+  if (!id && !fingerprint) {
+    return NextResponse.json({ error: "id or fingerprint required" }, { status: 400 })
+  }
+
+  // Resolve the entry across both split tables. Ids are globally unique (shared sequence);
+  // fingerprints are only unique per table, so prefer id and fall back to fingerprint with a
+  // kind hint when available.
+  let entry: { id: number; kind: "account" | "api" } | null = null
+  if (id) {
+    const [account] = await db
+      .select({ id: accountEntries.id })
+      .from(accountEntries)
+      .where(eq(accountEntries.id, id))
+      .limit(1)
+    if (account) {
+      entry = { id: account.id, kind: "account" }
+    } else {
+      const [instance] = await db
+        .select({ id: instanceEntries.id })
+        .from(instanceEntries)
+        .where(eq(instanceEntries.id, id))
+        .limit(1)
+      if (instance) entry = { id: instance.id, kind: "api" }
+    }
+  } else if (fingerprint) {
+    const kindHint = isKind(body.kind) ? body.kind : null
+    const tables =
+      kindHint === "account"
+        ? [accountEntries]
+        : kindHint === "api"
+          ? [instanceEntries]
+          : [accountEntries, instanceEntries]
+    for (const table of tables) {
+      const [row] = await db
+        .select({ id: table.id })
+        .from(table)
+        .where(eq(table.fingerprint, fingerprint))
+        .limit(1)
+      if (row) {
+        entry = { id: row.id, kind: table === accountEntries ? "account" : "api" }
+        break
+      }
     }
   }
 
-  const [entry] = id > 0
-    ? await db.select().from(sourceEntries).where(eq(sourceEntries.id, id)).limit(1)
-    : await db.select().from(sourceEntries).where(eq(sourceEntries.fingerprint, fingerprint)).limit(1)
-  if (!entry || entry.removed) {
-    return NextResponse.json(
-      { error: "not found" },
-      { status: 404, headers: { "cache-control": "private, no-store" } },
-    )
+  if (!entry) {
+    return NextResponse.json({ error: "unknown entry" }, { status: 404 })
   }
 
-  if (report === "dead") {
-    const nextConsecutive = entry.consecutiveFailures + 1
-    const disable = nextConsecutive >= DISABLE_AFTER_REPORTS
+  const table = entry.kind === "account" ? accountEntries : instanceEntries
+
+  if (reportType === "dead") {
     await db
-      .update(sourceEntries)
+      .update(table)
       .set({
-        // A reported-dead entry is not handed to new leases while the sweep decides.
-        status: disable ? "dead" : "pending",
-        disabled: disable,
-        consecutiveFailures: nextConsecutive,
-        detail: `app report: dead (${nextConsecutive}/${DISABLE_AFTER_REPORTS})`,
-        checkCount: sql`${sourceEntries.checkCount} + 1`,
-        lastCheckedAt: new Date(),
+        status: "pending", // demoted: not handed out fresh until the sweep re-verifies
+        consecutiveFailures: sql`${table.consecutiveFailures} + 1`,
+        checkCount: sql`${table.checkCount} + 1`,
       })
-      .where(eq(sourceEntries.id, entry.id))
-    await db.insert(healthLog).values({
-      entryId: entry.id,
-      ok: false,
-      premium: entry.premium,
-      detail: `app report: dead (${nextConsecutive}/${DISABLE_AFTER_REPORTS})`,
-    })
-    return NextResponse.json(
-      {
-        ok: true,
-        entryId: entry.id,
-        action: disable ? "disabled" : "demoted",
-        status: disable ? "dead" : "pending",
-      },
-      { headers: { "cache-control": "private, no-store", "access-control-allow-origin": "*" } },
-    )
+      .where(eq(table.id, entry.id))
+
+    const [current] = await db
+      .select({ consecutiveFailures: table.consecutiveFailures })
+      .from(table)
+      .where(eq(table.id, entry.id))
+      .limit(1)
+
+    if ((current?.consecutiveFailures ?? 0) >= DISABLE_AFTER_REPORTS) {
+      await db.update(table).set({ disabled: true }).where(eq(table.id, entry.id))
+    }
+  } else if (reportType === "not_premium") {
+    await db
+      .update(table)
+      .set({
+        premium: false,
+        checkCount: sql`${table.checkCount} + 1`,
+      })
+      .where(eq(table.id, entry.id))
   }
 
-  // not_premium: works, but the premium flag was wrong. Clear it so premium-first lease ordering
-  // and status rendering treat the account honestly. The sweep may set it back if the server-side
-  // probe disagrees.
-  await db
-    .update(sourceEntries)
-    .set({
-      premium: false,
-      detail: "app report: not premium",
-      lastCheckedAt: new Date(),
-    })
-    .where(eq(sourceEntries.id, entry.id))
   await db.insert(healthLog).values({
     entryId: entry.id,
-    ok: true,
-    premium: false,
-    detail: "app report: not premium",
+    ok: reportType !== "dead",
+    premium: reportType !== "not_premium",
+    latencyMs: null,
+    detail: `app report: ${reportType}`,
   })
-  return NextResponse.json(
-    { ok: true, entryId: entry.id, action: "premium_cleared", status: entry.status },
-    { headers: { "cache-control": "private, no-store", "access-control-allow-origin": "*" } },
-  )
+
+  return NextResponse.json({ ok: true, id: entry.id }, { headers: { "cache-control": "private, no-store" } })
 }

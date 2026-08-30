@@ -125,7 +125,11 @@ function transformDecrypt(payload: Payload, key: Buffer | null): Payload {
 
 /** Encrypt sensitive fields for storage in the database (at-rest layer). */
 export function encryptAtRest(payload: Payload): Payload {
-  return transformEncrypt(payload, loadKey("POOL_ENCRYPTION_KEY"))
+  const key = loadKey("POOL_ENCRYPTION_KEY")
+  if (!key && Object.entries(payload).some(([name, value]) => SENSITIVE_KEYS.has(name) && typeof value === "string" && value.length > 0)) {
+    throw new Error("POOL_ENCRYPTION_KEY is required for credential storage")
+  }
+  return transformEncrypt(payload, key)
 }
 
 /** True only when database credential encryption is correctly configured. */

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import { sql } from "drizzle-orm"
 import { db } from "@/lib/db"
-import { sourceEntries } from "@/lib/db/schema"
+import { accountEntries } from "@/lib/db/schema"
 import { encryptAtRest } from "@/lib/crypto"
 import type { Kind, Service, Status } from "./sources"
 
@@ -198,6 +198,7 @@ async function tryRefreshTidalToken(
     if (!newToken) return null
 
     // Persist the refreshed token back to the DB so it doesn't expire again on the next cycle.
+    // Tidal accounts now live in account_entries; the fingerprint is unique there.
     if (entryFingerprint) {
       const newPayload = {
         ...payload,
@@ -206,7 +207,7 @@ async function tryRefreshTidalToken(
         ...(json.refresh_token ? { refreshToken: json.refresh_token } : {}),
       }
       await db
-        .update(sourceEntries)
+        .update(accountEntries)
         .set({ payload: encryptAtRest(newPayload) })
         .where(sql`fingerprint = ${entryFingerprint}`)
         .catch(() => { /* best-effort — don't fail health check on DB error */ })

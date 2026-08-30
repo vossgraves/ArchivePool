@@ -8,19 +8,75 @@ import {
   text,
   timestamp,
 } from "drizzle-orm/pg-core"
+import { sql } from "drizzle-orm"
 
 /**
- * A single contributed source entry.
+ * Pool storage is split by credential type so tokens and instance URLs never share a table
+ * (or a feed — see /api/accounts and /api/instances/[service]):
  *
- * service: "tidal" | "qobuz"
- * kind:    "api"  (a restream/instance base URL that resolves stream URLs)
- *        | "account" (raw account credentials / token that instances can use)
+ *  - account_entries: contributed ACCOUNT credentials (tokens/ARLs/secrets). Always encrypted
+ *    at rest with POOL_ENCRYPTION_KEY; never exposed except through /api/accounts (and the
+ *    legacy /api/sources), re-encrypted with POOL_CLIENT_KEY.
+ *  - instance_entries: contributed INSTANCE base URLs (kind 'api' rows of the old table).
+ *    Payloads hold baseUrl (+optional note); baseUrl must stay readable server-side for
+ *    discovery, sensitive extras are still encrypted.
  *
- * payload holds the sensitive material (never exposed on the public status page):
- *   - api:     { baseUrl: string, healthPath?: string, note?: string }
- *   - account: { token?: string, refreshToken?: string, username?: string,
- *                password?: string, countryCode?: string, note?: string }
+ * Both tables draw ids from the shared `source_entry_id_seq` sequence, so an id remains
+ * globally unique across the two tables. That keeps health_log.entry_id unambiguous and
+ * lets /api/report and the admin endpoints resolve an id without a discriminator column.
+ *
+ * `source_entries` is the pre-split legacy table. It is read ONCE by the idempotent
+ * migration in lib/db/ensure.ts and then never touched again by application code; drop it
+ * after verifying the migration (see scripts/schema.sql, "Upgrading").
  */
+
+const sharedId = () => integer("id").primaryKey().default(sql`nextval('source_entry_id_seq')`)
+
+const entryColumns = {
+  id: sharedId(),
+  service: text("service").notNull(),
+  label: text("label").notNull(),
+  payload: jsonb("payload").notNull().$type<Record<string, unknown>>(),
+  fingerprint: text("fingerprint").notNull().unique(),
+  status: text("status").notNull().default("pending"), // pending | alive | preview | dead
+  premium: boolean("premium").notNull().default(false),
+  detail: text("detail"),
+  latencyMs: integer("latency_ms"),
+  consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+  checkCount: integer("check_count").notNull().default(0),
+  okCount: integer("ok_count").notNull().default(0),
+  disabled: boolean("disabled").notNull().default(false),
+  removed: boolean("removed").notNull().default(false),
+  lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
+  // When this entry was last handed to an app. Drives least-recently-leased rotation, so one
+  // entry does not absorb all traffic and get itself rate-limited or banned.
+  lastLeasedAt: timestamp("last_leased_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}
+
+/** Contributed account credentials (encrypted payload). */
+export const accountEntries = pgTable(
+  "account_entries",
+  entryColumns,
+  (t) => ({
+    serviceIdx: index("idx_account_entries_service").on(t.service),
+    activeIdx: index("idx_account_entries_active").on(t.status, t.disabled, t.removed),
+    leaseIdx: index("idx_account_entries_lease").on(t.service, t.premium, t.lastLeasedAt),
+  }),
+)
+
+/** Contributed instance base URLs (restream/proxy servers). */
+export const instanceEntries = pgTable(
+  "instance_entries",
+  entryColumns,
+  (t) => ({
+    serviceIdx: index("idx_instance_entries_service").on(t.service),
+    activeIdx: index("idx_instance_entries_active").on(t.status, t.disabled, t.removed),
+    leaseIdx: index("idx_instance_entries_lease").on(t.service, t.premium, t.lastLeasedAt),
+  }),
+)
+
+/** @deprecated Legacy pre-split table; only ensure.ts's one-time migration reads it. */
 export const sourceEntries = pgTable(
   "source_entries",
   {
@@ -30,7 +86,7 @@ export const sourceEntries = pgTable(
     label: text("label").notNull(),
     payload: jsonb("payload").notNull().$type<Record<string, unknown>>(),
     fingerprint: text("fingerprint").notNull().unique(),
-    status: text("status").notNull().default("pending"), // pending | alive | preview | dead
+    status: text("status").notNull().default("pending"),
     premium: boolean("premium").notNull().default(false),
     detail: text("detail"),
     latencyMs: integer("latency_ms"),
@@ -40,8 +96,6 @@ export const sourceEntries = pgTable(
     disabled: boolean("disabled").notNull().default(false),
     removed: boolean("removed").notNull().default(false),
     lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
-    // When this entry was last handed to an app. Drives least-recently-leased rotation, so one
-    // entry does not absorb all traffic and get itself rate-limited or banned.
     lastLeasedAt: timestamp("last_leased_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -56,6 +110,7 @@ export const healthLog = pgTable(
   "health_log",
   {
     id: serial("id").primaryKey(),
+    // Globally unique across account_entries + instance_entries (shared id sequence).
     entryId: integer("entry_id").notNull(),
     checkedAt: timestamp("checked_at", { withTimezone: true }).notNull().defaultNow(),
     ok: boolean("ok").notNull(),
@@ -70,7 +125,7 @@ export const healthLog = pgTable(
 
 /**
  * A per-app read key. Apps must present a valid, non-revoked key to read the sensitive pool JSON
- * (/api/sources and /api/discovery/*). The public status page never requires a key.
+ * (/api/accounts, /api/sources and /api/discovery/*). The public status page never requires a key.
  *
  * Only the SHA-256 hash of the key is stored; the plaintext key is shown once at creation time.
  * `prefix` is the first few visible chars, kept for identification in the admin UI.
@@ -125,6 +180,9 @@ export const apiKeyRequests = pgTable(
  * A site account. Users sign up with username + password to request and manage
  * their own API keys from /dashboard. Passwords are stored as scrypt hashes
  * (see lib/users.ts); sessions are HMAC-signed cookies (see lib/sessions.ts).
+ *
+ * User identity lives ONLY here — the pool tables (account_entries/instance_entries)
+ * never reference users; the two data domains are fully separate.
  */
 export const users = pgTable("users", {
   id: serial("id").primaryKey(),
@@ -140,8 +198,10 @@ export const users = pgTable("users", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 })
 
-export type SourceEntry = typeof sourceEntries.$inferSelect
-export type NewSourceEntry = typeof sourceEntries.$inferInsert
+export type AccountEntry = typeof accountEntries.$inferSelect
+export type NewAccountEntry = typeof accountEntries.$inferInsert
+export type InstanceEntry = typeof instanceEntries.$inferSelect
+export type NewInstanceEntry = typeof instanceEntries.$inferInsert
 export type ApiKey = typeof apiKeys.$inferSelect
 export type ApiKeyRequest = typeof apiKeyRequests.$inferSelect
 export type User = typeof users.$inferSelect
