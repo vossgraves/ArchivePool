@@ -90,7 +90,15 @@ export async function syncMonochromeInstances(): Promise<MonochromeSyncResult> {
   // is currently alive/preview and not disabled. New entries always get checked.
   const SIX_HOURS_MS = 6 * 60 * 60 * 1000
 
-  for (const baseUrl of allUrls) {
+  // Check instances CONCURRENTLY instead of serially. Each health check allows up to 12s, and
+  // monochrome.tf lists ~10 URLs — a serial worst case of 2 minutes exceeds the route's
+  // maxDuration=60 and Vercel kills the invocation with FUNCTION_INVOCATION_TIMEOUT (the
+  // intermittent HTTP 504s in the monochrome-cron workflow runs). 5 workers cap the worst case
+  // at ~3 batches × 12s = 36s. Per-instance DB upserts stay sequential within a worker, so the
+  // accounting (added/updated/failed) is unchanged.
+  const CONCURRENCY = 5
+
+  async function checkAndUpsert(baseUrl: string) {
     const payload: Record<string, unknown> = { baseUrl }
     const fp = fingerprint("tidal", "api", payload)
     const existing = fingerprintMap.get(fp)
@@ -104,7 +112,7 @@ export async function syncMonochromeInstances(): Promise<MonochromeSyncResult> {
 
       if (recentlyChecked && currentlyAlive && !existing.disabled) {
         result.skipped++
-        continue
+        return
       }
     }
 
@@ -131,7 +139,7 @@ export async function syncMonochromeInstances(): Promise<MonochromeSyncResult> {
           .where(eq(instanceEntries.fingerprint, fp))
         result.updated++
       }
-      continue
+      return
     }
 
     // 5. Upsert the passing instance.
@@ -176,6 +184,15 @@ export async function syncMonochromeInstances(): Promise<MonochromeSyncResult> {
     if (isNew) result.added++
     else result.updated++
   }
+
+  let next = 0
+  const workers = Array.from({ length: Math.min(CONCURRENCY, allUrls.length) }, async () => {
+    while (next < allUrls.length) {
+      const url = allUrls[next++]
+      await checkAndUpsert(url)
+    }
+  })
+  await Promise.all(workers)
 
   return result
 }

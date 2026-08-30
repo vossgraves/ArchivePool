@@ -258,13 +258,25 @@ export async function ingestExternalSources(
   }
 
   const fresh = candidates.filter((c) => !existing.has(fingerprint(c.service, c.kind, c.payload)))
-  for (const c of fresh.slice(0, maxNew)) {
-    try {
-      const result = await ingestSource(c.service, c.kind, c.payload)
-      if (result.saved) inserted += 1
-    } catch (err) {
-      errors.push(`ingest failed: ${err instanceof Error ? err.message : "unknown"}`)
+  const batch = fresh.slice(0, maxNew)
+
+  // Ingest candidates CONCURRENTLY (cap 5). Each ingestSource runs a live health check with up
+  // to 12s timeout; a serial loop over the full maxNew batch could take 120s on its own and
+  // blow the calling cron route's maxDuration=60 → FUNCTION_INVOCATION_TIMEOUT (HTTP 504).
+  // Errors stay isolated per candidate exactly as before.
+  let next = 0
+  const workers = Array.from({ length: Math.min(5, batch.length) }, async () => {
+    while (next < batch.length) {
+      const c = batch[next++]
+      try {
+        const result = await ingestSource(c.service, c.kind, c.payload)
+        if (result.saved) inserted += 1
+      } catch (err) {
+        errors.push(`ingest failed: ${err instanceof Error ? err.message : "unknown"}`)
+      }
     }
-  }
+  })
+  await Promise.all(workers)
+
   return { fetched, inserted, skippedKnown, errors }
 }
