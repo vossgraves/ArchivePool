@@ -44,7 +44,12 @@ export async function GET(req: NextRequest) {
       // When true, sensitive fields (token/appId/…) are AES-256-GCM ciphertext in the
       // `enc:1:<iv>:<ct+tag>` format and must be decrypted with POOL_CLIENT_KEY.
       encrypted: clientEncryptionEnabled(),
-      ...accounts,
+      // Same per-service { accounts: [...] } shape as the legacy /api/sources feed's account
+      // half, so the app's existing parser handles both feeds unchanged.
+      tidal: { accounts: accounts.tidal },
+      qobuz: { accounts: accounts.qobuz },
+      deezer: { accounts: accounts.deezer },
+      "apple-music": { accounts: accounts["apple-music"] },
     },
     {
       headers: {
