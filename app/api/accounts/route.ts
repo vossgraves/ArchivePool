@@ -2,8 +2,20 @@ import { NextResponse, type NextRequest } from "next/server"
 import { readKeyFromRequest, verifyReadKey } from "@/lib/api-keys"
 import { clientEncryptionEnabled, deriveClientKey } from "@/lib/crypto"
 import { leaseAccounts } from "@/lib/queries"
+import { clientIp, keyId, rateLimit, tooManyRequests } from "@/lib/rate-limit"
 
 export const dynamic = "force-dynamic"
+
+// Rate limits (defence against scripted abuse; the app itself fetches once per 15–24h):
+//  - per IP, before auth: 120/min — bounds key-guessing against the constant-time compare and
+//    DB lookups, without punishing users behind shared NAT.
+//  - per read key, after auth: 30 per 5 min — each request leases 3 accounts per service with
+//    rotation, so an unthrottled loop walks the entire pool; this keeps a (leaked) key to a
+//    crawl while never touching the app's natural cadence.
+const IP_LIMIT = 120
+const IP_WINDOW_MS = 60_000
+const KEY_LIMIT = 30
+const KEY_WINDOW_MS = 5 * 60_000
 
 /**
  * ACCOUNT-CREDENTIALS-ONLY feed. This is the token half of the split pool:
@@ -22,6 +34,9 @@ export const dynamic = "force-dynamic"
  * and are refused with 503 when that static key is not configured on the server.
  */
 export async function GET(req: NextRequest) {
+  const ipVerdict = rateLimit(`feed-ip:${clientIp(req.headers)}`, IP_LIMIT, IP_WINDOW_MS)
+  if (!ipVerdict.ok) return tooManyRequests(ipVerdict.retryAfterSec, "feed")
+
   const v2 = req.headers.get("x-pool-client")?.trim().toLowerCase() === "v2"
   if (!v2 && !clientEncryptionEnabled()) {
     // Account credentials must never fall back to a plaintext response when client encryption
@@ -42,10 +57,15 @@ export async function GET(req: NextRequest) {
     )
   }
 
+  const readKey = readKeyFromRequest(req)
+  if (readKey) {
+    const keyVerdict = rateLimit(`feed-key:${keyId(readKey)}`, KEY_LIMIT, KEY_WINDOW_MS)
+    if (!keyVerdict.ok) return tooManyRequests(keyVerdict.retryAfterSec, "feed")
+  }
+
   // Leases a few accounts per service rather than returning the whole pool, so a leaked key
   // (or a baked-in build key) exposes a handful of credentials instead of every one we hold.
   // See LEASE_PER_CATEGORY_ACCOUNT for why this is not 1.
-  const readKey = readKeyFromRequest(req)
   const clientKey = v2 && readKey ? deriveClientKey(readKey) : null
   const { accounts } = await leaseAccounts(clientKey)
   return NextResponse.json(

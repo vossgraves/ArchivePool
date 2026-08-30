@@ -2,8 +2,16 @@ import { NextResponse, type NextRequest } from "next/server"
 import { readKeyFromRequest, verifyReadKey } from "@/lib/api-keys"
 import { clientEncryptionEnabled, deriveClientKey } from "@/lib/crypto"
 import { leasePool } from "@/lib/queries"
+import { clientIp, keyId, rateLimit, tooManyRequests } from "@/lib/rate-limit"
 
 export const dynamic = "force-dynamic"
+
+// Same rate-limit posture as /api/accounts: per-IP before auth (bounds key guessing), per-key
+// after auth (bounds pool-walking via lease rotation). See that route for the rationale.
+const IP_LIMIT = 120
+const IP_WINDOW_MS = 60_000
+const KEY_LIMIT = 30
+const KEY_WINDOW_MS = 5 * 60_000
 
 /**
  * LEGACY combined pool feed. Kept byte-compatible for app builds predating the account/instance
@@ -23,6 +31,9 @@ export const dynamic = "force-dynamic"
  * receiving POOL_CLIENT_KEY ciphertext.
  */
 export async function GET(req: NextRequest) {
+  const ipVerdict = rateLimit(`feed-ip:${clientIp(req.headers)}`, IP_LIMIT, IP_WINDOW_MS)
+  if (!ipVerdict.ok) return tooManyRequests(ipVerdict.retryAfterSec, "feed")
+
   const v2 = req.headers.get("x-pool-client")?.trim().toLowerCase() === "v2"
   if (!v2 && !clientEncryptionEnabled()) {
     return NextResponse.json(
@@ -40,10 +51,15 @@ export async function GET(req: NextRequest) {
     )
   }
 
+  const readKey = readKeyFromRequest(req)
+  if (readKey) {
+    const keyVerdict = rateLimit(`feed-key:${keyId(readKey)}`, KEY_LIMIT, KEY_WINDOW_MS)
+    if (!keyVerdict.ok) return tooManyRequests(keyVerdict.retryAfterSec, "feed")
+  }
+
   // Leases a few entries per category rather than returning the whole pool, so a leaked key
   // (or a baked-in build key) exposes a handful of credentials instead of every one we hold.
   // See LEASE_PER_CATEGORY_ACCOUNT for why this is not 1.
-  const readKey = readKeyFromRequest(req)
   const clientKey = v2 && readKey ? deriveClientKey(readKey) : null
   const { pool } = await leasePool(clientKey)
   return NextResponse.json(

@@ -4,9 +4,19 @@ import { verifyReadKey } from "@/lib/api-keys"
 import { db } from "@/lib/db"
 import { accountEntries, healthLog, instanceEntries } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
+import { clientIp, keyId, rateLimit, tooManyRequests } from "@/lib/rate-limit"
 import { isKind, isService } from "@/lib/sources"
 
 export const dynamic = "force-dynamic"
+
+// Reports may arrive without a key while READ_KEYS_ENFORCED is off, so the limiter keys on IP
+// (and additionally on the key when one is presented). 60 per 5 min is far above any real
+// device's dead-token chatter while making bulk `dead`-spam against healthy entries — the only
+// unauthenticated write this endpoint allows — impractical. The sweep re-verifies hourly and
+// re-enables wrongly disabled entries, so this is a bump, not a wall.
+const REPORT_IP_LIMIT = 60
+const REPORT_KEY_LIMIT = 60
+const REPORT_WINDOW_MS = 5 * 60_000
 
 // App-reported failures are strong evidence (a real user hit the credential and it failed), but a
 // single report can also be noise or a transient hiccup. The health sweep re-verifies from the
@@ -40,6 +50,15 @@ export async function POST(req: NextRequest) {
       { error: "unauthorized" },
       { status: 401, headers: { "cache-control": "private, no-store" } },
     )
+  }
+
+  const ipVerdict = rateLimit(`report-ip:${clientIp(req.headers)}`, REPORT_IP_LIMIT, REPORT_WINDOW_MS)
+  if (!ipVerdict.ok) return tooManyRequests(ipVerdict.retryAfterSec, "report")
+  const auth = req.headers.get("authorization")
+  const presentedKey = auth?.startsWith("Bearer ") ? auth.slice("Bearer ".length).trim() : req.headers.get("x-api-key")?.trim()
+  if (presentedKey) {
+    const keyVerdict = rateLimit(`report-key:${keyId(presentedKey)}`, REPORT_KEY_LIMIT, REPORT_WINDOW_MS)
+    if (!keyVerdict.ok) return tooManyRequests(keyVerdict.retryAfterSec, "report")
   }
 
   let body: {
