@@ -85,6 +85,12 @@ The full pool as the app consumes it. Leases **up to 3 entries per category**
 least-recently-leased, and the server stamps `last_leased_at` so rotation advances across
 requests. `apis` is always an empty list for Deezer (Deezer has no self-hosted instance tier).
 
+For **account** entries, this is also a sticky per-key lease: a resolved read key (its `api_keys`
+row id) keeps the same entries across repeated fetches for 72h (`LEASE_TTL_HOURS`) rather than
+rotating on every request, so a leaked key only ever sees its own small window instead of walking
+the whole pool over enough fetches. `POST /api/report` releases a key's lease on an entry it
+reports dead/not_premium and can hand back a replacement — see below.
+
 ```json
 {
   "version": 1,
@@ -242,8 +248,35 @@ Request (`Authorization: Bearer <read key>` when enforcement is on; open otherwi
 - `report: "not_premium"` — the credential works but lacks the premium tier the pool believed it
   had. Clears the `premium` flag so premium-first lease ordering stops preferring it.
 
-Target by `id` (from `/api/sources`) or `fingerprint`. Responses: `200 { ok, entryId, action }`,
-`400` invalid body/service/kind/report, `404` unknown entry, `401` key required and invalid.
+Target by `id` (from `/api/sources`/`/api/accounts`) or `fingerprint`. On a `dead`/`not_premium`
+report against an **account** entry, if the reporting key actually held a per-key lease on that
+entry (see the sticky-lease note under
+[Credential feed](#credential-feed-read-key-or-open-when-read_keys_enforcedfalse) above — i.e.
+the key really received this credential from `/api/accounts`), that lease is released and one
+replacement credential is drawn and returned in the same shape `/api/accounts` uses, capped at 3
+replacements/hour/service/key. Reporting an id the key never leased still updates the entry's
+status as described above — reports remain a side channel anyone with a valid (or, when
+enforcement is off, no) key can contribute to — it just never earns a replacement, which is what
+stops a report loop over arbitrary ids from harvesting the pool.
+
+```json
+{
+  "ok": true,
+  "id": 42,
+  "encrypted": true,
+  "encryption": "read-key",
+  "replacement": {
+    "deezer": { "accounts": [ { "id": 57, "premium": true, "status": "alive", "arl": "enc:1:…" } ] }
+  }
+}
+```
+
+`replacement` is `null` (report still `ok: true`) when: the report targeted an instance rather
+than an account, the caller has no read key resolved (open deployments with `READ_KEYS_ENFORCED`
+off and no key presented), the hourly cap was hit, or nothing else in the pool qualified.
+
+Responses: `200 { ok, id, encrypted, encryption, replacement }`, `400` invalid body/service/kind/
+report, `404` unknown entry, `401` key required and invalid.
 
 ```bash
 curl -X POST -H 'Content-Type: application/json' \

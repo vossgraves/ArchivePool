@@ -4,6 +4,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  primaryKey,
   serial,
   text,
   timestamp,
@@ -148,6 +149,40 @@ export const apiKeys = pgTable("api_keys", {
 })
 
 /**
+ * Which account entries a given read key currently holds ("sticky lease").
+ *
+ * Without this, every /api/accounts fetch re-ran the global least-recently-leased rotation in
+ * leaseAccounts(), so an app that refreshed twice in a row could get two different credential
+ * sets, and any key could walk the whole pool a few entries at a time. A lease pins a key to the
+ * same entries for LEASE_TTL_HOURS (lib/queries.ts); /api/report releases one when the app tells
+ * us the credential is dead or not premium.
+ *
+ * Leases are NOT exclusive — several keys may hold the same entry. This is a stickiness hint, not
+ * a mutex, which is why concurrent leases of the same row (or of the same key racing itself) are
+ * harmless: see the ON CONFLICT upsert in recordKeyLeases.
+ *
+ * `service` is denormalized from the entry (never taken from client input) so /api/report can cap
+ * replacements per service without a join back to account_entries.
+ */
+export const apiKeyLeases = pgTable(
+  "api_key_leases",
+  {
+    keyId: integer("key_id")
+      .notNull()
+      .references(() => apiKeys.id, { onDelete: "cascade" }),
+    entryId: integer("entry_id")
+      .notNull()
+      .references(() => accountEntries.id, { onDelete: "cascade" }),
+    service: text("service").notNull(),
+    leasedAt: timestamp("leased_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.keyId, t.entryId] }),
+    entryIdx: index("idx_api_key_leases_entry").on(t.entryId),
+  }),
+)
+
+/**
  * An API key request. Users submit subject + reason; an admin approves or
  * rejects. Only approved requests materialise into a real api_keys row.
  * Enforces 1 pending/approved request per IP+UA to prevent spam.
@@ -203,5 +238,7 @@ export type NewAccountEntry = typeof accountEntries.$inferInsert
 export type InstanceEntry = typeof instanceEntries.$inferSelect
 export type NewInstanceEntry = typeof instanceEntries.$inferInsert
 export type ApiKey = typeof apiKeys.$inferSelect
+export type ApiKeyLease = typeof apiKeyLeases.$inferSelect
+export type NewApiKeyLease = typeof apiKeyLeases.$inferInsert
 export type ApiKeyRequest = typeof apiKeyRequests.$inferSelect
 export type User = typeof users.$inferSelect

@@ -40,21 +40,34 @@ export function readKeyFromRequest(req: NextRequest): string | null {
   return extractKey(req)
 }
 
+/** Outcome of read-key authentication. `keyId` is the api_keys row id when one was resolved. */
+export interface ReadKeyIdentity {
+  ok: boolean
+  /**
+   * null when gating is off and no valid key was presented. Callers that key durable state on
+   * the requester (per-key leases) must treat null as "anonymous" and skip that state rather
+   * than inventing an identity — an unauthenticated caller must never be able to hold a lease.
+   */
+  keyId: number | null
+}
+
 /**
- * Validate the request's read key against the api_keys table. Returns true when a
- * non-revoked key matches. Also bumps use_count / last_used_at (best-effort).
+ * Validate the request's read key against the api_keys table and resolve its row id in the same
+ * lookup, so callers that need both (per-key leasing) don't pay for a second query.
  *
  * [alwaysEnforce] is used by the credential-bearing source feed. Discovery feeds can remain public
  * unless READ_KEYS_ENFORCED is set because they contain instance URLs rather than account secrets.
  */
-export async function verifyReadKey(req: NextRequest, alwaysEnforce = false): Promise<boolean> {
+export async function identifyReadKey(req: NextRequest, alwaysEnforce = false): Promise<ReadKeyIdentity> {
   const enforced = alwaysEnforce || process.env.READ_KEYS_ENFORCED === "true"
-
-  // When gating is off, always allow (lets the operator roll keys out gradually).
-  if (!enforced) return true
-
   const candidate = extractKey(req)
-  if (!candidate) return false
+
+  // When gating is off, always allow (lets the operator roll keys out gradually). With no
+  // candidate presented there is nothing to resolve, so skip the query entirely — this is the
+  // hot path for a deployment that never turned enforcement on.
+  if (!enforced && !candidate) return { ok: true, keyId: null }
+
+  if (!candidate) return { ok: false, keyId: null }
 
   const keyHash = hashKey(candidate)
   const [row] = await db
@@ -63,12 +76,24 @@ export async function verifyReadKey(req: NextRequest, alwaysEnforce = false): Pr
     .where(and(eq(apiKeys.keyHash, keyHash), eq(apiKeys.deleted, false)))
     .limit(1)
 
-  if (!row || row.revoked) return false
+  if (!enforced) {
+    // Gating is off but a key was presented anyway: resolve its id for leasing purposes only.
+    // Deliberately skip the use_count/last_used_at bump below — bumping here would start
+    // counting hits from routes like /api/report on unenforced deployments, a silent change to
+    // what that dashboard number means. A missing/revoked/mismatched key is simply anonymous.
+    if (!row || row.revoked) return { ok: true, keyId: null }
+    const a = Buffer.from(row.keyHash)
+    const b = Buffer.from(keyHash)
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return { ok: true, keyId: null }
+    return { ok: true, keyId: row.id }
+  }
+
+  if (!row || row.revoked) return { ok: false, keyId: null }
 
   // Constant-time compare of the hashes as defense-in-depth against timing attacks.
   const a = Buffer.from(row.keyHash)
   const b = Buffer.from(keyHash)
-  if (a.length !== b.length || !timingSafeEqual(a, b)) return false
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return { ok: false, keyId: null }
 
   // Best-effort usage bump; never block the request on this.
   void db
@@ -78,7 +103,16 @@ export async function verifyReadKey(req: NextRequest, alwaysEnforce = false): Pr
     .then(() => {})
     .catch(() => {})
 
-  return true
+  return { ok: true, keyId: row.id }
+}
+
+/**
+ * Validate the request's read key against the api_keys table. Returns true when a non-revoked
+ * key matches (or gating is off). Thin wrapper over [identifyReadKey] for the many call sites
+ * that only need the boolean.
+ */
+export async function verifyReadKey(req: NextRequest, alwaysEnforce = false): Promise<boolean> {
+  return (await identifyReadKey(req, alwaysEnforce)).ok
 }
 
 /** Admin: create a key. Returns the one-time plaintext key. */

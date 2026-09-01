@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server"
-import { readKeyFromRequest, verifyReadKey } from "@/lib/api-keys"
+import { identifyReadKey, readKeyFromRequest } from "@/lib/api-keys"
 import { clientEncryptionEnabled, deriveClientKey } from "@/lib/crypto"
 import { leasePool } from "@/lib/queries"
 import { clientIp, keyId, rateLimit, tooManyRequests } from "@/lib/rate-limit"
@@ -43,8 +43,11 @@ export async function GET(req: NextRequest) {
   }
 
   // ALWAYS enforced: the credential feed is never public. Request a key with an
-  // account on the site (/dashboard); the app presents it as a Bearer token.
-  if (!(await verifyReadKey(req, true))) {
+  // account on the site (/dashboard); the app presents it as a Bearer token. identifyReadKey
+  // also resolves the key's row id, so the account half of this feed can use the same sticky
+  // per-key lease window as /api/accounts — see leaseAccounts.
+  const identity = await identifyReadKey(req, true)
+  if (!identity.ok) {
     return NextResponse.json(
       { error: "unauthorized", detail: "A valid API key is required to read the source pool. Create an account and request one on the site." },
       { status: 401, headers: { "cache-control": "private, no-store" } },
@@ -61,7 +64,7 @@ export async function GET(req: NextRequest) {
   // (or a baked-in build key) exposes a handful of credentials instead of every one we hold.
   // See LEASE_PER_CATEGORY_ACCOUNT for why this is not 1.
   const clientKey = v2 && readKey ? deriveClientKey(readKey) : null
-  const { pool } = await leasePool(clientKey)
+  const { pool } = await leasePool(clientKey, identity.keyId)
   return NextResponse.json(
     {
       version: 1,

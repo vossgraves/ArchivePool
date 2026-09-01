@@ -138,6 +138,20 @@ CREATE TABLE IF NOT EXISTS api_key_requests (
 CREATE INDEX IF NOT EXISTS idx_api_key_requests_user ON api_key_requests (user_id, status);
 CREATE INDEX IF NOT EXISTS idx_api_key_requests_ip_ua ON api_key_requests (ip_address, user_agent, status);
 
+-- Per-read-key sticky leases: which account_entries a key currently holds. A key keeps the same
+-- entries until they expire (LEASE_TTL_HOURS, lib/queries.ts) or the app reports one dead/
+-- not_premium via /api/report, which releases the row. Not exclusive -- several keys may hold
+-- the same entry; this is a stickiness hint, not a mutex. `service` is denormalized from the
+-- entry so /api/report can cap replacements per service without a join.
+CREATE TABLE IF NOT EXISTS api_key_leases (
+  key_id    integer NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+  entry_id  integer NOT NULL REFERENCES account_entries(id) ON DELETE CASCADE,
+  service   text NOT NULL,
+  leased_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (key_id, entry_id)
+);
+CREATE INDEX IF NOT EXISTS idx_api_key_leases_entry ON api_key_leases (entry_id);
+
 -- ============================================================================
 -- Upgrading from the original (pre-split) schema
 -- ============================================================================
