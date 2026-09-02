@@ -136,6 +136,20 @@ const STATEMENTS: string[] = [
   `ALTER TABLE account_entries ADD COLUMN IF NOT EXISTS contributor text`,
   `ALTER TABLE instance_entries ADD COLUMN IF NOT EXISTS contributor text`,
   `ALTER TABLE api_key_requests ADD COLUMN IF NOT EXISTS review_note text NOT NULL DEFAULT ''`,
+  // Added 2026-09: per-read-key sticky leases. Before this, every /api/accounts fetch reshuffled
+  // which credentials a key held via the global last_leased_at rotation, so a single valid key
+  // could walk the entire pool a few entries at a time. Now a key keeps the same entries until
+  // they expire (LEASE_TTL_HOURS) or the app reports one dead/not_premium via /api/report.
+  // ON DELETE CASCADE on both sides keeps the table self-cleaning if a key or entry is ever
+  // hard-deleted (today both are soft-flagged, so this is a safety net, not the primary path).
+  `CREATE TABLE IF NOT EXISTS api_key_leases (
+    key_id    integer NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+    entry_id  integer NOT NULL REFERENCES account_entries(id) ON DELETE CASCADE,
+    service   text NOT NULL,
+    leased_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (key_id, entry_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_api_key_leases_entry ON api_key_leases (entry_id)`,
 ]
 
 const globalForMigrations = globalThis as unknown as { __poolSchemaEnsured?: Promise<void> }
