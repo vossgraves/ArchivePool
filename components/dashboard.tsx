@@ -3,11 +3,14 @@
 import { useCallback, useEffect, useState } from "react"
 import { AnimatePresence, motion, useReducedMotion } from "motion/react"
 import { Check, KeyRound } from "lucide-react"
+import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Panel } from "@/components/ui/panel"
 import { Badge, toneFor } from "@/components/ui/badge"
 import { Dialog } from "@/components/ui/dialog"
+import { Field } from "@/components/ui/field"
 import { Notice } from "@/components/ui/notice"
+import { Skeleton } from "@/components/ui/skeleton"
 import { formatCount, formatDateTime, formatDay } from "@/lib/utils"
 
 interface KeyRow {
@@ -48,8 +51,8 @@ export function Dashboard({ username }: { username: string }) {
   const [subject, setSubject] = useState("")
   const [reason, setReason] = useState("")
   const [formError, setFormError] = useState<string | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
-  const [feedback, setFeedback] = useState<{ tone: "ok" | "error"; text: string } | null>(null)
   const [revealed, setRevealed] = useState<{ key: string; prefix: string } | null>(null)
   const [copied, setCopied] = useState(false)
   const [claimingId, setClaimingId] = useState<number | null>(null)
@@ -57,23 +60,40 @@ export function Dashboard({ username }: { username: string }) {
   const [deleteBusy, setDeleteBusy] = useState(false)
 
   const load = useCallback(async () => {
-    const res = await fetch("/api/keys", { cache: "no-store" })
-    if (!res.ok) return
-    const data = await res.json()
-    setKeys(data.keys ?? [])
-    setRequests(data.requests ?? [])
+    try {
+      const res = await fetch("/api/keys", { cache: "no-store" })
+      if (!res.ok) {
+        // Bailing out silently left `keys` at null forever, which the panel below renders as a
+        // skeleton — a page that looks like it is still loading is the one failure mode a user
+        // will wait through instead of reporting.
+        const body = await res.json().catch(() => ({}))
+        setLoadError(body.detail ?? `Could not load your keys (HTTP ${res.status}).`)
+        return
+      }
+      const data = await res.json()
+      setLoadError(null)
+      setKeys(data.keys ?? [])
+      setRequests(data.requests ?? [])
+    } catch {
+      setLoadError("Network error — your keys and requests could not be loaded.")
+    }
   }, [])
 
   useEffect(() => {
     void load()
   }, [load])
 
+  /*
+   * Where results go, throughout this component: anything the server says about the fields still
+   * on screen stays inline next to them (formError, loadError), and the outcome of an action goes
+   * to a toast. The dashboard runs long — request form, request list, key list — so a message
+   * anchored to the top of it is off-screen from the Revoke button that produced it.
+   */
   async function createRequest(e: React.FormEvent) {
     e.preventDefault()
     if (creating) return
     setCreating(true)
     setFormError(null)
-    setFeedback(null)
     try {
       const res = await fetch("/api/keys", {
         method: "POST",
@@ -82,12 +102,13 @@ export function Dashboard({ username }: { username: string }) {
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
+        // Stays inline: this is the server rejecting what is typed in the two fields above it.
         setFormError(data.detail ?? data.error ?? "Could not submit the request.")
         return
       }
-      setFeedback({
-        tone: "ok",
-        text: "Request sent. An admin reviews requests by hand — you’ll see it below, and the key appears here once it is accepted.",
+      toast.success("Request sent", {
+        description:
+          "An admin reviews requests by hand. It appears below, and your key appears here once it is accepted.",
       })
       setSubject("")
       setReason("")
@@ -100,66 +121,57 @@ export function Dashboard({ username }: { username: string }) {
   async function claim(requestId: number) {
     if (claimingId !== null) return
     setClaimingId(requestId)
-    setFeedback(null)
     try {
       const res = await fetch(`/api/requests/${requestId}/claim`, { method: "POST" })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
-        setFeedback({ tone: "error", text: data.detail ?? "Could not issue your key." })
+        toast.error(data.detail ?? "Could not issue your key.")
         return
       }
       setRevealed({ key: data.key, prefix: data.prefix })
-      setFeedback({
-        tone: "ok",
-        text: "Copy it now. The value is shown once and cannot be retrieved later.",
+      toast.success("Your key is ready — copy it now", {
+        description: "The value is shown once and cannot be retrieved later.",
       })
       await load()
     } catch {
-      setFeedback({ tone: "error", text: "Network error — no key was created." })
+      toast.error("Network error — no key was created.")
     } finally {
       setClaimingId(null)
     }
   }
 
   async function toggleRevoke(key: KeyRow) {
-    setFeedback(null)
     const res = await fetch(`/api/keys/${key.id}${key.revoked ? "?undo=1" : ""}`, {
       method: "DELETE",
     })
     if (!res.ok) {
       const body = await res.json().catch(() => ({}))
-      setFeedback({
-        tone: "error",
-        text: body.detail ?? `Could not ${key.revoked ? "restore" : "revoke"} “${key.name}”.`,
-      })
+      toast.error(body.detail ?? `Could not ${key.revoked ? "restore" : "revoke"} “${key.name}”.`)
       return
     }
-    setFeedback({
-      tone: "ok",
-      text: key.revoked
-        ? `Restored “${key.name}”.`
-        : `Revoked “${key.name}”. Any app using it stops working; you can undo this.`,
+    toast.success(key.revoked ? `Restored “${key.name}”` : `Revoked “${key.name}”`, {
+      description: key.revoked
+        ? undefined
+        : "Any app using it stops working. You can undo this from here.",
     })
     await load()
   }
 
   async function permanentlyDelete(key: KeyRow) {
     setDeleteBusy(true)
-    setFeedback(null)
     try {
       const res = await fetch(`/api/keys/${key.id}?delete=1`, { method: "DELETE" })
       const body = await res.json().catch(() => ({}))
       if (!res.ok) {
-        setFeedback({ tone: "error", text: body.detail ?? `Could not delete “${key.name}”.` })
+        toast.error(body.detail ?? `Could not delete “${key.name}”.`)
         return
       }
-      setFeedback({
-        tone: "ok",
-        text: `Deleted “${key.name}”. It is gone from the database and cannot be recovered.`,
+      toast.success(`Deleted “${key.name}”`, {
+        description: "It is gone from the database and cannot be recovered.",
       })
       await load()
     } catch {
-      setFeedback({ tone: "error", text: "Network error — the key was not deleted." })
+      toast.error("Network error — the key was not deleted.")
     } finally {
       setDeleteBusy(false)
       setConfirmDelete(null)
@@ -188,40 +200,32 @@ export function Dashboard({ username }: { username: string }) {
         label="Request a key"
         description={`Signed in as @${username} · ${formatCount(activeCount)} active ${activeCount === 1 ? "key" : "keys"}`}
       >
+        {/* Both controls go through the shared Field, which is where the label/`aria-describedby`
+            wiring lives. Hand-rolling them here is how the two fields ended up describing their
+            hint to nobody. `mono` is off: these are prose, not credentials. */}
         <form onSubmit={createRequest} className="flex flex-col gap-3">
-          <div className="flex flex-col gap-1.5">
-            <label htmlFor="key-subject" className="text-sm font-medium">
-              Subject <span className="text-muted-foreground">*</span>
-            </label>
-            <input
-              id="key-subject"
-              value={subject}
-              onChange={(e) => setSubject(e.target.value)}
-              placeholder="Which app or device is this for?"
-              maxLength={64}
-              required
-              autoComplete="off"
-              className="w-full rounded-md border border-input bg-input/30 px-3 py-2 text-sm outline-none placeholder:text-muted-foreground/60 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
-            />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <label htmlFor="key-reason" className="text-sm font-medium">
-              Reason <span className="text-muted-foreground">*</span>
-            </label>
-            <textarea
-              id="key-reason"
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              placeholder="What will you use the pool for? At least 10 characters — a real sentence gets approved faster."
-              maxLength={500}
-              required
-              rows={3}
-              className="w-full resize-y rounded-md border border-input bg-input/30 px-3 py-2 text-sm leading-relaxed outline-none placeholder:text-muted-foreground/60 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
-            />
-            <p className="text-xs text-muted-foreground">
-              {formatCount(reason.trim().length)}/10 minimum
-            </p>
-          </div>
+          <Field
+            label="Subject"
+            name="subject"
+            required
+            mono={false}
+            maxLength={64}
+            placeholder="Which app or device is this for?"
+            value={subject}
+            onValueChange={setSubject}
+          />
+          <Field
+            label="Reason"
+            name="reason"
+            required
+            mono={false}
+            rows={3}
+            maxLength={500}
+            placeholder="What will you use the pool for? At least 10 characters — a real sentence gets approved faster."
+            hint={`${formatCount(reason.trim().length)}/10 minimum`}
+            value={reason}
+            onValueChange={setReason}
+          />
           <div className="flex justify-end">
             <Button type="submit" disabled={creating}>
               {creating ? "Sending…" : "Send request"}
@@ -235,9 +239,8 @@ export function Dashboard({ username }: { username: string }) {
         ) : null}
       </Panel>
 
-      {feedback ? <Notice tone={feedback.tone}>{feedback.text}</Notice> : null}
+      {loadError ? <Notice tone="error">{loadError}</Notice> : null}
 
-      <AnimatePresence initial={false}>
       <AnimatePresence initial={false}>
         {revealed
           ? reduce ? (
@@ -253,7 +256,6 @@ export function Dashboard({ username }: { username: string }) {
               </motion.div>
             )
           : null}
-      </AnimatePresence>
       </AnimatePresence>
 
       {requests && requests.length > 0 ? (
@@ -312,8 +314,8 @@ export function Dashboard({ username }: { username: string }) {
       >
         {keys === null ? (
           <>
-            <div className="h-16 animate-pulse rounded-md bg-secondary/60" />
-            <div className="h-16 animate-pulse rounded-md bg-secondary/60" />
+            <Skeleton className="h-16" />
+            <Skeleton className="h-16" />
           </>
         ) : keys.length === 0 ? (
           <p className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
