@@ -2,13 +2,16 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { TriangleAlert } from "lucide-react"
+import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Panel } from "@/components/ui/panel"
 import { Badge, toneFor } from "@/components/ui/badge"
 import { Dialog } from "@/components/ui/dialog"
 import { Field } from "@/components/ui/field"
 import { Notice } from "@/components/ui/notice"
-import { cn, formatAgo, formatCount, formatDateTime, formatDay } from "@/lib/utils"
+import { Skeleton } from "@/components/ui/skeleton"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { formatAgo, formatCount, formatDateTime, formatDay } from "@/lib/utils"
 
 // Mirrors CATEGORIES in lib/sources.ts. Declared locally on purpose: that module imports
 // node's `crypto` for fingerprinting, which cannot be pulled into a client bundle.
@@ -85,10 +88,6 @@ function displayStatus(row: EntryRow): string {
   return row.status
 }
 
-function tabId(index: number): string {
-  return `sources-tab-${index}`
-}
-
 /** The API reports machine codes for its own rejections; these say what to do next. */
 const ERROR_COPY: Record<string, string> = {
   unauthorized: "Admin token rejected. Unlock again.",
@@ -117,7 +116,6 @@ export function AdminSources() {
   const [filter, setFilter] = useState<StatusFilter>("active")
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [feedback, setFeedback] = useState<{ tone: "ok" | "error"; text: string } | null>(null)
   // The entry and action currently in flight; that row's buttons are disabled while it is set, so
   // a double-click cannot fire the same removal twice. One field rather than an id plus a flag,
   // because the two could disagree about which action is running.
@@ -191,7 +189,6 @@ export function AdminSources() {
   async function checkOne(row: EntryRow) {
     if (busy?.id === row.id) return
     setBusy({ id: row.id, action: "check" })
-    setFeedback(null)
     try {
       const res = await fetch("/api/admin/check-entry", {
         method: "POST",
@@ -200,10 +197,7 @@ export function AdminSources() {
       })
       if (res.status === 401) invalidateToken()
       if (!res.ok) {
-        setFeedback({
-          tone: "error",
-          text: await failureMessage(res, `Check failed for “${row.label}”`),
-        })
+        toast.error(await failureMessage(res, `Check failed for “${row.label}”`))
         return
       }
       const data = (await res.json().catch(() => ({}))) as { result?: CheckResult | null }
@@ -211,28 +205,24 @@ export function AdminSources() {
       if (!result) {
         // HTTP 200 with no verdict in it: report it as a failure rather than letting silence read
         // as a pass.
-        setFeedback({ tone: "error", text: `The server returned no result for “${row.label}”.` })
+        toast.error(`The server returned no result for “${row.label}”.`)
         return
       }
       setChecked((prev) => ({ ...prev, [row.id]: result }))
-      setFeedback(
-        result.ok
-          ? {
-              tone: "ok",
-              text: `“${row.label}” passed — status ${result.status}${
-                result.latencyMs === null ? "" : ` in ${formatCount(result.latencyMs)}ms`
-              }.`,
-            }
-          : {
-              tone: "error",
-              text: `“${row.label}” failed the check (${result.status})${
-                result.detail ? `: ${result.detail}` : "."
-              }`,
-            },
-      )
+      if (result.ok) {
+        toast.success(`“${row.label}” passed`, {
+          description: `Status ${result.status}${
+            result.latencyMs === null ? "" : ` in ${formatCount(result.latencyMs)}ms`
+          }.`,
+        })
+      } else {
+        toast.error(`“${row.label}” failed the check`, {
+          description: `${result.status}${result.detail ? ` — ${result.detail}` : ""}`,
+        })
+      }
       await load()
     } catch {
-      setFeedback({ tone: "error", text: "Network error — that check never reached the server." })
+      toast.error("Network error — that check never reached the server.")
     } finally {
       setBusy(null)
     }
@@ -241,7 +231,6 @@ export function AdminSources() {
   async function setRemoved(row: EntryRow, remove: boolean) {
     if (busy?.id === row.id) return
     setBusy({ id: row.id, action: remove ? "remove" : "restore" })
-    setFeedback(null)
     try {
       const res = await fetch("/api/admin/remove", {
         method: "POST",
@@ -250,27 +239,21 @@ export function AdminSources() {
       })
       if (res.status === 401) invalidateToken()
       if (!res.ok) {
-        setFeedback({
-          tone: "error",
-          text: await failureMessage(
-            res,
-            `Could not ${remove ? "remove" : "restore"} “${row.label}”`,
-          ),
-        })
+        toast.error(
+          await failureMessage(res, `Could not ${remove ? "remove" : "restore"} “${row.label}”`),
+        )
         return
       }
-      setFeedback({
-        tone: "ok",
-        text: remove
-          ? `Removed “${row.label}” from the pool. The entry is kept, so this can be undone.`
-          : `Restored “${row.label}” — it is served again as soon as a check says it is healthy.`,
+      toast.success(remove ? `Removed “${row.label}”` : `Restored “${row.label}”`, {
+        description: remove
+          ? "It is no longer handed out by /api/sources. The entry is kept, so this can be undone."
+          : "It is served again as soon as a check says it is healthy.",
       })
       await load()
     } catch {
-      setFeedback({
-        tone: "error",
-        text: `Network error — “${row.label}” was ${remove ? "not removed" : "not restored"}.`,
-      })
+      toast.error(
+        `Network error — “${row.label}” was ${remove ? "not removed" : "not restored"}.`,
+      )
     } finally {
       setBusy(null)
       setConfirmRemove(null)
@@ -362,6 +345,143 @@ export function AdminSources() {
   const removing =
     confirmRemove !== null && busy !== null && busy.id === confirmRemove.id && busy.action === "remove"
 
+  // Built once and handed to whichever TabsContent is mounted: only the active panel renders
+  // (Base UI unmounts the rest), so this is the body of exactly one of them at a time.
+  const panelBody = entries === null ? (
+    <>
+      <Skeleton className="h-20" />
+      <Skeleton className="h-20" />
+      <Skeleton className="h-20" />
+    </>
+  ) : inCategoryCount === 0 ? (
+    <p className="rounded-md border border-dashed border-border px-4 py-8 text-center text-xs text-muted-foreground">
+      Nothing has been contributed for {category.label} yet.
+    </p>
+  ) : rows.length === 0 ? (
+    <p className="rounded-md border border-dashed border-border px-4 py-8 text-center text-xs text-muted-foreground">
+      No entries match this filter in {category.label}.
+    </p>
+  ) : (
+    <ul className="flex flex-col gap-2">
+      {rows.map((row) => {
+        const status = displayStatus(row)
+        const result = checked[row.id]
+        const rate =
+          row.checkCount > 0 ? Math.round((row.okCount / row.checkCount) * 100) : null
+        // Which action this row has in flight, or null. Nothing else on the row can fire
+        // while it is set, so a double-click cannot queue a second removal.
+        const busyAction = busy !== null && busy.id === row.id ? busy.action : null
+        const isLastAlive = aliveInCategory === 1 && isServable(row)
+        return (
+          // One row layout at every width: the action group wraps below the content on a
+          // narrow screen, which is what used to justify a separate mobile card list — a
+          // 7-column table pushed Check/Remove off-screen on a phone.
+          <li
+            key={row.id}
+            className="rounded-md border border-border bg-background/40 p-3.5"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3
+                    className="min-w-0 max-w-full truncate font-mono text-sm text-foreground"
+                    title={row.label}
+                  >
+                    {row.label}
+                  </h3>
+                  <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                    #{row.id}
+                  </span>
+                  <Badge tone={toneFor(status)}>{status}</Badge>
+                  {row.premium ? <Badge tone="neutral">premium</Badge> : null}
+                  {row.consecutiveFailures > 0 && !row.removed ? (
+                    <Badge tone="warn">
+                      {formatCount(row.consecutiveFailures)} fail
+                      {row.consecutiveFailures === 1 ? "" : "s"}
+                    </Badge>
+                  ) : null}
+                </div>
+
+                {/* Meta: flex-wrap rather than one truncated line, because the contributor
+                    credit must never be the thing that gets cut off. */}
+                <p className="mt-1.5 flex flex-wrap gap-x-2 font-mono text-xs text-muted-foreground">
+                  {row.contributor ? (
+                    <span className="text-foreground/80">@{row.contributor}</span>
+                  ) : null}
+                  <span>
+                    {rate === null
+                      ? "no checks yet"
+                      : `${rate}% ok (${formatCount(row.okCount)}/${formatCount(row.checkCount)})`}
+                  </span>
+                  <span>
+                    {row.latencyMs === null ? "no latency" : `${formatCount(row.latencyMs)}ms`}
+                  </span>
+                  <span title={formatDateTime(row.lastCheckedAt)}>
+                    checked {formatAgo(row.lastCheckedAt)}
+                  </span>
+                  <span>added {formatDay(row.createdAt)}</span>
+                  {isLastAlive ? <span className="text-warn">last serving entry</span> : null}
+                </p>
+
+                {row.detail ? (
+                  <p
+                    className="mt-2 line-clamp-2 max-w-[80ch] text-xs leading-relaxed text-muted-foreground text-pretty"
+                    title={row.detail}
+                  >
+                    {row.detail}
+                  </p>
+                ) : null}
+
+                {result ? (
+                  <p className="mt-2 max-w-[80ch] truncate font-mono text-xs text-muted-foreground">
+                    Last check: {result.ok ? "passed" : "failed"}
+                    {result.detail ? ` — ${result.detail}` : ""}
+                  </p>
+                ) : null}
+              </div>
+
+              <div className="flex shrink-0 items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={busyAction !== null}
+                  aria-label={`Check entry ${row.label}`}
+                  onClick={() => void checkOne(row)}
+                >
+                  {busyAction === "check" ? "Checking…" : "Check"}
+                </Button>
+                {row.removed ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={busyAction !== null}
+                    aria-label={`Restore entry ${row.label}`}
+                    onClick={() => void setRemoved(row, false)}
+                  >
+                    {busyAction === "restore" ? "Restoring…" : "Restore"}
+                  </Button>
+                ) : (
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    size="sm"
+                    disabled={busyAction !== null}
+                    aria-label={`Remove entry ${row.label}`}
+                    onClick={() => setConfirmRemove(row)}
+                  >
+                    Remove
+                  </Button>
+                )}
+              </div>
+            </div>
+          </li>
+        )
+      })}
+    </ul>
+  )
+
   return (
     <>
       <Panel
@@ -378,225 +498,76 @@ export function AdminSources() {
             {loading ? "Refreshing…" : "Refresh"}
           </Button>
         }
-        bodyClassName="flex flex-col gap-3"
       >
-        {/* Source tabs. Roving tabindex: only the selected tab is a stop, arrows move between
-            them, so the tablist behaves the way assistive tech tells people it will. */}
-        <div
-          role="tablist"
-          aria-label="Source"
-          className="flex flex-wrap gap-1 rounded-md border border-border bg-background/40 p-1"
+        {/* One Tabs root over the whole body: the filter row, the warning and the entry list all
+            belong to the selected source, so they sit between the tablist and the panels rather
+            than above the root. Base UI owns the roving tabindex and arrow keys that this panel
+            used to hand-roll. */}
+        <Tabs
+          value={activeTab}
+          onValueChange={(next) => setActiveTab(next as number)}
+          className="gap-3"
         >
-          {CATEGORIES.map((c, i) => {
-            const selected = i === activeTab
-            return (
-              <button
+          <TabsList
+            aria-label="Source"
+            className="w-full flex-wrap rounded-md border border-border bg-background/40 group-data-horizontal/tabs:h-auto"
+          >
+            {CATEGORIES.map((c, i) => (
+              <TabsTrigger
                 key={c.label}
-                id={tabId(i)}
-                role="tab"
-                type="button"
-                aria-selected={selected}
-                aria-controls="sources-panel"
-                tabIndex={selected ? 0 : -1}
-                onClick={() => setActiveTab(i)}
-                onKeyDown={(e) => {
-                  if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return
-                  e.preventDefault()
-                  const step = e.key === "ArrowRight" ? 1 : CATEGORIES.length - 1
-                  const next = (i + step) % CATEGORIES.length
-                  setActiveTab(next)
-                  requestAnimationFrame(() => document.getElementById(tabId(next))?.focus())
-                }}
-                className={cn(
-                  "flex items-center gap-2 rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
-                  selected
-                    ? "bg-secondary text-foreground"
-                    : "text-muted-foreground hover:text-foreground",
-                )}
+                value={i}
+                // The shipped trigger paints its active state from --input in dark mode; every
+                // other selected control on this page uses --secondary, and layout.tsx pins dark,
+                // so the dark variant has to be restated or the tabs alone look different.
+                className="h-7 flex-none gap-2 px-3 text-xs data-active:bg-secondary dark:data-active:border-transparent dark:data-active:bg-secondary"
               >
                 <span className="min-w-0 truncate">{c.label}</span>
                 <span className="shrink-0 font-mono text-[0.625rem] opacity-70">
                   {formatCount(perTabCounts[i])}
                 </span>
-              </button>
-            )
-          })}
-        </div>
+              </TabsTrigger>
+            ))}
+          </TabsList>
 
-        {/* Status filter */}
-        <div className="flex flex-wrap items-center gap-1 rounded-md border border-border bg-background/40 p-1">
-          {FILTERS.map((f) => (
-            <Button
-              key={f.value}
-              type="button"
-              size="xs"
-              variant={filter === f.value ? "secondary" : "ghost"}
-              aria-pressed={filter === f.value}
-              className="font-mono"
-              onClick={() => setFilter(f.value)}
-            >
-              {f.label}
-            </Button>
+          {/* Status filter. Deliberately not a second tablist: it narrows the rows already on
+              screen rather than switching between panels. */}
+          <div className="flex flex-wrap items-center gap-1 rounded-md border border-border bg-background/40 p-1">
+            {FILTERS.map((f) => (
+              <Button
+                key={f.value}
+                type="button"
+                size="xs"
+                variant={filter === f.value ? "secondary" : "ghost"}
+                aria-pressed={filter === f.value}
+                className="font-mono"
+                onClick={() => setFilter(f.value)}
+              >
+                {f.label}
+              </Button>
+            ))}
+          </div>
+
+          {/* Mutations report through toasts — this panel is taller than the viewport, so a
+              message pinned up here is off-screen by the time you click a row's Remove. A failed
+              *load* still belongs inline: it explains why the list below is empty. */}
+          {loadError ? <Notice tone="error">{loadError}</Notice> : null}
+
+          {aliveInCategory === 1 && filter !== "removed" ? (
+            <p className="flex items-start gap-2 rounded-md border border-warn/30 bg-warn/5 px-3 py-2 text-xs leading-relaxed text-warn">
+              <TriangleAlert className="mt-px size-3.5 shrink-0" aria-hidden="true" />
+              <span className="min-w-0">
+                Only one serving entry remains in {category.label}. Removing it takes this source
+                offline for every app until a replacement is contributed.
+              </span>
+            </p>
+          ) : null}
+
+          {CATEGORIES.map((c, i) => (
+            <TabsContent key={c.label} value={i} className="flex flex-col gap-2">
+              {panelBody}
+            </TabsContent>
           ))}
-        </div>
-
-        {loadError ? <Notice tone="error">{loadError}</Notice> : null}
-        {feedback ? <Notice tone={feedback.tone}>{feedback.text}</Notice> : null}
-
-        {aliveInCategory === 1 && filter !== "removed" ? (
-          <p className="flex items-start gap-2 rounded-md border border-warn/30 bg-warn/5 px-3 py-2 text-xs leading-relaxed text-warn">
-            <TriangleAlert className="mt-px size-3.5 shrink-0" aria-hidden="true" />
-            <span className="min-w-0">
-              Only one serving entry remains in {category.label}. Removing it takes this source
-              offline for every app until a replacement is contributed.
-            </span>
-          </p>
-        ) : null}
-
-        <div
-          id="sources-panel"
-          role="tabpanel"
-          aria-labelledby={tabId(activeTab)}
-          className="flex flex-col gap-2"
-        >
-          {entries === null ? (
-            <>
-              <div className="h-20 animate-pulse rounded-md bg-secondary/60" />
-              <div className="h-20 animate-pulse rounded-md bg-secondary/60" />
-              <div className="h-20 animate-pulse rounded-md bg-secondary/60" />
-            </>
-          ) : inCategoryCount === 0 ? (
-            <p className="rounded-md border border-dashed border-border px-4 py-8 text-center text-xs text-muted-foreground">
-              Nothing has been contributed for {category.label} yet.
-            </p>
-          ) : rows.length === 0 ? (
-            <p className="rounded-md border border-dashed border-border px-4 py-8 text-center text-xs text-muted-foreground">
-              No entries match this filter in {category.label}.
-            </p>
-          ) : (
-            <ul className="flex flex-col gap-2">
-              {rows.map((row) => {
-                const status = displayStatus(row)
-                const result = checked[row.id]
-                const rate =
-                  row.checkCount > 0 ? Math.round((row.okCount / row.checkCount) * 100) : null
-                // Which action this row has in flight, or null. Nothing else on the row can fire
-                // while it is set, so a double-click cannot queue a second removal.
-                const busyAction = busy !== null && busy.id === row.id ? busy.action : null
-                const isLastAlive = aliveInCategory === 1 && isServable(row)
-                return (
-                  // One row layout at every width: the action group wraps below the content on a
-                  // narrow screen, which is what used to justify a separate mobile card list — a
-                  // 7-column table pushed Check/Remove off-screen on a phone.
-                  <li
-                    key={row.id}
-                    className="rounded-md border border-border bg-background/40 p-3.5"
-                  >
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <h3
-                            className="min-w-0 max-w-full truncate font-mono text-sm text-foreground"
-                            title={row.label}
-                          >
-                            {row.label}
-                          </h3>
-                          <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                            #{row.id}
-                          </span>
-                          <Badge tone={toneFor(status)}>{status}</Badge>
-                          {row.premium ? <Badge tone="neutral">premium</Badge> : null}
-                          {row.consecutiveFailures > 0 && !row.removed ? (
-                            <Badge tone="warn">
-                              {formatCount(row.consecutiveFailures)} fail
-                              {row.consecutiveFailures === 1 ? "" : "s"}
-                            </Badge>
-                          ) : null}
-                        </div>
-
-                        {/* Meta: flex-wrap rather than one truncated line, because the contributor
-                            credit must never be the thing that gets cut off. */}
-                        <p className="mt-1.5 flex flex-wrap gap-x-2 font-mono text-xs text-muted-foreground">
-                          {row.contributor ? (
-                            <span className="text-foreground/80">@{row.contributor}</span>
-                          ) : null}
-                          <span>
-                            {rate === null
-                              ? "no checks yet"
-                              : `${rate}% ok (${formatCount(row.okCount)}/${formatCount(row.checkCount)})`}
-                          </span>
-                          <span>
-                            {row.latencyMs === null ? "no latency" : `${formatCount(row.latencyMs)}ms`}
-                          </span>
-                          <span title={formatDateTime(row.lastCheckedAt)}>
-                            checked {formatAgo(row.lastCheckedAt)}
-                          </span>
-                          <span>added {formatDay(row.createdAt)}</span>
-                          {isLastAlive ? <span className="text-warn">last serving entry</span> : null}
-                        </p>
-
-                        {row.detail ? (
-                          <p
-                            className="mt-2 line-clamp-2 max-w-[80ch] text-xs leading-relaxed text-muted-foreground text-pretty"
-                            title={row.detail}
-                          >
-                            {row.detail}
-                          </p>
-                        ) : null}
-
-                        {result ? (
-                          <p className="mt-2 max-w-[80ch] truncate font-mono text-xs text-muted-foreground">
-                            Last check: {result.ok ? "passed" : "failed"}
-                            {result.detail ? ` — ${result.detail}` : ""}
-                          </p>
-                        ) : null}
-                      </div>
-
-                      <div className="flex shrink-0 items-center gap-2">
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          disabled={busyAction !== null}
-                          aria-label={`Check entry ${row.label}`}
-                          onClick={() => void checkOne(row)}
-                        >
-                          {busyAction === "check" ? "Checking…" : "Check"}
-                        </Button>
-                        {row.removed ? (
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            disabled={busyAction !== null}
-                            aria-label={`Restore entry ${row.label}`}
-                            onClick={() => void setRemoved(row, false)}
-                          >
-                            {busyAction === "restore" ? "Restoring…" : "Restore"}
-                          </Button>
-                        ) : (
-                          <Button
-                            type="button"
-                            variant="destructive"
-                            size="sm"
-                            disabled={busyAction !== null}
-                            aria-label={`Remove entry ${row.label}`}
-                            onClick={() => {
-                              setFeedback(null)
-                              setConfirmRemove(row)
-                            }}
-                          >
-                            Remove
-                          </Button>
-                        )}
-                      </div>
-                    </div>
-                  </li>
-                )
-              })}
-            </ul>
-          )}
-        </div>
+        </Tabs>
       </Panel>
 
       <Dialog
