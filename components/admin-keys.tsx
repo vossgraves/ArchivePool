@@ -1,12 +1,25 @@
 "use client"
 
 import { useCallback, useEffect, useState } from "react"
+import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Panel } from "@/components/ui/panel"
 import { Badge, toneFor } from "@/components/ui/badge"
 import { Dialog } from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { Notice } from "@/components/ui/notice"
-import { formatCount, formatDateTime, formatDay } from "@/lib/utils"
+import { Separator } from "@/components/ui/separator"
+import { Skeleton } from "@/components/ui/skeleton"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
+import { cn, formatCount, formatDateTime, formatDay } from "@/lib/utils"
 
 type KeyRow = {
   id: number
@@ -45,12 +58,10 @@ function RestoreKeyForm({ onDone }: { onDone: () => void }) {
   const [value, setValue] = useState("")
   const [name, setName] = useState("restored")
   const [busy, setBusy] = useState(false)
-  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null)
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     setBusy(true)
-    setResult(null)
     try {
       const res = await fetch("/api/admin/keys/custom", {
         method: "POST",
@@ -62,17 +73,16 @@ function RestoreKeyForm({ onDone }: { onDone: () => void }) {
       })
       const body = await res.json().catch(() => ({}))
       if (!res.ok) {
-        setResult({
-          ok: false,
-          text: body.detail ?? body.error ?? `Could not restore the key (HTTP ${res.status}).`,
-        })
+        toast.error(body.detail ?? body.error ?? `Could not restore the key (HTTP ${res.status}).`)
         return
       }
-      setResult({ ok: true, text: `Restored as key #${body.id} (${body.prefix}…).` })
+      toast.success(`Restored as key #${body.id}`, {
+        description: `${body.prefix}… authenticates again. The value itself is never echoed back — you typed it.`,
+      })
       setValue("")
       onDone()
     } catch {
-      setResult({ ok: false, text: "Network error — nothing was restored." })
+      toast.error("Network error — nothing was restored.")
     } finally {
       setBusy(false)
     }
@@ -80,37 +90,32 @@ function RestoreKeyForm({ onDone }: { onDone: () => void }) {
 
   return (
     <form onSubmit={submit} className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-start">
-      <label htmlFor="restore-name" className="sr-only">
+      <Label htmlFor="restore-name" className="sr-only">
         Key name
-      </label>
-      <input
+      </Label>
+      <Input
         id="restore-name"
         value={name}
         onChange={(e) => setName(e.target.value)}
         maxLength={64}
         autoComplete="off"
-        className="w-full rounded-md border border-input bg-input/30 px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40 sm:w-40"
+        className="sm:w-40"
       />
-      <label htmlFor="restore-value" className="sr-only">
+      <Label htmlFor="restore-value" className="sr-only">
         Key value
-      </label>
-      <input
+      </Label>
+      <Input
         id="restore-value"
         value={value}
         onChange={(e) => setValue(e.target.value)}
         placeholder="atp_… full key value"
         spellCheck={false}
         autoComplete="off"
-        className="min-w-0 flex-1 rounded-md border border-input bg-input/30 px-3 py-2 font-mono text-xs outline-none placeholder:text-muted-foreground/60 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
+        className="min-w-0 flex-1 font-mono text-xs md:text-xs"
       />
       <Button type="submit" variant="outline" disabled={busy || value.trim().length < 28}>
         {busy ? "Restoring…" : "Restore"}
       </Button>
-      {result ? (
-        <div className="basis-full">
-          <Notice tone={result.ok ? "ok" : "error"}>{result.text}</Notice>
-        </div>
-      ) : null}
     </form>
   )
 }
@@ -121,10 +126,8 @@ export function AdminKeys() {
   const [createdKey, setCreatedKey] = useState<{ name: string; key: string } | null>(null)
   const [copied, setCopied] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [feedback, setFeedback] = useState<{ tone: "ok" | "error"; text: string } | null>(null)
   const [loading, setLoading] = useState(false)
   const [purging, setPurging] = useState(false)
-  const [purgeResult, setPurgeResult] = useState<{ removed: number } | null>(null)
   const [confirmPurge, setConfirmPurge] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState<KeyRow | null>(null)
   const [deleteBusy, setDeleteBusy] = useState(false)
@@ -168,11 +171,15 @@ export function AdminKeys() {
     void loadKeys()
   }, [loadKeys])
 
+  /*
+   * Creation is the one mutation with no success toast: the plaintext key appears in its own
+   * panel directly under this form, and it is the whole point of the action. A toast saying
+   * "key created" beside a box shouting the key would be the same news told twice.
+   */
   async function createKey(e: React.FormEvent) {
     e.preventDefault()
     if (!newName.trim()) return
     setError(null)
-    setFeedback(null)
     const res = await fetch("/api/admin/keys", {
       method: "POST",
       headers: headers({ "content-type": "application/json" }),
@@ -180,10 +187,7 @@ export function AdminKeys() {
     })
     if (!res.ok) {
       const body = await res.json().catch(() => ({}))
-      setFeedback({
-        tone: "error",
-        text: body.detail ?? body.error ?? `Could not create the key (HTTP ${res.status}).`,
-      })
+      toast.error(body.detail ?? body.error ?? `Could not create the key (HTTP ${res.status}).`)
       return
     }
     const data = await res.json()
@@ -193,45 +197,40 @@ export function AdminKeys() {
   }
 
   async function toggleRevoke(row: KeyRow) {
-    setFeedback(null)
     const res = await fetch("/api/admin/keys", {
       method: "PATCH",
       headers: headers({ "content-type": "application/json" }),
       body: JSON.stringify({ id: row.id, revoked: !row.revoked }),
     })
     if (!res.ok) {
-      setFeedback({
-        tone: "error",
-        text: `Could not ${row.revoked ? "restore" : "revoke"} “${row.name}”.`,
-      })
+      toast.error(`Could not ${row.revoked ? "restore" : "revoke"} “${row.name}”.`)
       return
     }
-    setFeedback({
-      tone: "ok",
-      text: row.revoked
-        ? `Restored “${row.name}” — it authenticates again.`
-        : `Revoked “${row.name}” — reversible, the row is kept.`,
+    toast.success(row.revoked ? `Restored “${row.name}”` : `Revoked “${row.name}”`, {
+      description: row.revoked
+        ? "It authenticates again."
+        : "Reversible — the row and its hash are kept.",
     })
     void loadKeys()
   }
 
   async function purgeDead() {
     setPurging(true)
-    setPurgeResult(null)
-    setFeedback(null)
     try {
       const res = await fetch("/api/admin/purge-dead", { method: "POST", headers: headers() })
       if (!res.ok) {
         const body = await res.json().catch(() => ({}))
-        setFeedback({
-          tone: "error",
-          text: body.detail ?? body.error ?? `Purge failed (HTTP ${res.status}).`,
-        })
+        toast.error(body.detail ?? body.error ?? `Purge failed (HTTP ${res.status}).`)
         return
       }
-      setPurgeResult(await res.json())
+      const { removed } = (await res.json()) as { removed: number }
+      // Toast rather than a line under the button: the purge is confirmed in a dialog, and when
+      // that closes the eye is on the middle of the screen, not on the control that opened it.
+      toast.success(
+        `Removed ${formatCount(removed)} dead ${removed === 1 ? "entry" : "entries"}`,
+      )
     } catch {
-      setFeedback({ tone: "error", text: "Network error — purge failed." })
+      toast.error("Network error — purge failed.")
     } finally {
       setPurging(false)
       setConfirmPurge(false)
@@ -242,21 +241,20 @@ export function AdminKeys() {
   async function forceCheck() {
     setForceChecking(true)
     setForceResult(null)
-    setFeedback(null)
     try {
       const res = await fetch("/api/admin/force-check", { method: "POST", headers: headers() })
       if (!res.ok) {
         const body = await res.json().catch(() => ({}))
-        setFeedback({
-          tone: "error",
-          text: body.detail ?? body.error ?? `Force check failed (HTTP ${res.status}).`,
-        })
+        toast.error(body.detail ?? body.error ?? `Force check failed (HTTP ${res.status}).`)
         return
       }
+      // Success stays inline: what comes back is nine figures across two subsystems, which is a
+      // readout to be read, not a message to be acknowledged, and it lands directly beneath the
+      // button that asked for it.
       setForceResult(await res.json())
       void loadKeys()
     } catch {
-      setFeedback({ tone: "error", text: "Network error — force check failed." })
+      toast.error("Network error — force check failed.")
     } finally {
       setForceChecking(false)
     }
@@ -264,24 +262,19 @@ export function AdminKeys() {
 
   async function permanentlyDelete(row: KeyRow) {
     setDeleteBusy(true)
-    setFeedback(null)
     try {
       const res = await fetch(`/api/admin/keys/${row.id}`, { method: "DELETE", headers: headers() })
       if (!res.ok) {
         const body = await res.json().catch(() => ({}))
-        setFeedback({
-          tone: "error",
-          text: body.detail ?? body.error ?? `Could not delete “${row.name}”.`,
-        })
+        toast.error(body.detail ?? body.error ?? `Could not delete “${row.name}”.`)
         return
       }
-      setFeedback({
-        tone: "ok",
-        text: `Deleted “${row.name}” permanently. Its hash is gone, so the key can never authenticate again.`,
+      toast.success(`Deleted “${row.name}”`, {
+        description: "Its hash is gone, so that key can never authenticate again.",
       })
       void loadKeys()
     } catch {
-      setFeedback({ tone: "error", text: "Network error — the key was not deleted." })
+      toast.error("Network error — the key was not deleted.")
     } finally {
       setDeleteBusy(false)
       setConfirmDelete(null)
@@ -292,25 +285,27 @@ export function AdminKeys() {
 
   return (
     <div className="flex flex-col gap-6" id="admin-keys">
+      {/* Only the load failure is inline: it says why the table below has nothing in it. Every
+          mutation reports through a toast instead, because this page is several screens tall and
+          a message anchored here is off-screen from the button that caused it. */}
       {error ? <Notice tone="error">{error}</Notice> : null}
-      {feedback ? <Notice tone={feedback.tone}>{feedback.text}</Notice> : null}
 
       <Panel
         label="Create a key"
         description="For your own apps. The value is shown once — only its SHA-256 hash is stored."
       >
         <form onSubmit={createKey} className="flex flex-col gap-3 sm:flex-row">
-          <label htmlFor="new-key-name" className="sr-only">
+          <Label htmlFor="new-key-name" className="sr-only">
             Key name
-          </label>
-          <input
+          </Label>
+          <Input
             id="new-key-name"
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             placeholder="e.g. ArchiveTune Android"
             maxLength={64}
             autoComplete="off"
-            className="min-w-0 flex-1 rounded-md border border-input bg-input/30 px-3 py-2 text-sm outline-none placeholder:text-muted-foreground/60 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
+            className="min-w-0 flex-1"
           />
           <Button type="submit" disabled={!newName.trim()}>
             Generate key
@@ -358,57 +353,101 @@ export function AdminKeys() {
         }
         bodyClassName="p-0"
       >
-        {!keys ? (
-          <div className="p-4">
-            <div className="h-16 animate-pulse rounded-md bg-secondary/60" />
-          </div>
-        ) : keys.length === 0 ? (
-          <p className="px-4 py-8 text-center text-sm text-muted-foreground">
-            No keys yet. Create one above, or wait for a request to be approved.
-          </p>
-        ) : (
-          <ul className="divide-y divide-border">
-            {keys.map((row) => (
-              <li
-                key={row.id}
-                className="flex flex-wrap items-center justify-between gap-3 px-4 py-3"
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="min-w-0 truncate text-sm font-medium">{row.name}</span>
-                    {row.deleted ? <Badge tone="neutral">hidden</Badge> : null}
+        {/*
+         * A real table, not a list of cards: every field here is a short scalar the admin
+         * compares down the column — which key is unused, which was last seen in March, whose
+         * key it is. The Table primitive scrolls itself horizontally, so the narrow-screen
+         * problem that keeps the pool entries as cards (their action pair would be pushed
+         * off-screen) does not arise: here the row is short enough to swipe.
+         *
+         * The header renders in every state, including the two with no rows, so nothing
+         * reflows when the payload lands — the same reasoning the status board documents, and
+         * the skeleton likewise draws gaps rather than a row of believable zeroes.
+         */}
+        <Table className="min-w-[48rem]">
+          <TableHeader>
+            <TableRow className="hover:bg-transparent">
+              {["Key", "Status", "Prefix", "Uses", "Last used", "Added", "Owner"].map((h) => (
+                <TableHead key={h} className={cn("label-mono px-4", h === "Uses" && "text-right")}>
+                  {h}
+                </TableHead>
+              ))}
+              <TableHead className="px-4 text-right">
+                <span className="sr-only">Actions</span>
+              </TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {!keys ? (
+              Array.from({ length: 3 }).map((_, i) => (
+                <TableRow key={i} className="hover:bg-transparent">
+                  <TableCell colSpan={8} className="px-4 py-3">
+                    <Skeleton className="h-8" />
+                  </TableCell>
+                </TableRow>
+              ))
+            ) : keys.length === 0 ? (
+              <TableRow className="hover:bg-transparent">
+                <TableCell colSpan={8} className="px-4 py-8 text-center text-muted-foreground">
+                  No keys yet. Create one above, or wait for a request to be approved.
+                </TableCell>
+              </TableRow>
+            ) : (
+              keys.map((row) => (
+                <TableRow key={row.id}>
+                  <TableCell className="px-4 py-3">
+                    <span className="flex items-center gap-2">
+                      <span className="max-w-56 truncate font-medium" title={row.name}>
+                        {row.name}
+                      </span>
+                      {row.deleted ? <Badge tone="neutral">hidden</Badge> : null}
+                    </span>
+                  </TableCell>
+                  <TableCell className="px-4 py-3">
                     <Badge tone={toneFor(row.revoked ? "revoked" : "active")}>
                       {row.revoked ? "revoked" : "active"}
                     </Badge>
-                  </div>
-                  <p className="mt-1 min-w-0 truncate font-mono text-xs text-muted-foreground">
-                    {row.prefix}… · {formatCount(row.useCount)} uses · last{" "}
-                    {formatDay(row.lastUsedAt)} · added {formatDay(row.createdAt)}
-                    {row.owner ? ` · @${row.owner}` : " · no owner"}
-                  </p>
-                </div>
-                <div className="flex shrink-0 items-center gap-2">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => void toggleRevoke(row)}
-                    aria-label={`${row.revoked ? "Restore" : "Revoke"} key ${row.name}`}
-                  >
-                    {row.revoked ? "Restore" : "Revoke"}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="destructive"
-                    onClick={() => setConfirmDelete(row)}
-                    aria-label={`Delete key ${row.name} permanently`}
-                  >
-                    Delete
-                  </Button>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
+                  </TableCell>
+                  <TableCell className="px-4 py-3 font-mono text-xs text-muted-foreground">
+                    {row.prefix}…
+                  </TableCell>
+                  <TableCell className="px-4 py-3 text-right font-mono text-xs">
+                    {formatCount(row.useCount)}
+                  </TableCell>
+                  <TableCell className="px-4 py-3 font-mono text-xs text-muted-foreground">
+                    {formatDay(row.lastUsedAt)}
+                  </TableCell>
+                  <TableCell className="px-4 py-3 font-mono text-xs text-muted-foreground">
+                    {formatDay(row.createdAt)}
+                  </TableCell>
+                  <TableCell className="px-4 py-3 font-mono text-xs text-muted-foreground">
+                    {row.owner ? `@${row.owner}` : "—"}
+                  </TableCell>
+                  <TableCell className="px-4 py-3">
+                    <span className="flex items-center justify-end gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => void toggleRevoke(row)}
+                        aria-label={`${row.revoked ? "Restore" : "Revoke"} key ${row.name}`}
+                      >
+                        {row.revoked ? "Restore" : "Revoke"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        onClick={() => setConfirmDelete(row)}
+                        aria-label={`Delete key ${row.name} permanently`}
+                      >
+                        Delete
+                      </Button>
+                    </span>
+                  </TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
       </Panel>
 
       <Panel
@@ -444,7 +483,7 @@ export function AdminKeys() {
             </div>
           ) : null}
 
-          <div className="h-px bg-border" />
+          <Separator />
 
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="min-w-0 max-w-[62ch] text-xs leading-relaxed text-muted-foreground">
@@ -461,14 +500,8 @@ export function AdminKeys() {
               {purging ? "Purging…" : "Remove all dead"}
             </Button>
           </div>
-          {purgeResult ? (
-            <p className="text-xs text-muted-foreground" role="status" aria-live="polite">
-              Removed <span className="font-semibold text-foreground">{formatCount(purgeResult.removed)}</span>{" "}
-              dead {purgeResult.removed === 1 ? "entry" : "entries"}.
-            </p>
-          ) : null}
 
-          <div className="h-px bg-border" />
+          <Separator />
 
           <details className="group">
             <summary className="cursor-pointer text-xs font-medium text-muted-foreground transition-colors hover:text-foreground">
