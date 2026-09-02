@@ -1,5 +1,6 @@
 import Link from "next/link"
 import { ArrowUpRight } from "lucide-react"
+import ParticleButton from "@/components/kokonutui/particle-button"
 import { SiteHeader } from "@/components/site-header"
 import { StatusBoard } from "@/components/status-board"
 import { buttonVariants } from "@/components/ui/button"
@@ -33,9 +34,13 @@ export default function Page() {
           </p>
 
           <div className="mt-1 flex flex-wrap items-center gap-2">
-            <Link href="/signup" className={cn(buttonVariants({ size: "lg" }))}>
+            {/* The one conversion action on the page, so it gets the particle burst — rendered as
+                a real anchor via Base UI's `render` so middle-click, copy-link and prefetch all
+                still behave. Every other button on the site stays plain: the flourish means
+                something only while it is rare. */}
+            <ParticleButton size="lg" render={<Link href="/signup" />}>
               Get an API key
-            </Link>
+            </ParticleButton>
             <Link
               href="/docs"
               className={cn(buttonVariants({ variant: "outline", size: "lg" }))}

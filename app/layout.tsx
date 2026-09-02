@@ -3,6 +3,7 @@ import type { Metadata, Viewport } from "next"
 import { Geist, Geist_Mono } from "next/font/google"
 import type React from "react"
 import { ClickRipple } from "@/components/click-ripple"
+import { Toaster } from "@/components/ui/sonner"
 import "./globals.css"
 
 const geistSans = Geist({ subsets: ["latin"], variable: "--font-geist-sans" })
@@ -78,6 +79,12 @@ export default function RootLayout({
         {/* Pure-DOM pointer feedback: a ring at every click point. No state, no re-renders,
             and hidden entirely under prefers-reduced-motion (see globals.css). */}
         <ClickRipple />
+        {/* Mutations (key create/revoke/delete, request approve/reject/claim, source removal)
+            report through here. Bottom-right keeps it clear of the header and of the dialogs,
+            which anchor centre; richColors maps the ok/destructive tones onto the same palette
+            the status badges use, so a toast reads as the same system rather than a browser
+            alert bolted on. */}
+        <Toaster position="bottom-right" richColors closeButton />
         {process.env.NODE_ENV === "production" && <Analytics />}
       </body>
     </html>
