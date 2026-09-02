@@ -1,10 +1,14 @@
 import { NextResponse, type NextRequest } from "next/server"
 import { getSessionUserId } from "@/lib/sessions"
-import { countRequestsByIpUa, createKeyRequest, listUserApiKeys, listUserRequests } from "@/lib/api-keys"
+import {
+  MAX_KEYS_PER_USER,
+  countRequestsByIpUa,
+  createKeyRequest,
+  listUserApiKeys,
+  listUserRequests,
+} from "@/lib/api-keys"
 
 export const dynamic = "force-dynamic"
-
-const MAX_KEYS_PER_USER = 10
 
 /** List the signed-in user's API keys and pending requests. */
 export async function GET() {

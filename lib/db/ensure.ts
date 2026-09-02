@@ -30,6 +30,7 @@ const STATEMENTS: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_api_keys_deleted ON api_keys (deleted)`,
 
   // Added 2026-08: API key request workflow (request → admin approval).
+  // `review_note` (added 2026-09-02) carries the rejection reason an admin sends to the requester.
   `CREATE TABLE IF NOT EXISTS api_key_requests (
     id               serial PRIMARY KEY,
     user_id          integer NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -39,6 +40,7 @@ const STATEMENTS: string[] = [
     ip_address       text NOT NULL DEFAULT '',
     user_agent       text NOT NULL DEFAULT '',
     resulting_key_id integer REFERENCES api_keys(id) ON DELETE SET NULL,
+    review_note      text NOT NULL DEFAULT '',
     reviewed_at      timestamptz,
     reviewed_by      integer REFERENCES users(id) ON DELETE SET NULL,
     created_at       timestamptz NOT NULL DEFAULT now()
@@ -65,6 +67,7 @@ const STATEMENTS: string[] = [
     ok_count             integer NOT NULL DEFAULT 0,
     disabled             boolean NOT NULL DEFAULT false,
     removed              boolean NOT NULL DEFAULT false,
+    contributor          text,
     last_checked_at      timestamptz,
     last_leased_at       timestamptz,
     created_at           timestamptz NOT NULL DEFAULT now()
@@ -84,6 +87,7 @@ const STATEMENTS: string[] = [
     ok_count             integer NOT NULL DEFAULT 0,
     disabled             boolean NOT NULL DEFAULT false,
     removed              boolean NOT NULL DEFAULT false,
+    contributor          text,
     last_checked_at      timestamptz,
     last_leased_at       timestamptz,
     created_at           timestamptz NOT NULL DEFAULT now()
@@ -123,6 +127,15 @@ const STATEMENTS: string[] = [
         (SELECT COALESCE(MAX(id), 0) FROM instance_entries),
         (SELECT COALESCE(MAX(id), 0) FROM source_entries)
       ) + 1, false)`,
+
+  // Added 2026-09-02: opt-in contributor credit, and the admin's rejection note. These sit AFTER
+  // the CREATE TABLE statements above on purpose — a database created by an older release (or by
+  // an old scripts/schema.sql) has the tables but not these columns, and the CREATEs are no-ops
+  // there. Without the ALTERs the first credited contribution would fail with "column
+  // \"contributor\" does not exist" and take the submit flow down.
+  `ALTER TABLE account_entries ADD COLUMN IF NOT EXISTS contributor text`,
+  `ALTER TABLE instance_entries ADD COLUMN IF NOT EXISTS contributor text`,
+  `ALTER TABLE api_key_requests ADD COLUMN IF NOT EXISTS review_note text NOT NULL DEFAULT ''`,
 ]
 
 const globalForMigrations = globalThis as unknown as { __poolSchemaEnsured?: Promise<void> }

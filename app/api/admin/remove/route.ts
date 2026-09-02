@@ -52,6 +52,9 @@ export async function GET(req: NextRequest) {
       premium: r.premium,
       disabled: r.disabled,
       removed: r.removed,
+      // Opt-in credit chosen at contribution time (null = anonymous). Display-only: this route is
+      // admin-token gated, and the public feeds never carry it.
+      contributor: r.contributor,
       consecutiveFailures: r.consecutiveFailures,
       lastCheckedAt: r.lastCheckedAt,
       // Health metrics for the per-source admin tables. `payload` is deliberately never

@@ -1,5 +1,7 @@
 import Link from "next/link"
 import { SiteHeader } from "@/components/site-header"
+import { buttonVariants } from "@/components/ui/button"
+import { cn } from "@/lib/utils"
 
 export const metadata = { title: "API documentation" }
 
@@ -26,7 +28,7 @@ const ENDPOINTS = [
 
 function Code({ children }: { children: string }) {
   return (
-    <pre className="overflow-x-auto rounded-2xl border border-border bg-background/60 p-4 font-mono text-xs leading-relaxed">
+    <pre className="overflow-x-auto rounded-md border border-border bg-background/60 p-3.5 font-mono text-xs leading-relaxed">
       {children}
     </pre>
   )
@@ -48,7 +50,7 @@ export default function DocsPage() {
         </header>
 
         <section className="flex flex-col gap-6">
-          <div className="rounded-[1.75rem] border border-border bg-card p-6">
+          <div className="rounded-lg border border-border bg-card p-5">
             <h2 className="text-lg font-semibold tracking-tight">1 · Request an API key</h2>
             <ol className="mt-3 flex list-decimal flex-col gap-1.5 pl-5 text-sm leading-relaxed text-muted-foreground">
               <li>
@@ -68,7 +70,7 @@ export default function DocsPage() {
             </ol>
           </div>
 
-          <div className="rounded-[1.75rem] border border-border bg-card p-6">
+          <div className="rounded-lg border border-border bg-card p-5">
             <h2 className="text-lg font-semibold tracking-tight">2 · Use the key</h2>
             <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
               Send it as a Bearer token (an <code className="font-mono text-xs">x-api-key</code>{" "}
@@ -91,11 +93,11 @@ export default function DocsPage() {
             </div>
           </div>
 
-          <div className="rounded-[1.75rem] border border-border bg-card p-6">
+          <div className="rounded-lg border border-border bg-card p-5">
             <h2 className="text-lg font-semibold tracking-tight">3 · Endpoints</h2>
             <div className="mt-3 flex flex-col gap-4">
               {ENDPOINTS.map((e) => (
-                <div key={e.path} className="rounded-2xl border border-border bg-background/40 p-4">
+                <div key={e.path} className="rounded-md border border-border bg-background/40 p-3.5">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="rounded-lg bg-primary/15 px-2 py-0.5 font-mono text-xs font-semibold text-primary">
                       {e.method}
@@ -111,7 +113,7 @@ export default function DocsPage() {
             </div>
           </div>
 
-          <div className="rounded-[1.75rem] border border-border bg-card p-6">
+          <div className="rounded-lg border border-border bg-card p-5">
             <h2 className="text-lg font-semibold tracking-tight">Rules of the pool</h2>
             <ul className="mt-3 flex list-disc flex-col gap-1.5 pl-5 text-sm leading-relaxed text-muted-foreground">
               <li>Keys are free, personal and revocable — don’t share them. Revoked keys stop working immediately.</li>
@@ -121,7 +123,7 @@ export default function DocsPage() {
             </ul>
             <Link
               href="/submit"
-              className="mt-4 inline-flex items-center rounded-full bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90"
+              className={cn(buttonVariants({ size: "lg" }), "mt-4 w-fit")}
             >
               Contribute a source
             </Link>

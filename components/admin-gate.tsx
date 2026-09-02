@@ -1,14 +1,19 @@
 "use client"
 
 import { useEffect, useState } from "react"
+import { Lock } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Panel } from "@/components/ui/panel"
+import { Field } from "@/components/ui/field"
 import { AdminKeys } from "@/components/admin-keys"
 import { AdminRequests } from "@/components/admin-requests"
 import { AdminSources } from "@/components/admin-sources"
 
 /**
- * Single unlock prompt for the whole admin page. Both panels read the same session token, so
- * gating here avoids rendering two identical token forms for one credential.
+ * Single unlock prompt for the whole admin page.
+ *
+ * Every panel here reads the same session token, so gating once at the top avoids rendering two
+ * identical token forms for one credential (which is what the key and source panels used to do).
  */
 export function AdminGate() {
   const [token, setToken] = useState("")
@@ -18,8 +23,8 @@ export function AdminGate() {
   const [ready, setReady] = useState(false)
 
   useEffect(() => {
+    // Read before painting so a refresh does not flash the unlock form.
     if (sessionStorage.getItem("adminToken")) setAuthed(true)
-    // Avoid flashing the unlock form before sessionStorage has been read.
     setReady(true)
   }, [])
 
@@ -31,14 +36,17 @@ export function AdminGate() {
       // Verify before storing, so an invalid token never reaches the child panels.
       const res = await fetch("/api/admin/keys", { headers: { authorization: `Bearer ${token}` } })
       if (res.status === 401) {
-        setError("Invalid admin token.")
+        setError("That token was rejected. Check it was copied in full.")
         return
       }
-      if (!res.ok) throw new Error(`request failed (${res.status})`)
+      if (!res.ok) {
+        setError(`Server answered ${res.status} — the panel stays locked until the request succeeds.`)
+        return
+      }
       sessionStorage.setItem("adminToken", token)
       setAuthed(true)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not verify token.")
+    } catch {
+      setError("Network error — could not reach the server.")
     } finally {
       setChecking(false)
     }
@@ -54,38 +62,44 @@ export function AdminGate() {
 
   if (!authed) {
     return (
-      <form onSubmit={unlock} className="max-w-md rounded-lg border border-border p-5">
-        <label htmlFor="admin-token" className="block text-sm font-medium">
-          Admin token
-        </label>
-        <p className="mb-3 mt-1 text-xs leading-relaxed text-muted-foreground">
-          The server stores only its SHA-256 hash (ADMIN_TOKEN_HASH), so keep this value somewhere
-          safe &mdash; it cannot be recovered from the environment.
-        </p>
-        <input
-          id="admin-token"
-          type="password"
-          value={token}
-          onChange={(e) => setToken(e.target.value)}
-          placeholder="Bearer token"
-          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        />
-        {error ? <p className="mt-2 text-xs text-destructive">{error}</p> : null}
-        <Button type="submit" className="mt-4" disabled={!token || checking}>
-          {checking ? "Checking…" : "Unlock"}
-        </Button>
-      </form>
+      <Panel
+        label="Admin access"
+        description="Everything on this page mutates live pool data. The token is never sent to the browser by the server — it stores only a SHA-256 hash, so it cannot be recovered if you lose it."
+        className="max-w-md"
+      >
+        <form onSubmit={unlock} className="flex flex-col gap-4">
+          <Field
+            label="Admin token"
+            name="admin-token"
+            type="password"
+            value={token}
+            onValueChange={setToken}
+            placeholder="Bearer token"
+            autoComplete="off"
+            error={error}
+          />
+          <Button type="submit" size="lg" disabled={!token || checking}>
+            {checking ? "Checking…" : "Unlock"}
+          </Button>
+        </form>
+      </Panel>
     )
   }
 
   return (
-    <div className="flex flex-col gap-8">
-      <div className="flex justify-end">
-        <Button type="button" variant="outline" size="sm" onClick={lock}>
+    <div className="flex flex-col gap-6">
+      <div className="flex items-center justify-between gap-3">
+        <p className="label-mono flex items-center gap-2">
+          <Lock className="size-3" aria-hidden="true" />
+          Unlocked
+        </p>
+        <Button variant="outline" size="sm" onClick={lock}>
           Lock
         </Button>
       </div>
-      <AdminRequests />
+      <div id="admin-requests">
+        <AdminRequests />
+      </div>
       <AdminKeys />
       <AdminSources />
     </div>

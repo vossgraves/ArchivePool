@@ -60,6 +60,20 @@ export async function findUserByUsername(username: string) {
   return row ?? null
 }
 
+/**
+ * Username for a session id, or null when the account no longer exists.
+ * Used where only the id is at hand (server actions) and a public credit name is needed.
+ */
+export async function findUsernameById(userId: number): Promise<string | null> {
+  const [row] = await db
+    .select({ username: users.username, disabled: users.disabled })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1)
+  if (!row || row.disabled) return null
+  return row.username
+}
+
 export async function createUser(username: string, password: string, ip = "", ua = "") {
   const passwordHash = await hashPassword(password)
   const [row] = await db

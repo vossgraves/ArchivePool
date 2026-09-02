@@ -138,6 +138,14 @@ CREATE TABLE IF NOT EXISTS api_key_requests (
 CREATE INDEX IF NOT EXISTS idx_api_key_requests_user ON api_key_requests (user_id, status);
 CREATE INDEX IF NOT EXISTS idx_api_key_requests_ip_ua ON api_key_requests (ip_address, user_agent, status);
 
+-- Post-release columns (same set lib/db/ensure.ts self-heals on deploy).
+-- review_note: the reason an admin gives when rejecting a request; shown to the requester.
+-- contributor: username a logged-in contributor OPTED IN to be credited by (NULL = anonymous).
+--   It is display-only — never included in a feed handed to apps.
+ALTER TABLE api_key_requests ADD COLUMN IF NOT EXISTS review_note text NOT NULL DEFAULT '';
+ALTER TABLE account_entries ADD COLUMN IF NOT EXISTS contributor text;
+ALTER TABLE instance_entries ADD COLUMN IF NOT EXISTS contributor text;
+
 -- ============================================================================
 -- Upgrading from the original (pre-split) schema
 -- ============================================================================

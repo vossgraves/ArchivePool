@@ -3,12 +3,16 @@
 import { revalidatePath } from "next/cache"
 import { describeSaveError, ingestSource } from "@/lib/ingest"
 import { isKind, isService, type Kind, type Service } from "@/lib/sources"
+import { getSessionUserId } from "@/lib/sessions"
+import { findUsernameById } from "@/lib/users"
 
 export interface SubmitState {
   ok: boolean
   message: string
   status?: string
   premium?: boolean
+  /** The username this submission was credited to, when the contributor opted in. */
+  creditedTo?: string | null
 }
 
 function buildPayload(service: Service, kind: Kind, form: FormData): Record<string, unknown> {
@@ -101,10 +105,19 @@ export async function submitSource(_prev: SubmitState, form: FormData): Promise<
   const invalid = validate(service, kind, payload)
   if (invalid) return { ok: false, message: invalid }
 
+  // Attribution is opt-in, and the form carries only a boolean — never a name. The credited
+  // username is resolved from the verified session server-side, so a client cannot claim to be
+  // somebody else. Logged-out or unchecked submissions stay anonymous (contributor = null).
+  let contributor: string | null = null
+  if (form.get("credit") === "on") {
+    const userId = await getSessionUserId()
+    if (userId) contributor = await findUsernameById(userId)
+  }
+
   // Validate immediately so the contributor gets instant feedback.
   let result
   try {
-    result = await ingestSource(service, kind, payload)
+    result = await ingestSource(service, kind, payload, { contributor })
   } catch (e) {
     console.log("[v0] submit ingest failed:", e instanceof Error ? e.stack : e)
     return { ok: false, message: describeSaveError(e) }
@@ -128,6 +141,9 @@ export async function submitSource(_prev: SubmitState, form: FormData): Promise<
     ok: true,
     status: result.status,
     premium: result.premium,
-    message: "Verified as working and premium — added to the pool. Thank you!",
+    creditedTo: contributor,
+    message: contributor
+      ? `Verified as working and premium — added to the pool, credited to @${contributor}. Thank you!`
+      : "Verified as working and premium — added to the pool. Thank you!",
   }
 }

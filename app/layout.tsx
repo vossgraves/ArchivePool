@@ -2,6 +2,7 @@ import { Analytics } from "@vercel/analytics/next"
 import type { Metadata, Viewport } from "next"
 import { Geist, Geist_Mono } from "next/font/google"
 import type React from "react"
+import { ClickRipple } from "@/components/click-ripple"
 import "./globals.css"
 
 const geistSans = Geist({ subsets: ["latin"], variable: "--font-geist-sans" })
@@ -53,10 +54,9 @@ export const viewport: Viewport = {
   initialScale: 1,
   maximumScale: 5,
   viewportFit: "cover",
-  // Matches --background so mobile browser chrome blends into the page instead of banding.
-  // Sampled from the rendered body rather than guessed: --background is authored in oklch, and
-  // the hand-written value here was a shade off.
-  themeColor: "#080a0d",
+  // Matches --background (oklch(0.1 0 0)) so mobile browser chrome blends into the page instead
+  // of banding. Re-sample if the token changes: this is a build-time string, not a CSS read.
+  themeColor: "#030303",
 }
 
 export default function RootLayout({
@@ -75,6 +75,9 @@ export default function RootLayout({
           Skip to content
         </a>
         {children}
+        {/* Pure-DOM pointer feedback: a ring at every click point. No state, no re-renders,
+            and hidden entirely under prefers-reduced-motion (see globals.css). */}
+        <ClickRipple />
         {process.env.NODE_ENV === "production" && <Analytics />}
       </body>
     </html>

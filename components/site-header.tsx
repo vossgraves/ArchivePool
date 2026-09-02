@@ -2,9 +2,12 @@
 
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { useEffect, useState } from "react"
-import { AnimatePresence, motion } from "motion/react"
+import { useCallback, useEffect, useRef, useState } from "react"
+import { AnimatePresence, motion, useReducedMotion } from "motion/react"
+import { ChevronDown, Menu, X } from "lucide-react"
 import { BrandMark } from "@/components/brand-mark"
+import { Button, buttonVariants } from "@/components/ui/button"
+import { cn } from "@/lib/utils"
 
 const NAV = [
   { href: "/", label: "Status", key: "status" as const },
@@ -14,10 +17,12 @@ const NAV = [
 
 export function SiteHeader({ active }: { active?: "status" | "docs" | "submit" }) {
   const router = useRouter()
+  const reduce = useReducedMotion()
   const [user, setUser] = useState<string | null>(null)
   const [loaded, setLoaded] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     fetch("/api/auth/me", { cache: "no-store" })
@@ -27,6 +32,26 @@ export function SiteHeader({ active }: { active?: "status" | "docs" | "submit" }
       .finally(() => setLoaded(true))
   }, [])
 
+  // The account popover used to close only when its own button was clicked again: clicking
+  // anywhere else on the page, or pressing Escape, left it hanging over the content.
+  const closeMenu = useCallback(() => setMenuOpen(false), [])
+
+  useEffect(() => {
+    if (!menuOpen) return
+    function onPointerDown(event: PointerEvent) {
+      if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false)
+    }
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setMenuOpen(false)
+    }
+    document.addEventListener("pointerdown", onPointerDown)
+    document.addEventListener("keydown", onKeyDown)
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown)
+      document.removeEventListener("keydown", onKeyDown)
+    }
+  }, [menuOpen])
+
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" })
     setUser(null)
@@ -35,28 +60,23 @@ export function SiteHeader({ active }: { active?: "status" | "docs" | "submit" }
   }
 
   return (
-    // Sticky so the nav stays reachable while scrolling a long board. The translucent surface
-    // needs its own background fallback: backdrop-filter silently does nothing in some browsers,
-    // and without it the header would render transparent over scrolling content.
-    <header className="sticky top-0 z-40 border-b border-border bg-background/80 backdrop-blur-md">
-      <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-4 py-3.5 sm:gap-4 sm:px-5">
+    // Sticky so nav stays reachable while scrolling a long board. The translucent surface needs
+    // its own background fallback: backdrop-filter is a no-op in some browsers, and without it
+    // the header would render transparent over scrolling content.
+    <header className="sticky top-0 z-40 border-b border-border bg-background/85 backdrop-blur-md">
+      <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-4 py-2.5">
         <Link
           href="/"
-          className="group flex shrink-0 items-center gap-2.5 rounded-md transition-opacity hover:opacity-80"
+          className="flex shrink-0 items-center gap-2.5 rounded-md transition-opacity hover:opacity-80"
         >
-          <BrandMark size={28} />
-          <span className="hidden flex-col leading-none sm:flex">
+          <BrandMark size={24} />
+          <span className="flex flex-col leading-none">
             <span className="text-sm font-semibold tracking-tight">Source Pool</span>
-            <span className="mt-0.5 font-mono text-[0.65rem] uppercase tracking-[0.14em] text-muted-foreground">
-              ArchiveTune
-            </span>
-          </span>
-          <span className="flex flex-col leading-none sm:hidden">
-            <span className="text-[0.95rem] font-semibold tracking-tight">Pool</span>
+            <span className="label-mono mt-1 hidden sm:flex">ArchiveTune</span>
           </span>
         </Link>
 
-        <div className="flex items-center gap-1 sm:gap-1">
+        <div className="flex items-center gap-1">
           {/* Desktop nav */}
           <nav aria-label="Primary" className="hidden items-center gap-1 text-sm md:flex">
             {NAV.map((item) => {
@@ -66,69 +86,78 @@ export function SiteHeader({ active }: { active?: "status" | "docs" | "submit" }
                   key={item.href}
                   href={item.href}
                   aria-current={isActive ? "page" : undefined}
-                  className={`rounded-md px-3 py-1.5 transition-colors duration-200 ${
+                  className={cn(
+                    "rounded-md px-3 py-1.5 transition-colors",
                     isActive
                       ? "bg-secondary font-medium text-foreground"
-                      : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"
-                  }`}
+                      : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground",
+                  )}
                 >
                   {item.label}
                 </Link>
               )
             })}
           </nav>
-          {/* Mobile hamburger */}
+
           <button
             type="button"
             aria-label={mobileNavOpen ? "Close menu" : "Open menu"}
             aria-expanded={mobileNavOpen}
             onClick={() => setMobileNavOpen((v) => !v)}
-            className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-transparent text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground md:hidden"
+            className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground md:hidden"
           >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-              {mobileNavOpen ? <path d="M18 6 6 18M6 6l12 12" /> : <path d="M4 6h16M4 12h16M4 18h16" />}
-            </svg>
+            {mobileNavOpen ? (
+              <X className="size-4.5" aria-hidden="true" />
+            ) : (
+              <Menu className="size-4.5" aria-hidden="true" />
+            )}
           </button>
 
-          {/* Top-right account button: Login when signed out, username menu when signed in. */}
           {!loaded ? (
-            <div className="ml-1 h-8 w-20 animate-pulse rounded-full bg-secondary/60" />
+            <div className="ml-1 h-8 w-20 animate-pulse rounded-md bg-secondary/60" />
           ) : user ? (
-            <div className="relative ml-1">
-              <motion.button
-                whileTap={{ scale: 0.96 }}
+            <div className="relative ml-1" ref={menuRef}>
+              <Button
+                variant="outline"
+                size="sm"
                 onClick={() => setMenuOpen((v) => !v)}
-                aria-haspopup="menu"
+                aria-haspopup="dialog"
                 aria-expanded={menuOpen}
-                className="flex items-center gap-2 rounded-full border border-border bg-card py-1 pl-1 pr-3 text-sm font-medium transition-colors hover:border-primary/40"
+                aria-label={`Account menu for ${user}`}
               >
-                <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary font-mono text-xs font-bold uppercase text-primary-foreground">
+                <span
+                  className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary font-mono text-[0.625rem] font-bold uppercase text-primary-foreground"
+                  aria-hidden="true"
+                >
                   {user.slice(0, 1)}
                 </span>
-                {user}
-              </motion.button>
+                <span className="hidden max-w-[10ch] truncate sm:inline">{user}</span>
+                <ChevronDown className="size-3.5 opacity-60" aria-hidden="true" />
+              </Button>
               <AnimatePresence>
                 {menuOpen && (
                   <motion.div
-                    initial={{ opacity: 0, y: -6, scale: 0.97 }}
-                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                    exit={{ opacity: 0, y: -6, scale: 0.97 }}
-                    transition={{ type: "spring", stiffness: 420, damping: 32 }}
-                    role="menu"
-                    className="absolute right-0 top-full z-50 mt-2 w-44 overflow-hidden rounded-xl border border-border bg-card shadow-lg"
+                    {...(reduce
+                      ? {}
+                      : {
+                          initial: { opacity: 0, y: -4 },
+                          animate: { opacity: 1, y: 0 },
+                          exit: { opacity: 0, y: -4 },
+                        })}
+                    transition={{ duration: 0.12 }}
+                    className="absolute right-0 top-full z-50 mt-1.5 w-44 overflow-hidden rounded-md border border-border bg-popover shadow-lg"
                   >
                     <Link
                       href="/dashboard"
-                      role="menuitem"
-                      className="block px-4 py-2.5 text-sm transition-colors hover:bg-secondary"
-                      onClick={() => setMenuOpen(false)}
+                      onClick={closeMenu}
+                      className="block px-3 py-2 text-sm transition-colors hover:bg-secondary"
                     >
                       Dashboard
                     </Link>
                     <button
-                      role="menuitem"
-                      onClick={logout}
-                      className="block w-full px-4 py-2.5 text-left text-sm text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                      type="button"
+                      onClick={() => void logout()}
+                      className="block w-full border-t border-border px-3 py-2 text-left text-sm text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
                     >
                       Sign out
                     </button>
@@ -137,25 +166,28 @@ export function SiteHeader({ active }: { active?: "status" | "docs" | "submit" }
               </AnimatePresence>
             </div>
           ) : (
-            <motion.div whileTap={{ scale: 0.96 }} className="ml-1">
-              <Link
-                href="/login"
-                className="inline-flex items-center rounded-full bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90"
-              >
-                Sign in
-              </Link>
-            </motion.div>
+            <Link
+              href="/login"
+              className={cn(buttonVariants({ variant: "outline", size: "sm" }), "ml-1")}
+            >
+              Sign in
+            </Link>
           )}
         </div>
       </div>
+
       {/* Mobile nav drawer */}
-      <AnimatePresence>
+      <AnimatePresence initial={false}>
         {mobileNavOpen && (
           <motion.nav
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.22, ease: "easeInOut" }}
+            {...(reduce
+              ? {}
+              : {
+                  initial: { height: 0, opacity: 0 },
+                  animate: { height: "auto", opacity: 1 },
+                  exit: { height: 0, opacity: 0 },
+                })}
+            transition={{ duration: 0.18 }}
             aria-label="Mobile navigation"
             className="overflow-hidden border-t border-border bg-background/95 backdrop-blur-md md:hidden"
           >
@@ -168,9 +200,12 @@ export function SiteHeader({ active }: { active?: "status" | "docs" | "submit" }
                     href={item.href}
                     aria-current={isActive ? "page" : undefined}
                     onClick={() => setMobileNavOpen(false)}
-                    className={`rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
-                      isActive ? "bg-secondary text-foreground" : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground"
-                    }`}
+                    className={cn(
+                      "rounded-md px-3 py-2 text-sm transition-colors",
+                      isActive
+                        ? "bg-secondary font-medium text-foreground"
+                        : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground",
+                    )}
                   >
                     {item.label}
                   </Link>

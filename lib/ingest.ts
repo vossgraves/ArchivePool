@@ -14,6 +14,16 @@ export interface IngestResult {
   detail: string
 }
 
+export interface IngestOptions {
+  /**
+   * Username to credit this entry to, or null/omitted to contribute anonymously. Display-only:
+   * it is deliberately NOT part of `payload`, because `payload` feeds the fingerprint — putting
+   * credit in there would make the same credential re-submitted by someone else insert a
+   * duplicate row instead of updating the existing one.
+   */
+  contributor?: string | null
+}
+
 /**
  * Runs a live health check on a candidate source and — only when it is BOTH working and
  * premium — upserts it into the pool, deduped by fingerprint. Shared by the manual submit
@@ -30,11 +40,13 @@ export async function ingestSource(
   service: Service,
   kind: Kind,
   payload: Record<string, unknown>,
+  options: IngestOptions = {},
 ): Promise<IngestResult> {
   await ensureSchema()
   if (kind === "account" && !atRestEncryptionEnabled()) {
     throw new Error("POOL_ENCRYPTION_KEY is required before account credentials can be accepted")
   }
+  const contributor = options.contributor?.trim().slice(0, 64) || null
   // Fingerprint, label and the live health check all run on the PLAINTEXT payload; only the value
   // persisted to the database is encrypted, so dedupe and validation behaviour is unchanged.
   const fp = fingerprint(service, kind, payload)
@@ -78,6 +90,7 @@ export async function ingestSource(
       lastCheckedAt: new Date(),
       removed: false,
       disabled: false,
+      contributor,
     })
     .onConflictDoUpdate({
       target: table.fingerprint,
@@ -93,6 +106,10 @@ export async function ingestSource(
         consecutiveFailures: result.ok ? 0 : sql`${table.consecutiveFailures} + 1`,
         lastCheckedAt: new Date(),
         removed: false,
+        // Credit sticks to whoever contributed the entry first. A re-submission that revives a
+        // dead credential must not steal the byline, and an anonymous re-submit must not erase
+        // an existing credit — so keep the stored value when there is one.
+        contributor: sql`COALESCE(${table.contributor}, EXCLUDED.contributor)`,
       },
     })
 

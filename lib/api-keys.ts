@@ -1,9 +1,9 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
-import { and, desc, eq, sql } from "drizzle-orm"
+import { and, desc, eq, gt, ne, sql } from "drizzle-orm"
 import type { NextRequest } from "next/server"
 import { db } from "@/lib/db"
 import { ensureSchema } from "@/lib/db/ensure"
-import { apiKeys, apiKeyRequests } from "@/lib/db/schema"
+import { apiKeys, apiKeyRequests, users } from "@/lib/db/schema"
 
 const KEY_PREFIX = "atp_"
 
@@ -147,14 +147,21 @@ export async function listUserApiKeys(userId: number) {
     .orderBy(desc(apiKeys.createdAt))
 }
 
-/** Soft delete: hide the key and stop it authenticating, but retain the row in the database. */
-export async function setUserKeyDeleted(userId: number, id: number) {
-  const updated = await db
-    .update(apiKeys)
-    .set({ deleted: true, revoked: true })
+/**
+ * User: permanently delete one of their own keys.
+ *
+ * This replaced a soft delete that only set `deleted` + `revoked`: the row and its hash stayed in
+ * the table, so "delete" left users with a key they could neither use nor see, and no way to tell
+ * a deleted key from a hidden one. Removing your own credential deletes it.
+ *
+ * Scoped by userId, so one account can never delete another's key by guessing ids.
+ */
+export async function deleteUserApiKey(userId: number, id: number) {
+  const deleted = await db
+    .delete(apiKeys)
     .where(and(eq(apiKeys.id, id), eq(apiKeys.userId, userId)))
     .returning({ id: apiKeys.id })
-  return updated.length > 0
+  return deleted.length > 0
 }
 
 /** Revoke (or restore) a key by id, scoped to its owner. Returns rows updated. */
@@ -167,19 +174,29 @@ export async function setUserKeyRevoked(userId: number, id: number, revoked: boo
   return updated.length > 0
 }
 
-/** Admin: list keys (never returns hashes or plaintext). */
+/**
+ * Admin: list every key, including soft-deleted ones.
+ *
+ * The user-facing list hides `deleted` rows; the admin must not, or a "deleted" key looks like it
+ * vanished while its hash is still in the table. Owner username and the request reason are carried
+ * so the panel can say whose key a given row is.
+ */
 export async function listApiKeys() {
   return db
     .select({
       id: apiKeys.id,
       name: apiKeys.name,
+      reason: apiKeys.reason,
       prefix: apiKeys.prefix,
       revoked: apiKeys.revoked,
+      deleted: apiKeys.deleted,
       useCount: apiKeys.useCount,
       lastUsedAt: apiKeys.lastUsedAt,
       createdAt: apiKeys.createdAt,
+      owner: users.username,
     })
     .from(apiKeys)
+    .leftJoin(users, eq(apiKeys.userId, users.id))
     .orderBy(desc(apiKeys.createdAt))
 }
 
@@ -188,7 +205,24 @@ export async function setKeyRevoked(id: number, revoked: boolean) {
   await db.update(apiKeys).set({ revoked }).where(and(eq(apiKeys.id, id)))
 }
 
-// ─── API key request workflow (user subject+reason → admin approve) ───
+/**
+ * Admin: permanently delete a key row.
+ *
+ * This is the admin panel's only true removal. Revoking is reversible and leaves the hash in the
+ * table; this removes the record outright, so the key can never be restored or matched again.
+ * Users get the same thing for their own keys from the dashboard (see deleteUserApiKey).
+ * `api_key_requests.resulting_key_id` is `ON DELETE SET NULL`, so the request that produced a key
+ * survives with its history intact.
+ */
+export async function deleteApiKey(id: number) {
+  const deleted = await db.delete(apiKeys).where(eq(apiKeys.id, id)).returning({ id: apiKeys.id })
+  return deleted.length > 0
+}
+
+// ─── API key request workflow (user subject+reason → admin approve → user claims key) ───
+
+/** Cap on simultaneously active (non-revoked) keys a single account may hold. */
+export const MAX_KEYS_PER_USER = 10
 
 export async function createKeyRequest(
   userId: number,
@@ -216,6 +250,7 @@ export async function listUserRequests(userId: number) {
       ipAddress: apiKeyRequests.ipAddress,
       userAgent: apiKeyRequests.userAgent,
       resultingKeyId: apiKeyRequests.resultingKeyId,
+      reviewNote: apiKeyRequests.reviewNote,
       createdAt: apiKeyRequests.createdAt,
       reviewedAt: apiKeyRequests.reviewedAt,
     })
@@ -224,6 +259,11 @@ export async function listUserRequests(userId: number) {
     .orderBy(desc(apiKeyRequests.createdAt))
 }
 
+/**
+ * How many requests from this device (IP + UA) still hold one of the limited slots — i.e. any
+ * request in the last [hours] that was not rejected. Rejecting deliberately frees the slot again,
+ * so a denial does not lock a device out forever.
+ */
 export async function countRequestsByIpUa(ip: string, ua: string, hours = 720): Promise<number> {
   if (!ip || !ua) return 0
   await ensureSchema()
@@ -231,38 +271,96 @@ export async function countRequestsByIpUa(ip: string, ua: string, hours = 720): 
   const rows = await db
     .select({ id: apiKeyRequests.id })
     .from(apiKeyRequests)
-    .where(and(eq(apiKeyRequests.ipAddress, ip), eq(apiKeyRequests.userAgent, ua)))
-  // Filter by time and non-rejected in JS to avoid date handling complexity
-  const filtered = await db
-    .select({ id: apiKeyRequests.id, createdAt: apiKeyRequests.createdAt, status: apiKeyRequests.status })
-    .from(apiKeyRequests)
-    .where(and(eq(apiKeyRequests.ipAddress, ip), eq(apiKeyRequests.userAgent, ua)))
-  return filtered.filter((r) => r.createdAt && r.createdAt > cutoff && r.status !== "rejected").length
+    .where(
+      and(
+        eq(apiKeyRequests.ipAddress, ip),
+        eq(apiKeyRequests.userAgent, ua),
+        gt(apiKeyRequests.createdAt, cutoff),
+        ne(apiKeyRequests.status, "rejected"),
+      ),
+    )
+  return rows.length
 }
 
-export async function approveKeyRequest(requestId: number, adminId: number) {
+/**
+ * Admin: approve a request. NO key is generated here.
+ *
+ * [adminId] is the reviewing site account, or null for the token-authenticated admin panel —
+ * `api_key_requests.reviewed_by` is a foreign key to `users.id`, so passing a sentinel like 0
+ * (which no account can have, ids start at 1) makes the UPDATE throw a constraint violation, the
+ * route 500s, and the Approve button appears to do nothing at all. Null is the honest value for
+ * "reviewed by whoever holds the admin token".
+ *
+ * The key itself is minted by the requester in claimApprovedKey(). Generating it here instead
+ * would hand the one-time plaintext to the admin panel, where it is shown to nobody, logged
+ * nowhere useful and lost — leaving the approved user with a key row they can never read.
+ */
+export async function approveKeyRequest(requestId: number, adminId: number | null) {
   await ensureSchema()
   const [req] = await db.select().from(apiKeyRequests).where(eq(apiKeyRequests.id, requestId)).limit(1)
   if (!req || req.status !== "pending") return null
-  const { key, keyHash, prefix } = generateKey()
-  const [keyRow] = await db
-    .insert(apiKeys)
-    .values({ name: req.subject, keyHash, prefix, userId: req.userId, reason: req.reason })
-    .returning({ id: apiKeys.id })
   await db
     .update(apiKeyRequests)
-    .set({ status: "approved", resultingKeyId: keyRow.id, reviewedAt: new Date(), reviewedBy: adminId })
+    .set({ status: "approved", reviewedAt: new Date(), reviewedBy: adminId })
     .where(eq(apiKeyRequests.id, requestId))
-  return { id: keyRow.id, key, prefix, requestId }
+  return { requestId, userId: req.userId, subject: req.subject }
 }
 
-export async function rejectKeyRequest(requestId: number, adminId: number) {
+/** Admin: reject a request, with the note ([note]) the requester gets to read. */
+export async function rejectKeyRequest(requestId: number, adminId: number | null, note: string) {
   await ensureSchema()
   const [req] = await db.select().from(apiKeyRequests).where(eq(apiKeyRequests.id, requestId)).limit(1)
   if (!req || req.status !== "pending") return false
   await db
     .update(apiKeyRequests)
-    .set({ status: "rejected", reviewedAt: new Date(), reviewedBy: adminId })
+    .set({ status: "rejected", reviewNote: note, reviewedAt: new Date(), reviewedBy: adminId })
     .where(eq(apiKeyRequests.id, requestId))
   return true
+}
+
+export type ClaimResult =
+  | { ok: true; id: number; key: string; prefix: string }
+  | { ok: false; error: "not_found" | "not_approved" | "already_claimed" | "key_limit" }
+
+/**
+ * Requester: mint the key for a request an admin has approved.
+ *
+ * This is the only point where an approved request becomes an api_keys row, and the only place
+ * the plaintext exists — it is returned to its owner once and never stored (only the SHA-256
+ * hash is persisted). Runs in a transaction that locks the request row so two tabs cannot both
+ * claim it and silently orphan a key.
+ */
+export async function claimApprovedKey(userId: number, requestId: number): Promise<ClaimResult> {
+  await ensureSchema()
+  return db.transaction(async (tx) => {
+    const [req] = await tx
+      .select()
+      .from(apiKeyRequests)
+      .where(and(eq(apiKeyRequests.id, requestId), eq(apiKeyRequests.userId, userId)))
+      .limit(1)
+      .for("update")
+
+    if (!req) return { ok: false, error: "not_found" }
+    if (req.status !== "approved") return { ok: false, error: "not_approved" }
+    if (req.resultingKeyId) return { ok: false, error: "already_claimed" }
+
+    const [existing] = await tx
+      .select({ count: sql<number>`count(*)` })
+      .from(apiKeys)
+      .where(and(eq(apiKeys.userId, userId), eq(apiKeys.revoked, false), eq(apiKeys.deleted, false)))
+    if (Number(existing?.count ?? 0) >= MAX_KEYS_PER_USER) return { ok: false, error: "key_limit" }
+
+    const { key, keyHash, prefix } = generateKey()
+    const [created] = await tx
+      .insert(apiKeys)
+      .values({ name: req.subject, keyHash, prefix, userId, reason: req.reason })
+      .returning({ id: apiKeys.id })
+
+    await tx
+      .update(apiKeyRequests)
+      .set({ resultingKeyId: created.id })
+      .where(eq(apiKeyRequests.id, requestId))
+
+    return { ok: true, id: created.id, key, prefix }
+  })
 }

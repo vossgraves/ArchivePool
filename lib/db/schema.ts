@@ -47,6 +47,10 @@ const entryColumns = {
   okCount: integer("ok_count").notNull().default(0),
   disabled: boolean("disabled").notNull().default(false),
   removed: boolean("removed").notNull().default(false),
+  // Opt-in public credit: the username a logged-in contributor chose to be shown by, or NULL
+  // when they contributed anonymously. Never derived from the payload, and never sent to apps
+  // in any feed — it exists only so the site can attribute a contribution to its author.
+  contributor: text("contributor"),
   lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
   // When this entry was last handed to an app. Drives least-recently-leased rotation, so one
   // entry does not absorb all traffic and get itself rate-limited or banned.
@@ -166,6 +170,8 @@ export const apiKeyRequests = pgTable(
     userAgent: text("user_agent").notNull().default(""),
     // When approved, the generated key's id (for linking).
     resultingKeyId: integer("resulting_key_id").references(() => apiKeys.id),
+    // The admin's note explaining a rejection, shown to the requester. Empty unless rejected.
+    reviewNote: text("review_note").notNull().default(""),
     reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
     reviewedBy: integer("reviewed_by").references(() => users.id),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

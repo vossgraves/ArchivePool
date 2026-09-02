@@ -4,10 +4,18 @@ import { useActionState, useState } from "react"
 import { submitSource, type SubmitState } from "@/app/actions/submit"
 import { TidalConnect } from "@/components/tidal-connect"
 import { QobuzConnect } from "@/components/qobuz-connect"
+import { Button } from "@/components/ui/button"
+import { CheckField, Field as TextField } from "@/components/ui/field"
+import { Notice } from "@/components/ui/notice"
 import { KIND_LABELS, SERVICE_LABELS, type Kind, type Service } from "@/lib/sources"
 
 const initial: SubmitState = { ok: false, message: "" }
 
+/**
+ * Thin adapter over the shared Field: the credential inputs below all speak `onChange`, and the
+ * shared control takes `onValueChange`. Keeping the mapping here means every field in this form
+ * gets the shared label/error/focus handling without rewriting 12 call sites.
+ */
 function Field({
   label,
   name,
@@ -17,6 +25,7 @@ function Field({
   hint,
   value,
   onChange,
+  mono = true,
 }: {
   label: string
   name: string
@@ -26,24 +35,20 @@ function Field({
   hint?: string
   value?: string
   onChange?: (v: string) => void
+  mono?: boolean
 }) {
   return (
-    <label className="flex flex-col gap-1.5">
-      <span className="text-sm font-medium">
-        {label}
-        {required && <span className="text-muted-foreground"> *</span>}
-      </span>
-      <input
-        name={name}
-        type={type}
-        placeholder={placeholder}
-        required={required}
-        autoComplete="off"
-        {...(onChange ? { value: value ?? "", onChange: (e) => onChange(e.target.value) } : {})}
-        className="rounded-md border border-input bg-background px-3 py-2 font-mono text-sm outline-none ring-ring focus:ring-2"
-      />
-      {hint && <span className="text-xs text-muted-foreground">{hint}</span>}
-    </label>
+    <TextField
+      label={label}
+      name={name}
+      type={type}
+      placeholder={placeholder}
+      required={required}
+      hint={hint}
+      value={value}
+      mono={mono}
+      onValueChange={onChange}
+    />
   )
 }
 
@@ -123,9 +128,13 @@ function Segmented<T extends string>({
   )
 }
 
-export function SubmitForm() {
+export function SubmitForm({ username = null }: { username?: string | null }) {
   const [service, setService] = useState<Service>("tidal")
   const [kind, setKind] = useState<Kind>("api")
+  // Default is credited, not anonymous: a signed-in person contributing has already identified
+  // themselves to the site, and the pool benefits from knowing who stands behind an entry.
+  // Attribution is still theirs to decline, and the checkbox says plainly what it does.
+  const [credit, setCredit] = useState(true)
   const [state, action, pending] = useActionState(submitSource, initial)
 
   // Controlled Qobuz account fields so the "paste from message" box can auto-fill them.
@@ -379,31 +388,47 @@ export function SubmitForm() {
         </div>
       )}
 
-      <Field label="Note" name="note" placeholder="Optional public note (no personal info)" />
+      <Field
+        label="Note"
+        name="note"
+        mono={false}
+        placeholder="Optional public note — e.g. which region or CDN it serves"
+        hint="Shown with the entry. Don’t include anything personal: credentials are pooled and shared."
+      />
 
-      <button
-        type="submit"
-        disabled={pending}
-        className="rounded-md bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
-      >
-        {pending ? "Verifying…" : "Verify & contribute"}
-      </button>
-
-      {state.message && (
-        <div
-          className={`rounded-md border p-3 text-sm leading-relaxed ${
-            state.ok ? "border-border bg-card" : "border-destructive/40 bg-card text-destructive"
-          }`}
-        >
-          {state.ok && state.status && (
-            <span className="mr-2 font-mono text-xs uppercase tracking-wide text-muted-foreground">
-              [{state.status}
-              {state.premium ? " · premium" : ""}]
-            </span>
-          )}
-          {state.message}
-        </div>
+      {username ? (
+        <CheckField
+          name="credit"
+          label={`Credit this to @${username}`}
+          description="On by default for your own contributions. Uncheck to contribute anonymously — the entry is stored either way, the only difference is whether your name is attached."
+          checked={credit}
+          onCheckedChange={setCredit}
+        />
+      ) : (
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          Contributing anonymously.{" "}
+          <a href="/login" className="text-foreground underline underline-offset-4">
+            Sign in
+          </a>{" "}
+          if you want your username credited to the entry.
+        </p>
       )}
+
+      <Button type="submit" size="lg" disabled={pending} className="w-full sm:w-auto">
+        {pending ? "Verifying…" : "Verify & contribute"}
+      </Button>
+
+      {state.message ? (
+        <Notice tone={state.ok ? "ok" : "error"}>
+          {state.ok && state.status ? (
+            <span className="mr-2 font-mono text-[0.625rem] uppercase tracking-[0.1em]">
+              {state.status}
+              {state.premium ? " · premium" : ""}
+            </span>
+          ) : null}
+          {state.message}
+        </Notice>
+      ) : null}
     </form>
   )
 }
