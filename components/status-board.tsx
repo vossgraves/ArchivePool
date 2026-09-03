@@ -9,6 +9,16 @@ import { Badge, toneFor, type StatusTone } from "@/components/ui/badge"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { Notice } from "@/components/ui/notice"
 import { Panel } from "@/components/ui/panel"
+import {
+  Table,
+  TableBody,
+  TableCaption,
+  TableCell,
+  TableFooter,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
 import { cn, formatAgo, formatCount, formatDateTime } from "@/lib/utils"
 
 interface StatusPayload {
@@ -83,6 +93,9 @@ const COLUMN_COUNT = COLUMNS.length
 
 const NUM_CELL = "px-3 py-3 text-right font-mono whitespace-nowrap"
 const TXT_CELL = "px-3 py-3 whitespace-nowrap"
+// Softer than the primitive's default divider: ten columns of figures already carry enough
+// structure, and a full-strength rule between every row turns the board into a grid.
+const ROW = "border-border/60 last:border-0"
 
 function overallHealth(cats: CategoryStatus[]) {
   const known = cats.filter((c) => c.health !== "unknown")
@@ -424,164 +437,175 @@ export function StatusBoard({ fallback }: { fallback?: StatusPayload }) {
          * screen while the rows are placeholders, so nothing reflows when a payload lands, and an
          * empty board still shows which figures are missing.
          */}
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[56rem] text-left text-xs">
-            <caption className="sr-only">
-              Pool status by category: entry counts, uptime and the time of the last health check
-            </caption>
-            <thead>
-              <tr className="border-b border-border">
-                {COLUMNS.map((col) => (
-                  <th
-                    key={col.label}
-                    scope="col"
-                    className={cn("label-mono px-3 py-2.5 font-medium", col.head)}
-                  >
-                    {col.label}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {skeleton ? (
-                // Rows sized to match a real row, at the real count, so the panel does not grow.
-                Array.from({ length: SKELETON_COUNT }).map((_, i) => (
-                  <tr key={i} className="border-b border-border/60 last:border-0">
-                    <td colSpan={COLUMN_COUNT} className="px-4 py-3">
-                      <div className="h-8 animate-pulse rounded-md bg-secondary/60" />
-                    </td>
-                  </tr>
-                ))
-              ) : categories.length === 0 ? (
-                <tr>
-                  <td colSpan={COLUMN_COUNT} className="px-4 py-3">
-                    <p className="rounded-md border border-dashed border-border px-4 py-8 text-center text-xs text-muted-foreground">
-                      {error
-                        ? "Nothing to show yet — the status feed has never answered."
-                        : "No pools are being tracked yet."}
-                    </p>
-                  </td>
-                </tr>
-              ) : (
-                categories.map((cat) => {
-                  const health = HEALTH[cat.health]
-                  return (
-                    <tr
-                      key={`${cat.service}-${cat.kind}`}
-                      className="border-b border-border/60 align-middle last:border-0"
+        {/* The primitive's row hover is kept: at ten columns and a 56rem minimum the reader is
+            tracking a figure back to its category across a horizontal scroll, and a highlight
+            that follows the pointer is what makes that possible. It is --muted, so it stays
+            achromatic and cannot be mistaken for a status. */}
+        <Table className="min-w-[56rem] text-left text-xs">
+          <TableCaption className="sr-only">
+            Pool status by category: entry counts, uptime and the time of the last health check
+          </TableCaption>
+          <TableHeader>
+            <TableRow className="hover:bg-transparent">
+              {COLUMNS.map((col) => (
+                <TableHead
+                  key={col.label}
+                  scope="col"
+                  // label-mono owns the colour; TableHead's own text-foreground has to be
+                  // displaced or every column heading outshouts the figures beneath it.
+                  className={cn(
+                    "label-mono h-auto px-3 py-2.5 font-medium text-muted-foreground",
+                    col.head,
+                  )}
+                >
+                  {col.label}
+                </TableHead>
+              ))}
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {skeleton ? (
+              // Rows sized to match a real row, at the real count, so the panel does not grow.
+              Array.from({ length: SKELETON_COUNT }).map((_, i) => (
+                <TableRow key={i} className={cn(ROW, "hover:bg-transparent")}>
+                  <TableCell colSpan={COLUMN_COUNT} className="px-4 py-3">
+                    <div className="h-8 animate-pulse rounded-md bg-secondary/60" />
+                  </TableCell>
+                </TableRow>
+              ))
+            ) : categories.length === 0 ? (
+              <TableRow className="border-0 hover:bg-transparent">
+                <TableCell colSpan={COLUMN_COUNT} className="px-4 py-3">
+                  <p className="rounded-md border border-dashed border-border px-4 py-8 text-center text-xs text-muted-foreground">
+                    {error
+                      ? "Nothing to show yet — the status feed has never answered."
+                      : "No pools are being tracked yet."}
+                  </p>
+                </TableCell>
+              </TableRow>
+            ) : (
+              categories.map((cat) => {
+                const health = HEALTH[cat.health]
+                return (
+                  <TableRow key={`${cat.service}-${cat.kind}`} className={cn(ROW, "align-middle")}>
+                    <TableHead
+                      scope="row"
+                      className="h-auto px-4 py-3 text-left font-medium text-foreground"
                     >
-                      <th scope="row" className="px-4 py-3 text-left font-medium">
-                        <span className="block max-w-56 truncate">{cat.label}</span>
-                        <span className="label-mono mt-1 block truncate">
-                          {cat.service} · {cat.kind}
-                        </span>
-                      </th>
-                      {cat.total === 0 ? (
-                        // A category with nothing in it keeps its row, so the table can never
-                        // quietly lose one, and the reason it is empty is stated in words rather
-                        // than implied by a line of zeroes. Deezer and Apple Music are account-only
-                        // in lib/sources.ts, so an api row added for either lands here.
-                        <td colSpan={COLUMN_COUNT - 1} className="px-3 py-2">
-                          <p className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
-                            No entries in this pool yet.{" "}
-                            <Link
-                              href="/submit"
-                              className={cn(
-                                buttonVariants({ variant: "outline", size: "xs" }),
-                                "mb-px inline-flex",
-                              )}
-                            >
-                              Contribute one
-                            </Link>
-                          </p>
-                        </td>
-                      ) : (
-                        <>
-                          <td className={TXT_CELL}>
-                            <span className="flex items-center gap-2">
-                              <HealthDot health={cat.health} animate={animate} />
-                              {/* The word, not the colour: the dot repeats it, it never replaces it. */}
-                              <Badge tone={health.tone}>{health.label}</Badge>
-                            </span>
-                          </td>
-                          <td className={NUM_CELL}>{formatCount(cat.total)}</td>
-                          <td className={NUM_CELL}>{formatCount(cat.alive)}</td>
-                          <td
-                            className={cn(NUM_CELL, cat.premium > 0 && TONE_TEXT[toneFor("alive")])}
-                          >
-                            {formatCount(cat.premium)}
-                          </td>
-                          <td
+                      <span className="block max-w-56 truncate">{cat.label}</span>
+                      <span className="label-mono mt-1 block truncate">
+                        {cat.service} · {cat.kind}
+                      </span>
+                    </TableHead>
+                    {cat.total === 0 ? (
+                      // A category with nothing in it keeps its row, so the table can never
+                      // quietly lose one, and the reason it is empty is stated in words rather
+                      // than implied by a line of zeroes. Deezer and Apple Music are account-only
+                      // in lib/sources.ts, so an api row added for either lands here.
+                      <TableCell colSpan={COLUMN_COUNT - 1} className="px-3 py-2">
+                        <p className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
+                          No entries in this pool yet.{" "}
+                          <Link
+                            href="/submit"
                             className={cn(
-                              NUM_CELL,
-                              cat.pending > 0 && TONE_TEXT[toneFor("pending")],
+                              buttonVariants({ variant: "outline", size: "xs" }),
+                              "mb-px inline-flex",
                             )}
                           >
-                            {formatCount(cat.pending)}
-                          </td>
-                          <td
-                            className={cn(NUM_CELL, cat.dead > 0 && TONE_TEXT[toneFor("dead")])}
+                            Contribute one
+                          </Link>
+                        </p>
+                      </TableCell>
+                    ) : (
+                      <>
+                        <TableCell className={TXT_CELL}>
+                          <span className="flex items-center gap-2">
+                            <HealthDot health={cat.health} animate={animate} />
+                            {/* The word, not the colour: the dot repeats it, it never replaces it. */}
+                            <Badge tone={health.tone}>{health.label}</Badge>
+                          </span>
+                        </TableCell>
+                        <TableCell className={NUM_CELL}>{formatCount(cat.total)}</TableCell>
+                        <TableCell className={NUM_CELL}>{formatCount(cat.alive)}</TableCell>
+                        <TableCell
+                          className={cn(NUM_CELL, cat.premium > 0 && TONE_TEXT[toneFor("alive")])}
+                        >
+                          {formatCount(cat.premium)}
+                        </TableCell>
+                        <TableCell
+                          className={cn(NUM_CELL, cat.pending > 0 && TONE_TEXT[toneFor("pending")])}
+                        >
+                          {formatCount(cat.pending)}
+                        </TableCell>
+                        <TableCell
+                          className={cn(NUM_CELL, cat.dead > 0 && TONE_TEXT[toneFor("dead")])}
+                        >
+                          {formatCount(cat.dead)}
+                        </TableCell>
+                        <TableCell className={NUM_CELL}>
+                          {cat.uptimePct === null ? (
+                            /* Uptime is only defined once the sweep has checked something. A bare
+                               "0%" would read as an outage and a "—" alone as a missing column, so
+                               the dash is visual and the words go to assistive tech. */
+                            <>
+                              <span aria-hidden="true">—</span>
+                              <span className="sr-only">No checks yet</span>
+                            </>
+                          ) : (
+                            `${formatCount(cat.uptimePct)}%`
+                          )}
+                        </TableCell>
+                        <TableCell className="px-3 py-3">
+                          <SegmentBar stats={cat} animate={animate} />
+                        </TableCell>
+                        <TableCell className={cn(TXT_CELL, "text-muted-foreground")}>
+                          <span
+                            title={cat.lastCheckedAt ? formatDateTime(cat.lastCheckedAt) : undefined}
                           >
-                            {formatCount(cat.dead)}
-                          </td>
-                          <td className={NUM_CELL}>
-                            {cat.uptimePct === null ? (
-                              /* Uptime is only defined once the sweep has checked something. A bare
-                                 "0%" would read as an outage and a "—" alone as a missing column, so
-                                 the dash is visual and the words go to assistive tech. */
-                              <>
-                                <span aria-hidden="true">—</span>
-                                <span className="sr-only">No checks yet</span>
-                              </>
-                            ) : (
-                              `${formatCount(cat.uptimePct)}%`
-                            )}
-                          </td>
-                          <td className="px-3 py-3">
-                            <SegmentBar stats={cat} animate={animate} />
-                          </td>
-                          <td className={cn(TXT_CELL, "text-muted-foreground")}>
-                            <span
-                              title={cat.lastCheckedAt ? formatDateTime(cat.lastCheckedAt) : undefined}
-                            >
-                              {formatAgo(cat.lastCheckedAt)}
-                            </span>
-                          </td>
-                        </>
-                      )}
-                    </tr>
-                  )
-                })
-              )}
-            </tbody>
-            {data ? (
-              <tfoot>
-                <tr className="border-t border-border bg-secondary/40">
-                  <th scope="row" className="label-mono px-4 py-2.5 text-left font-medium">
-                    All pools
-                  </th>
-                  <td className="px-3 py-2.5" />
-                  <td className={cn(NUM_CELL, "py-2.5")}>{formatCount(totals.total)}</td>
-                  <td className={cn(NUM_CELL, "py-2.5")}>{formatCount(totals.alive)}</td>
-                  <td className={cn(NUM_CELL, "py-2.5")}>{formatCount(totals.premium)}</td>
-                  <td className={cn(NUM_CELL, "py-2.5")}>{formatCount(totals.pending)}</td>
-                  <td className={cn(NUM_CELL, "py-2.5")}>{formatCount(totals.dead)}</td>
-                  <td className={cn(NUM_CELL, "py-2.5")}>
-                    {/* No pooled figure — see sumStats(). */}
-                    <span aria-hidden="true">—</span>
-                    <span className="sr-only">Not pooled</span>
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <SegmentBar stats={totals} animate={animate} />
-                  </td>
-                  <td className={cn(TXT_CELL, "py-2.5 text-muted-foreground")}>
-                    {formatAgo(data.generatedAt)}
-                  </td>
-                </tr>
-              </tfoot>
-            ) : null}
-          </table>
-        </div>
+                            {formatAgo(cat.lastCheckedAt)}
+                          </span>
+                        </TableCell>
+                      </>
+                    )}
+                  </TableRow>
+                )
+              })
+            )}
+          </TableBody>
+          {data ? (
+            <TableFooter className="border-border bg-secondary/40 font-normal">
+              <TableRow className="hover:bg-transparent">
+                <TableHead
+                  scope="row"
+                  className="label-mono h-auto px-4 py-2.5 text-left font-medium text-muted-foreground"
+                >
+                  All pools
+                </TableHead>
+                <TableCell className="px-3 py-2.5" />
+                <TableCell className={cn(NUM_CELL, "py-2.5")}>{formatCount(totals.total)}</TableCell>
+                <TableCell className={cn(NUM_CELL, "py-2.5")}>{formatCount(totals.alive)}</TableCell>
+                <TableCell className={cn(NUM_CELL, "py-2.5")}>
+                  {formatCount(totals.premium)}
+                </TableCell>
+                <TableCell className={cn(NUM_CELL, "py-2.5")}>
+                  {formatCount(totals.pending)}
+                </TableCell>
+                <TableCell className={cn(NUM_CELL, "py-2.5")}>{formatCount(totals.dead)}</TableCell>
+                <TableCell className={cn(NUM_CELL, "py-2.5")}>
+                  {/* No pooled figure — see sumStats(). */}
+                  <span aria-hidden="true">—</span>
+                  <span className="sr-only">Not pooled</span>
+                </TableCell>
+                <TableCell className="px-3 py-2.5">
+                  <SegmentBar stats={totals} animate={animate} />
+                </TableCell>
+                <TableCell className={cn(TXT_CELL, "py-2.5 text-muted-foreground")}>
+                  {formatAgo(data.generatedAt)}
+                </TableCell>
+              </TableRow>
+            </TableFooter>
+          ) : null}
+        </Table>
       </Panel>
     </div>
   )
