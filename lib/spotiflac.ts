@@ -33,12 +33,37 @@ const SPOTIFLAC_TIDAL_INSTANCES: string[] = [
   "https://tidal-api.binimum.org",
 ]
 
-export type SpotiFlacSyncResult = InstanceSyncResult
+/**
+ * Qobuz restream instances SpotiFLAC reaches. Same shape as the Tidal list and the same caveat:
+ * the premium gate rejects any host that answers but cannot serve hi-res, so expect most of a
+ * sweep to land in `rejected`.
+ *
+ * Transcribed from SpotiFLAC's published partner list (spotiflac.com/partners) and the endpoint
+ * inventory at deepwiki.com/afkarxyz/SpotiFLAC. Base URLs only — the health check appends its own
+ * paths, and a host listed under the wrong service simply fails the check and is never pooled.
+ */
+const SPOTIFLAC_QOBUZ_INSTANCES: string[] = [
+  "https://dab.yeet.su",
+  "https://dabmusic.xyz",
+  "https://jumo-dl.pages.dev",
+  "https://spotisaver.net",
+  "https://squid.wtf",
+]
+
+export type SpotiFlacSyncResult = { tidal: InstanceSyncResult; qobuz: InstanceSyncResult }
 
 /**
- * Pools SpotiFLAC's public Tidal HiFi instances through the shared instance-sync core. The health
- * sweep and premium gate decide which survive; this only supplies the seed list.
+ * Pools SpotiFLAC's public instances through the shared instance-sync core. The health sweep and
+ * premium gate decide which survive; this only supplies the seed lists.
+ *
+ * SpotiFLAC publishes no account credentials — "no account required" is its design, and the
+ * accounts backing these hosts belong to their operators. There is nothing here to ingest as an
+ * `account_entries` row, only instance URLs.
  */
 export async function syncSpotiFlacInstances(): Promise<SpotiFlacSyncResult> {
-  return syncInstanceUrls("tidal", SPOTIFLAC_TIDAL_INSTANCES, { note: "spotiflac" })
+  const [tidal, qobuz] = await Promise.all([
+    syncInstanceUrls("tidal", SPOTIFLAC_TIDAL_INSTANCES, { note: "spotiflac" }),
+    syncInstanceUrls("qobuz", SPOTIFLAC_QOBUZ_INSTANCES, { note: "spotiflac" }),
+  ])
+  return { tidal, qobuz }
 }

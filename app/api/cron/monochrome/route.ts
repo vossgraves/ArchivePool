@@ -7,13 +7,12 @@ export const dynamic = "force-dynamic"
 export const maxDuration = 60
 
 /**
- * Instance-sync cron. Pools Tidal restream instances from every known instance feed:
- * monochrome.tf and SpotiFLAC's public HiFi list. Each feed is isolated so one being unreachable
- * never blocks the other, and both share the same dedupe/health-check/premium-gate core, so an
- * instance already contributed by the other feed (or by hand) is updated in place, not duplicated.
+ * Instance-sync cron: monochrome.tf plus SpotiFLAC's public Tidal and Qobuz lists. Each feed is
+ * isolated so one being unreachable never blocks the others, and all share one
+ * dedupe/health-check/premium-gate core, so an instance another feed already contributed is
+ * updated in place rather than duplicated.
  *
- * Named `monochrome` for the route path the scheduled GitHub workflow already pings; the body now
- * covers all instance feeds.
+ * Named for the route path the scheduled workflow already pings; the body covers every feed.
  */
 export async function GET(req: NextRequest) {
   if (!authorized(req)) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
