@@ -138,11 +138,31 @@ async function checkApi(service: Service, payload: Record<string, unknown>): Pro
 }
 
 /** Refreshes a Tidal access token and writes it back, so later checks use the new one. */
+/**
+ * True when a Tidal JWT is a refresh token rather than an access token. The payload is read
+ * without verifying the signature, which is safe because the answer only decides which grant to
+ * attempt — Tidal is still the thing that accepts or rejects it.
+ */
+function isTidalRefreshToken(token: string): boolean {
+  const payload = token.split(".")[1]
+  if (!payload) return false
+  try {
+    const json = Buffer.from(payload.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8")
+    return (JSON.parse(json) as { type?: string }).type === "o2_refresh"
+  } catch {
+    return false
+  }
+}
+
 async function tryRefreshTidalToken(
   payload: Record<string, unknown>,
   entryFingerprint?: string,
 ): Promise<string | null> {
-  const refreshToken = String(payload.refreshToken ?? "").trim()
+  // Contributors are handed a single value labelled "Token" which is in fact the refresh token,
+  // so fall back to it when no separate refreshToken was supplied. Without this every Tidal
+  // submission failed its live check and was rejected as dead.
+  const refreshToken =
+    String(payload.refreshToken ?? "").trim() || String(payload.token ?? "").trim()
   if (!refreshToken) return null
 
   // Requesting a superset of a token's granted scopes makes Tidal answer 400 invalid_scope on
@@ -217,6 +237,16 @@ async function checkTidalAccount(
   })
 
   try {
+    // A refresh token would 401 as a Bearer, so exchange it first rather than spending a
+    // round-trip proving that.
+    if (isTidalRefreshToken(token)) {
+      const exchanged = await tryRefreshTidalToken(payload, entryFingerprint)
+      if (!exchanged) {
+        return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: "refresh token rejected" }
+      }
+      token = exchanged
+    }
+
     // Validate the OAuth access token against Tidal's session endpoint.
     let { res, ms } = await timedFetch("https://api.tidal.com/v1/sessions", {
       headers: tidalHeaders(token),
