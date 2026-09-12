@@ -1,6 +1,7 @@
 import { and, eq } from "drizzle-orm"
 import { NextResponse, type NextRequest } from "next/server"
-import { isAdminAuthorized as authorized } from "@/lib/admin-auth"
+import { resolveAdmin } from "@/lib/admin-auth"
+import { recordAudit } from "@/lib/audit"
 import { db } from "@/lib/db"
 import { accountEntries, instanceEntries } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
@@ -10,7 +11,8 @@ export const dynamic = "force-dynamic"
 // Bulk-removes every entry whose status is "dead" and hasn't been removed yet, across both
 // split tables (account credentials and instance URLs).
 export async function POST(req: NextRequest) {
-  if (!authorized(req)) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
+  const actor = await resolveAdmin(req)
+  if (!actor) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
 
   await ensureSchema()
   const accounts = await db
@@ -36,5 +38,10 @@ export async function POST(req: NextRequest) {
     .set({ removed: true })
     .where(and(eq(instanceEntries.status, "dead"), eq(instanceEntries.removed, false)))
 
+  await recordAudit(req, actor, "entry.purge_dead", "entries", {
+    removed,
+    accountIds: accounts.map((r) => r.id),
+    instanceIds: instances.map((r) => r.id),
+  })
   return NextResponse.json({ ok: true, removed })
 }

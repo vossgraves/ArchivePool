@@ -8,6 +8,8 @@ import { Field } from "@/components/ui/field"
 import { AdminKeys } from "@/components/admin-keys"
 import { AdminRequests } from "@/components/admin-requests"
 import { AdminSources } from "@/components/admin-sources"
+import { AdminUsers } from "@/components/admin-users"
+import { AdminAudit } from "@/components/admin-audit"
 
 /**
  * Single unlock prompt for the whole admin page.
@@ -101,7 +103,9 @@ export function AdminGate() {
         <AdminRequests />
       </div>
       <AdminKeys />
+      <AdminUsers />
       <AdminSources />
+      <AdminAudit />
     </div>
   )
 }

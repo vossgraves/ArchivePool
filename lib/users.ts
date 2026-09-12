@@ -1,7 +1,7 @@
 import "server-only"
 import { scrypt as scryptCb, randomBytes, timingSafeEqual } from "node:crypto"
 import { promisify } from "node:util"
-import { and, eq, gte } from "drizzle-orm"
+import { and, desc, eq, gte } from "drizzle-orm"
 import { db } from "@/lib/db"
 import { users } from "@/lib/db/schema"
 
@@ -95,4 +95,37 @@ export async function countRecentUsersByIpUa(ip: string, ua: string, hours = 24)
     .from(users)
     .where(and(eq(users.createdIp, ip), eq(users.createdUa, ua), gte(users.createdAt, cutoff)))
   return rows.length
+}
+
+export async function isAdminUser(userId: number): Promise<boolean> {
+  const [row] = await db
+    .select({ role: users.role, disabled: users.disabled })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1)
+  return Boolean(row) && !row.disabled && row.role === "admin"
+}
+
+export async function setUserRole(userId: number, role: "user" | "admin") {
+  const [row] = await db
+    .update(users)
+    .set({ role })
+    .where(eq(users.id, userId))
+    .returning({ id: users.id, username: users.username, role: users.role })
+  return row ?? null
+}
+
+/** Account list for the admin panel. Never selects password_hash. */
+export async function listUsersForAdmin() {
+  return db
+    .select({
+      id: users.id,
+      username: users.username,
+      role: users.role,
+      disabled: users.disabled,
+      createdAt: users.createdAt,
+      lastLoginIp: users.lastLoginIp,
+    })
+    .from(users)
+    .orderBy(desc(users.createdAt))
 }

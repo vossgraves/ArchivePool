@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server"
-import { isAdminAuthorized as authorized } from "@/lib/admin-auth"
+import { resolveAdmin } from "@/lib/admin-auth"
 import { createApiKeyWithValue } from "@/lib/api-keys"
 
 export const dynamic = "force-dynamic"
@@ -13,7 +13,8 @@ export const dynamic = "force-dynamic"
  * deployment's SOURCE_PROVIDER_KEY secret instead of rebuilding every client.
  */
 export async function POST(req: NextRequest) {
-  if (!authorized(req)) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
+  const actor = await resolveAdmin(req)
+  if (!actor) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
 
   let body: { name?: string; value?: string }
   try {

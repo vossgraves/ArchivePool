@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server"
-import { isAdminAuthorized as authorized } from "@/lib/admin-auth"
+import { resolveAdmin } from "@/lib/admin-auth"
+import { recordAudit } from "@/lib/audit"
 import { deleteApiKey } from "@/lib/api-keys"
 import { ensureSchema } from "@/lib/db/ensure"
 
@@ -14,7 +15,8 @@ export const dynamic = "force-dynamic"
  * stored — so deleting is safe: any client still presenting it simply stops authenticating.
  */
 export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
-  if (!authorized(req)) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
+  const actor = await resolveAdmin(req)
+  if (!actor) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
 
   const { id } = await ctx.params
   const keyId = Number.parseInt(id, 10)
@@ -24,6 +26,7 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
     await ensureSchema()
     const deleted = await deleteApiKey(keyId)
     if (!deleted) return NextResponse.json({ error: "not_found" }, { status: 404 })
+    await recordAudit(req, actor, "key.delete", `key:${keyId}`)
     return NextResponse.json({ ok: true, id: keyId })
   } catch (err) {
     console.error(`[admin] delete key ${keyId} failed:`, err)

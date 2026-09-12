@@ -10,7 +10,8 @@ import { cookies } from "next/headers"
  * forged cookie fails signature verification. `SESSION_SECRET` failing to be
  * configured must fail CLOSED — signing must never fall back to a default.
  */
-const COOKIE_NAME = "atp_session"
+export const SESSION_COOKIE_NAME = "atp_session"
+const COOKIE_NAME = SESSION_COOKIE_NAME
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
 
 function sessionSecret(): string {
