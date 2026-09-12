@@ -32,6 +32,10 @@ const entryColumns = {
   removed: boolean("removed").notNull().default(false),
   // Opt-in credit. Never derived from the payload, never sent to an app in any feed.
   contributor: text("contributor"),
+  // Contributor-declared end of the subscription. Past this the entry stops being servable
+  // without waiting for a live check to fail, because a lapsed plan usually still authenticates
+  // — it just silently drops to previews, which the premium gate cannot see mid-cycle.
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
   lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
   // Drives least-recently-leased rotation, so no one entry absorbs all traffic and gets banned.
   lastLeasedAt: timestamp("last_leased_at", { withTimezone: true }),

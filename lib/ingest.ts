@@ -22,6 +22,12 @@ export interface IngestOptions {
    * duplicate row instead of updating the existing one.
    */
   contributor?: string | null
+  /**
+   * Contributor-declared end of the subscription. Stored as a column rather than in `payload`,
+   * because `payload` feeds the fingerprint — a re-submission with a corrected date must update
+   * the existing row, not insert a duplicate.
+   */
+  expiresAt?: Date | null
 }
 
 /**
@@ -47,6 +53,7 @@ export async function ingestSource(
     throw new Error("POOL_ENCRYPTION_KEY is required before account credentials can be accepted")
   }
   const contributor = options.contributor?.trim().slice(0, 64) || null
+  const expiresAt = options.expiresAt ?? null
   // Fingerprint, label and the live health check all run on the PLAINTEXT payload; only the value
   // persisted to the database is encrypted, so dedupe and validation behaviour is unchanged.
   const fp = fingerprint(service, kind, payload)
@@ -91,6 +98,7 @@ export async function ingestSource(
       removed: false,
       disabled: false,
       contributor,
+      expiresAt,
     })
     .onConflictDoUpdate({
       target: table.fingerprint,

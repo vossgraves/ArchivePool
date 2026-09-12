@@ -101,12 +101,14 @@ export const accountServableWhere = and(
   eq(accountEntries.removed, false),
   eq(accountEntries.disabled, false),
   sql`${accountEntries.status} in ('alive','preview')`,
+  sql`(${accountEntries.expiresAt} is null or ${accountEntries.expiresAt} > now())`,
 )
 
 export const instanceServableWhere = and(
   eq(instanceEntries.removed, false),
   eq(instanceEntries.disabled, false),
   sql`${instanceEntries.status} in ('alive','preview')`,
+  sql`(${instanceEntries.expiresAt} is null or ${instanceEntries.expiresAt} > now())`,
 )
 
 /**
