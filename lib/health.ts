@@ -24,9 +24,8 @@ const TIDAL_TOKEN_ENDPOINT = "https://auth.tidal.com/v1/oauth2/token"
 // flagged for appearing to come from an unrecognised user agent.
 const TIDAL_UA = "TIDAL/1000 (Linux; Android 10)"
 
-// Apple Music AMP API. Probing a Media-User-Token requires a dev (Bearer) JWT; the pool
-// self-scrapes the current web-player token (same source the ArchiveTune app uses) instead
-// of asking contributors to paste a second credential.
+// Probing a Media-User-Token needs a dev JWT, so the pool self-scrapes the web-player token
+// rather than asking contributors for a second credential.
 const AMP_BASE = "https://amp-api.music.apple.com"
 const APPLE_MUSIC_HOME = "https://music.apple.com/"
 const APPLE_UA =
@@ -46,11 +45,7 @@ function decodeJwtPayload(jwt: string): Record<string, unknown> | null {
   }
 }
 
-/**
- * Returns a usable Apple Music web-player dev JWT, scraping a fresh one from
- * music.apple.com when the cached token is older than 24h or already expired.
- * Mirrors the app-side scraper: home page → JS bundle → ES256 JWTs → `iss: AMPWebPlay`.
- */
+/** Mirrors the app-side scraper: home page → JS bundle → ES256 JWTs → `iss: AMPWebPlay`. */
 async function ampDevToken(): Promise<string | null> {
   const now = Date.now() / 1000
   if (ampTokenCache && ampTokenCache.exp - 60 > now && Date.now() - ampTokenCache.at < AMP_TOKEN_TTL_MS) {
@@ -109,11 +104,7 @@ function classify(ok: boolean, premium: boolean): Status {
   return premium ? "alive" : "preview"
 }
 
-/**
- * API / instance check: the entry is a restream base URL. We consider it alive
- * if it responds without a server error. Premium (lossless/hi-res capable) is
- * inferred from an optional probe endpoint whose JSON mentions a hi-res marker.
- */
+/** Alive when the base URL answers without a server error; premium inferred from a probe. */
 async function checkApi(service: Service, payload: Record<string, unknown>): Promise<CheckResult> {
   const baseUrl = String(payload.baseUrl ?? "").trim().replace(/\/+$/, "")
   if (!baseUrl) return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: "missing baseUrl" }
@@ -146,11 +137,7 @@ async function checkApi(service: Service, payload: Record<string, unknown>): Pro
   }
 }
 
-/**
- * Attempts to refresh a Tidal access token using the stored refresh token.
- * Returns the new access token on success, null if the refresh token is absent or rejected.
- * When successful, also updates the payload in the DB so future checks use the new token.
- */
+/** Refreshes a Tidal access token and writes it back, so later checks use the new one. */
 async function tryRefreshTidalToken(
   payload: Record<string, unknown>,
   entryFingerprint?: string,
@@ -158,10 +145,8 @@ async function tryRefreshTidalToken(
   const refreshToken = String(payload.refreshToken ?? "").trim()
   if (!refreshToken) return null
 
-  // Refresh tokens are granted with the scopes they were issued for; requesting a superset
-  // (the pool's device flow asks for `+w_sub`) makes Tidal answer 400 invalid_scope on tokens
-  // minted elsewhere (e.g. pasted by a contributor with only r_usr w_usr). Fall back to the
-  // narrower scope instead of treating the account as dead.
+  // Requesting a superset of a token's granted scopes makes Tidal answer 400 invalid_scope on
+  // tokens minted elsewhere. Fall back to the narrower scope rather than calling it dead.
   const scopes = ["r_usr+w_usr+w_sub", "r_usr+w_usr"]
 
   try {
@@ -280,17 +265,13 @@ async function checkTidalAccount(
   }
 }
 
-// A stable, widely-available public Qobuz track used only to verify that the app_secret produces a
-// valid request signature. format_id 5 (MP3 320) is not subscription-gated, so a rejection here is
-// due to a bad signature/secret rather than the account's plan.
+// format_id 5 (MP3 320) is not subscription-gated, so a rejection here means a bad signature
+// rather than the account's plan.
 const QOBUZ_PROBE_TRACK_ID = "5966783"
 const QOBUZ_PROBE_FORMAT_ID = "5"
 
-// Qobuz authenticates API calls via headers, not just query params. Sending app_id/token only as
-// query params causes intermittent HTTP 401s; the official clients send these headers, so we mirror
-// that to avoid false "dead" results. We keep the query params too for maximum compatibility.
-// Same stable UA used in qobuz-oauth.ts — must stay in sync so all Qobuz API calls
-// appear to come from the same browser session and don't trigger UA-rotation detection.
+// Query params alone cause intermittent 401s and false "dead" results; the official clients
+// send these headers. The UA must stay in sync with qobuz-oauth.ts or rotation detection trips.
 const QOBUZ_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
@@ -303,10 +284,8 @@ function qobuzHeaders(appId: string, token: string): Record<string, string> {
 }
 
 /**
- * Validates the app_secret by signing a `track/getFileUrl` request exactly the way the ArchiveTune
- * app does — md5("trackgetFileUrlformat_id{fmt}intentstreamtrack_id{id}{ts}{secret}"). A wrong secret
- * makes Qobuz return an InvalidRequestSignature error, which we surface as a clear failure so bad
- * credentials are rejected at submit time instead of silently failing during playback.
+ * Signs a `track/getFileUrl` request exactly as the app does, so a wrong app_secret is rejected
+ * at submit time instead of failing silently during playback.
  */
 async function checkQobuzAppSecret(
   appId: string,
@@ -373,12 +352,7 @@ const DEEZER_GATEWAY =
 const DEEZER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-/**
- * Account check: an ARL is alive when getUserData returns a real user session. Premium is decided
- * by whether the plan grants lossless, because only those accounts can serve FLAC — a free account
- * resolves 30-second previews at best, so it is reported as "preview" rather than "alive", matching
- * how a non-premium Tidal/Qobuz account is treated.
- */
+/** Only a lossless plan can serve FLAC, so a free account reports "preview", not "alive". */
 async function checkAppleMusicAccount(payload: Record<string, unknown>): Promise<CheckResult> {
   const token = String(payload.token ?? "").trim()
   // Media-User-Tokens always start with "0." — anything else is a paste error.

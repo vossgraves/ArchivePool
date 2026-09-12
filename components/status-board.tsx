@@ -49,12 +49,9 @@ async function fetcher(url: string): Promise<StatusPayload> {
  */
 const SKELETON_COUNT = 6
 
-/**
- * Health is board-level vocabulary, not an entry status, so this map cannot be `toneFor` alone:
- * toneFor() knows "degraded" (that reading is used verbatim, so the board can never disagree with
- * the admin chips) but answers "neutral" for operational/down/unknown, which would render a
- * working pool and an empty one the same way.
- */
+/** Not `toneFor` alone: it answers neutral for operational/down/unknown, which would paint a
+ *  working pool and an empty one identically. "degraded" is reused verbatim so the board and the
+ *  admin chips can never disagree. */
 const HEALTH: Record<CategoryStatus["health"], { label: string; tone: StatusTone; dot: string }> = {
   operational: { label: "Operational", tone: "ok", dot: "bg-ok" },
   degraded: { label: "Degraded", tone: toneFor("degraded"), dot: "bg-warn" },
@@ -70,17 +67,12 @@ const TONE_TEXT: Record<StatusTone, string> = {
   neutral: "text-muted-foreground",
 }
 
-/**
- * The columns, in order. The skeleton row and the zero-entry row span COLUMN_COUNT, so adding a
- * column here cannot silently break them.
- */
+/** The skeleton and zero-entry rows span COLUMN_COUNT, so adding one here cannot break them. */
 const COLUMNS: { label: string; head: string }[] = [
   { label: "Category", head: "text-left" },
   { label: "Health", head: "text-left" },
   { label: "Total", head: "text-right" },
-  // "Alive" is the field name in CategoryStatus and what the feed exposes, and it already means
-  // servable: getStatus() counts status alive OR preview and drops disabled entries, because a
-  // disabled entry is never handed to an app and must not be shown as serving on the public page.
+  // "Alive" already means servable: getStatus() counts alive OR preview and drops disabled.
   { label: "Alive", head: "text-right" },
   { label: "Premium", head: "text-right" },
   { label: "Pending", head: "text-right" },
@@ -107,11 +99,7 @@ function overallHealth(cats: CategoryStatus[]) {
   return { label: "Degraded performance", health: "degraded" as const }
 }
 
-/**
- * Sums the columns the mix bar and the totals row read. Uptime is deliberately NOT averaged: a
- * pool with three checks would weigh the same as one with three thousand, and the payload does not
- * carry the denominators that would make the average honest.
- */
+/** Uptime is deliberately not averaged — the payload carries no denominators to weight it by. */
 function sumStats(cats: CategoryStatus[]): Stats {
   return cats.reduce<Stats>(
     (a, c) => ({
@@ -126,12 +114,9 @@ function sumStats(cats: CategoryStatus[]): Stats {
 }
 
 /**
- * Smoothly counts from the number last drawn on screen up to `value`.
- *
- * `animate` is false when the user asked for reduced motion: the figure is still returned, it just
- * never moves — a faster ramp is not the same thing as no ramp, and a counter is decoration over a
- * number that is already in the DOM. Every queued frame is cancelled on unmount and when the target
- * changes mid-ramp, which is what keeps a 60s poll from stacking ramps that fight over state.
+ * Counts up to `value`. With reduced motion the figure still returns, it just never moves.
+ * Frames are cancelled on unmount and on a mid-ramp target change, so a 60s poll cannot stack
+ * ramps that fight over state.
  */
 function useCountUp(value: number, animate: boolean, duration = 700) {
   const [display, setDisplay] = useState(value)
@@ -164,12 +149,7 @@ function useCountUp(value: number, animate: boolean, duration = 700) {
   return display
 }
 
-/**
- * The status dot. The pulse ring is motion, so `animate` is what turns it off; the dot itself
- * always stays, because the word beside it carries the status and never relies on this. Decorative
- * by construction — every surface that uses it states the same health in text — hence aria-hidden
- * rather than a colour-only label.
- */
+/** Decorative: the word beside it carries the status, hence aria-hidden over a colour-only label. */
 function HealthDot({
   health,
   animate,
@@ -195,14 +175,12 @@ function HealthDot({
 }
 
 /**
- * The pool's composition as one stacked bar: premium, then the rest of the live entries, then
- * pending, then dead. It is aria-hidden on purpose — the same four figures stand as text in their
- * own columns, so the bar is emphasis and never the only place a number exists.
+ * Composition as one stacked bar. aria-hidden: the same figures stand as text in their own
+ * columns, so this is emphasis, never the only place a number exists.
  *
- * Emphasis descends premium > alive > pending > dead. `aliveOnly` deliberately does NOT use a
- * full-strength `bg-foreground`: white is the brightest token on the page, so a category of
- * non-premium entries outshouted the green premium ones and an all-white bar on a DEGRADED row
- * read as "all good". Dimming it puts the signal colours back on top.
+ * `aliveOnly` avoids full-strength `bg-foreground` — white is the brightest token on the page, so
+ * non-premium entries outshouted the green premium ones and an all-white DEGRADED row read as
+ * "all good".
  */
 function SegmentBar({ stats, animate }: { stats: Stats; animate: boolean }) {
   if (stats.total === 0) {
@@ -251,15 +229,10 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: str
 }
 
 /**
- * Public status board: the aggregate health of every pool, then one table row per category.
+ * Public status board. Tabular data, so a real <table>.
  *
- * This is tabular data, so it is a real <table> — one <th scope="row"> per category and one
- * numeric column per figure — rather than the grid of expandable cards it used to be. Expanding
- * existed only to hide four numbers; here they are columns.
- *
- * `fallback` pre-seeds the payload for a caller that already has it server-side. Nothing does that
- * today, and anything that starts should know the row times are rendered relative ("4m ago"), so a
- * seeded payload can differ between the server and the client pass by one bucket.
+ * `fallback` pre-seeds a server-side payload. Row times render relative ("4m ago"), so a seeded
+ * payload can differ between the server and client pass by one bucket.
  */
 export function StatusBoard({ fallback }: { fallback?: StatusPayload }) {
   const reduce = useReducedMotion()
@@ -498,10 +471,8 @@ export function StatusBoard({ fallback }: { fallback?: StatusPayload }) {
                       </span>
                     </TableHead>
                     {cat.total === 0 ? (
-                      // A category with nothing in it keeps its row, so the table can never
-                      // quietly lose one, and the reason it is empty is stated in words rather
-                      // than implied by a line of zeroes. Deezer and Apple Music are account-only
-                      // in lib/sources.ts, so an api row added for either lands here.
+                      // An empty category keeps its row, with the reason in words rather than
+                      // a line of zeroes. Deezer and Apple Music are account-only.
                       <TableCell colSpan={COLUMN_COUNT - 1} className="px-3 py-2">
                         <p className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
                           No entries in this pool yet.{" "}

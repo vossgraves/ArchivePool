@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm"
 import { NextResponse, type NextRequest } from "next/server"
-import { isAdminAuthorized as authorized } from "@/lib/admin-auth"
+import { resolveAdmin } from "@/lib/admin-auth"
+import { recordAudit } from "@/lib/audit"
 import { db } from "@/lib/db"
 import { accountEntries, instanceEntries } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
@@ -11,7 +12,8 @@ export const dynamic = "force-dynamic"
 // account_entries/instance_entries (shared id sequence), so both tables are updated by id and
 // exactly one row moves.
 export async function POST(req: NextRequest) {
-  if (!authorized(req)) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
+  const actor = await resolveAdmin(req)
+  if (!actor) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
 
   let body: { id?: number; action?: "remove" | "restore" }
   try {
@@ -26,12 +28,14 @@ export async function POST(req: NextRequest) {
   await ensureSchema()
   await db.update(accountEntries).set({ removed }).where(eq(accountEntries.id, body.id))
   await db.update(instanceEntries).set({ removed }).where(eq(instanceEntries.id, body.id))
+  await recordAudit(req, actor, "entry.remove", `entry:${body.id}`, { removed })
   return NextResponse.json({ ok: true, id: body.id, removed })
 }
 
 // List everything including removed entries, for owner moderation tooling.
 export async function GET(req: NextRequest) {
-  if (!authorized(req)) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
+  const actor = await resolveAdmin(req)
+  if (!actor) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
 
   await ensureSchema()
   const accounts = await db.select().from(accountEntries)

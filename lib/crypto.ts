@@ -1,29 +1,7 @@
 import "server-only"
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto"
 
-/**
- * Field-level AES-256-GCM encryption for sensitive credential values.
- *
- * We encrypt individual payload values (tokens, app IDs, secrets) rather than the whole row so that
- * non-sensitive fields the server needs in the clear — most importantly an API instance `baseUrl`,
- * which the discovery endpoint must expose — keep working unchanged.
- *
- * Two independent keys are used:
- *  - `POOL_ENCRYPTION_KEY` — at-rest key. Encrypts values stored in the database. Never leaves the
- *    server. Protects against a database dump / backup leak.
- *  - `POOL_CLIENT_KEY` — end-to-end key. Values returned by `/api/sources` are re-encrypted with it,
- *    so a browser hitting the URL sees ciphertext, not tokens. The ArchiveTune app ships the same
- *    key and decrypts locally.
- *
- * Both keys are base64-encoded 32-byte values. Generate with: `openssl rand -base64 32`.
- * Callers that handle account credentials must check the exported configuration helpers and fail
- * closed when a key is absent. The transform functions retain plaintext compatibility only so an
- * operator can migrate rows written by an older deployment after configuring the keys.
- *
- * Wire format (colon-delimited, all base64): `enc:1:<iv>:<ciphertext+authTag>`
- * The 16-byte GCM auth tag is appended to the ciphertext so the blob decrypts with Java's
- * `AES/GCM/NoPadding` (which expects tag-trailing input) on the Android side without extra parsing.
- */
+/** Field-level AES-256-GCM encryption for credential values. See docs/CRYPTO.md. */
 
 const PREFIX = "enc:1:"
 const IV_BYTES = 12
@@ -36,9 +14,7 @@ const SENSITIVE_KEYS = new Set([
   "appId",
   "appSecret",
   "secret",
-  // Deezer: the ARL cookie is the entire credential, and masterSecret is the key-derivation
-  // secret. Both must be encrypted — this set is an explicit allowlist, not a heuristic, so
-  // omitting them would store the credential in plaintext.
+  // An allowlist, not a heuristic: a credential field missing here is stored in plaintext.
   "arl",
   "masterSecret",
   "password",
@@ -107,7 +83,7 @@ function transformDecrypt(payload: Payload, key: Buffer | null): Payload {
   for (const [k, v] of Object.entries(payload)) {
     if (isEncrypted(v)) {
       if (!key) {
-        // Can't decrypt without the key — drop the value rather than leak ciphertext as if it were real.
+        // Drop it rather than hand back ciphertext that reads like a real value.
         out[k] = ""
       } else {
         try {
@@ -142,35 +118,15 @@ export function decryptAtRest(payload: Payload): Payload {
   return transformDecrypt(payload, loadKey("POOL_ENCRYPTION_KEY"))
 }
 
-/**
- * Domain separator for per-requester client-key derivation. Must match the Android
- * implementation in PoolCrypto.kt byte-for-byte.
- */
+/** Must match PoolCrypto.kt byte for byte. */
 const CLIENT_KEY_DOMAIN = "archivepool-client:"
 
-/**
- * Derives the per-requester client-encryption key from the read key the requester presented.
- *
- * This is the "one secret" design: an app that holds a valid read key can always decrypt its
- * own feed, because the encryption key is a pure function of the read key it sends. No
- * separately-distributed POOL_CLIENT_KEY has to match between the server deployment and the
- * APK build — the class of "key drift" outages (old database deleted, secret rotated on one
- * side only, CI secret ≠ Vercel env) disappears for clients that opt in (X-Pool-Client: v2).
- *
- * E2E property is preserved — and actually improved: ciphertext captured in transit can only
- * be decrypted by holders of that read key, instead of by holders of one global client key.
- */
+/** Per-requester client key, derived from the presented read key. See docs/CRYPTO.md. */
 export function deriveClientKey(readKey: string): Buffer {
   return createHash("sha256").update(CLIENT_KEY_DOMAIN + readKey).digest()
 }
 
-/**
- * Re-encrypt sensitive fields with the client key for the response layer. Input must be plaintext
- * (i.e. already `decryptAtRest`-ed). The source route verifies configuration before calling this;
- * the transform's no-key compatibility exists only for migration and non-sensitive internal use.
- * [keyOverride] carries a per-requester derived key (v2 clients) so the static POOL_CLIENT_KEY
- * is only needed for legacy clients that predate the scheme.
- */
+/** Re-encrypt for the response layer. Input must already be `decryptAtRest`-ed. */
 export function encryptForClient(payload: Payload, keyOverride?: Buffer | null): Payload {
   return transformEncrypt(payload, keyOverride ?? loadKey("POOL_CLIENT_KEY"))
 }

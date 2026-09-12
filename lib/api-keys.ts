@@ -30,12 +30,7 @@ function extractKey(req: NextRequest): string | null {
   return null
 }
 
-/**
- * The raw read key this request presented (Authorization: Bearer … or X-Api-Key), or null.
- * Used by feed routes to derive the per-requester client-encryption key after verifyReadKey
- * has authenticated it — the value is never persisted, only hashed (verifyReadKey) or used
- * as key material (deriveClientKey) within the request's lifetime.
- */
+/** The raw presented key. Never persisted — only hashed, or used as key material, per request. */
 export function readKeyFromRequest(req: NextRequest): string | null {
   return extractKey(req)
 }
@@ -52,19 +47,15 @@ export interface ReadKeyIdentity {
 }
 
 /**
- * Validate the request's read key against the api_keys table and resolve its row id in the same
- * lookup, so callers that need both (per-key leasing) don't pay for a second query.
- *
- * [alwaysEnforce] is used by the credential-bearing source feed. Discovery feeds can remain public
- * unless READ_KEYS_ENFORCED is set because they contain instance URLs rather than account secrets.
+ * Validates the key and resolves its row id in one lookup, so per-key leasing needs no second
+ * query. [alwaysEnforce] is for credential-bearing feeds; discovery feeds carry only URLs and
+ * can stay public unless READ_KEYS_ENFORCED is set.
  */
 export async function identifyReadKey(req: NextRequest, alwaysEnforce = false): Promise<ReadKeyIdentity> {
   const enforced = alwaysEnforce || process.env.READ_KEYS_ENFORCED === "true"
   const candidate = extractKey(req)
 
-  // When gating is off, always allow (lets the operator roll keys out gradually). With no
-  // candidate presented there is nothing to resolve, so skip the query entirely — this is the
-  // hot path for a deployment that never turned enforcement on.
+  // Gating off: allow, and skip the query entirely when nothing was presented.
   if (!enforced && !candidate) return { ok: true, keyId: null }
 
   if (!candidate) return { ok: false, keyId: null }
@@ -77,10 +68,8 @@ export async function identifyReadKey(req: NextRequest, alwaysEnforce = false): 
     .limit(1)
 
   if (!enforced) {
-    // Gating is off but a key was presented anyway: resolve its id for leasing purposes only.
-    // Deliberately skip the use_count/last_used_at bump below — bumping here would start
-    // counting hits from routes like /api/report on unenforced deployments, a silent change to
-    // what that dashboard number means. A missing/revoked/mismatched key is simply anonymous.
+    // Resolve the id for leasing only; skip the use_count bump, which would silently change
+    // what that dashboard number counts on an unenforced deployment.
     if (!row || row.revoked) return { ok: true, keyId: null }
     const a = Buffer.from(row.keyHash)
     const b = Buffer.from(keyHash)
@@ -90,12 +79,11 @@ export async function identifyReadKey(req: NextRequest, alwaysEnforce = false): 
 
   if (!row || row.revoked) return { ok: false, keyId: null }
 
-  // Constant-time compare of the hashes as defense-in-depth against timing attacks.
   const a = Buffer.from(row.keyHash)
   const b = Buffer.from(keyHash)
   if (a.length !== b.length || !timingSafeEqual(a, b)) return { ok: false, keyId: null }
 
-  // Best-effort usage bump; never block the request on this.
+  // Best-effort; never block the request on it.
   void db
     .update(apiKeys)
     .set({ useCount: sql`${apiKeys.useCount} + 1`, lastUsedAt: new Date() })
@@ -106,11 +94,7 @@ export async function identifyReadKey(req: NextRequest, alwaysEnforce = false): 
   return { ok: true, keyId: row.id }
 }
 
-/**
- * Validate the request's read key against the api_keys table. Returns true when a non-revoked
- * key matches (or gating is off). Thin wrapper over [identifyReadKey] for the many call sites
- * that only need the boolean.
- */
+/** Boolean-only wrapper over [identifyReadKey]. */
 export async function verifyReadKey(req: NextRequest, alwaysEnforce = false): Promise<boolean> {
   return (await identifyReadKey(req, alwaysEnforce)).ok
 }
@@ -123,9 +107,8 @@ export async function createApiKey(name: string): Promise<{ id: number; key: str
 }
 
 /**
- * Admin: create a key with a caller-chosen value (used to re-seed the baked
- * SOURCE_PROVIDER_KEY after a database loss so clients keep working without rebuilds).
- * Returns null when a key with this value already exists (unique hash).
+ * Create a key with a caller-chosen value, to re-seed the baked SOURCE_PROVIDER_KEY after a
+ * database loss so installed clients keep working without a rebuild. Null when it already exists.
  */
 export async function createApiKeyWithValue(
   name: string,
@@ -181,15 +164,7 @@ export async function listUserApiKeys(userId: number) {
     .orderBy(desc(apiKeys.createdAt))
 }
 
-/**
- * User: permanently delete one of their own keys.
- *
- * This replaced a soft delete that only set `deleted` + `revoked`: the row and its hash stayed in
- * the table, so "delete" left users with a key they could neither use nor see, and no way to tell
- * a deleted key from a hidden one. Removing your own credential deletes it.
- *
- * Scoped by userId, so one account can never delete another's key by guessing ids.
- */
+/** Scoped by userId, so one account cannot delete another's key by guessing ids. */
 export async function deleteUserApiKey(userId: number, id: number) {
   const deleted = await db
     .delete(apiKeys)
@@ -209,11 +184,8 @@ export async function setUserKeyRevoked(userId: number, id: number, revoked: boo
 }
 
 /**
- * Admin: list every key, including soft-deleted ones.
- *
- * The user-facing list hides `deleted` rows; the admin must not, or a "deleted" key looks like it
- * vanished while its hash is still in the table. Owner username and the request reason are carried
- * so the panel can say whose key a given row is.
+ * Every key, soft-deleted ones included — the user-facing list hides those, and an admin seeing
+ * the same view would think a key vanished while its hash is still in the table.
  */
 export async function listApiKeys() {
   return db
@@ -240,20 +212,14 @@ export async function setKeyRevoked(id: number, revoked: boolean) {
 }
 
 /**
- * Admin: permanently delete a key row.
- *
- * This is the admin panel's only true removal. Revoking is reversible and leaves the hash in the
- * table; this removes the record outright, so the key can never be restored or matched again.
- * Users get the same thing for their own keys from the dashboard (see deleteUserApiKey).
- * `api_key_requests.resulting_key_id` is `ON DELETE SET NULL`, so the request that produced a key
- * survives with its history intact.
+ * The only true removal — revoking is reversible and leaves the hash behind. The originating
+ * request survives: `resulting_key_id` is ON DELETE SET NULL.
  */
 export async function deleteApiKey(id: number) {
   const deleted = await db.delete(apiKeys).where(eq(apiKeys.id, id)).returning({ id: apiKeys.id })
   return deleted.length > 0
 }
 
-// ─── API key request workflow (user subject+reason → admin approve → user claims key) ───
 
 /** Cap on simultaneously active (non-revoked) keys a single account may hold. */
 export const MAX_KEYS_PER_USER = 10
@@ -293,11 +259,7 @@ export async function listUserRequests(userId: number) {
     .orderBy(desc(apiKeyRequests.createdAt))
 }
 
-/**
- * How many requests from this device (IP + UA) still hold one of the limited slots — i.e. any
- * request in the last [hours] that was not rejected. Rejecting deliberately frees the slot again,
- * so a denial does not lock a device out forever.
- */
+/** Rejection deliberately frees the slot, so a denial cannot lock a device out forever. */
 export async function countRequestsByIpUa(ip: string, ua: string, hours = 720): Promise<number> {
   if (!ip || !ua) return 0
   await ensureSchema()
@@ -317,17 +279,12 @@ export async function countRequestsByIpUa(ip: string, ua: string, hours = 720): 
 }
 
 /**
- * Admin: approve a request. NO key is generated here.
+ * Approve a request. No key is minted here — claimApprovedKey does that, so the one-time
+ * plaintext reaches its owner instead of being lost in the admin panel.
  *
- * [adminId] is the reviewing site account, or null for the token-authenticated admin panel —
- * `api_key_requests.reviewed_by` is a foreign key to `users.id`, so passing a sentinel like 0
- * (which no account can have, ids start at 1) makes the UPDATE throw a constraint violation, the
- * route 500s, and the Approve button appears to do nothing at all. Null is the honest value for
- * "reviewed by whoever holds the admin token".
- *
- * The key itself is minted by the requester in claimApprovedKey(). Generating it here instead
- * would hand the one-time plaintext to the admin panel, where it is shown to nobody, logged
- * nowhere useful and lost — leaving the approved user with a key row they can never read.
+ * [adminId] must be null, never a 0 sentinel, for the token-authenticated panel: `reviewed_by`
+ * is a foreign key to `users.id` and no account can have id 0, so 0 makes the UPDATE throw and
+ * the Approve button silently do nothing.
  */
 export async function approveKeyRequest(requestId: number, adminId: number | null) {
   await ensureSchema()
@@ -357,12 +314,8 @@ export type ClaimResult =
   | { ok: false; error: "not_found" | "not_approved" | "already_claimed" | "key_limit" }
 
 /**
- * Requester: mint the key for a request an admin has approved.
- *
- * This is the only point where an approved request becomes an api_keys row, and the only place
- * the plaintext exists — it is returned to its owner once and never stored (only the SHA-256
- * hash is persisted). Runs in a transaction that locks the request row so two tabs cannot both
- * claim it and silently orphan a key.
+ * The only place an approved request becomes a key row, and the only place the plaintext exists.
+ * Locks the request row so two tabs cannot both claim it and orphan a key.
  */
 export async function claimApprovedKey(userId: number, requestId: number): Promise<ClaimResult> {
   await ensureSchema()

@@ -1,40 +1,24 @@
 import "server-only"
 import { createHash, timingSafeEqual } from "node:crypto"
 import type { NextRequest } from "next/server"
+import { eq } from "drizzle-orm"
+import { db } from "@/lib/db"
+import { users } from "@/lib/db/schema"
+import { ensureSchema } from "@/lib/db/ensure"
+import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/sessions"
 
-/**
- * Shared authentication for the admin and cron routes.
- *
- * These checks used to be copy-pasted into six route handlers as a plain `===` string comparison,
- * which has two problems this module fixes:
- *
- *  1. `===` on secrets short-circuits at the first differing byte, so response time leaks how much
- *     of a guess was correct. Comparing digests with `timingSafeEqual` removes that signal.
- *  2. `ADMIN_TOKEN` held the usable secret in plaintext, so anything that could read the
- *     environment (a leaked dashboard, a log dump, a compromised build) got full admin access.
- *     `ADMIN_TOKEN_HASH` stores only a SHA-256 digest instead: the server can still verify a
- *     presented token, but the stored value is not itself a credential.
- *
- * Deliberately mirrors the hash-and-compare approach already used for read keys in
- * `lib/api-keys.ts`, so the admin path is no longer the weakest link.
- */
+/** Authentication for the admin and cron routes. See docs/ADMIN.md. */
 
 function sha256(value: string): Buffer {
   return createHash("sha256").update(value, "utf8").digest()
 }
 
-/**
- * Constant-time comparison of two secrets.
- *
- * Both sides are hashed first so the buffers are always 32 bytes. That matters because
- * `timingSafeEqual` throws on length mismatch, and returning early on that would leak the length of
- * the real secret.
- */
+/** Both sides are hashed first: `timingSafeEqual` throws on a length mismatch, and returning
+ *  early on that would leak the real secret's length. */
 function secretMatches(candidate: string, expected: string): boolean {
   return timingSafeEqual(sha256(candidate), sha256(expected))
 }
 
-/** Pull a non-empty bearer token out of the Authorization header. */
 function bearerToken(req: NextRequest): string | null {
   const header = req.headers.get("authorization")
   if (!header?.startsWith("Bearer ")) return null
@@ -43,11 +27,8 @@ function bearerToken(req: NextRequest): string | null {
 }
 
 /**
- * True when the request carries the admin credential.
- *
- * Prefers `ADMIN_TOKEN_HASH` (SHA-256 hex of the token). Falls back to a plaintext `ADMIN_TOKEN` so
- * an existing deployment keeps working while the hash is rolled out. Fails closed when neither is
- * configured — an unset secret must never mean "allow".
+ * Prefers `ADMIN_TOKEN_HASH` (SHA-256 hex), falling back to plaintext `ADMIN_TOKEN` so a
+ * deployment keeps working mid-rollout. Fails closed: an unset secret never means "allow".
  */
 export function isAdminAuthorized(req: NextRequest): boolean {
   const candidate = bearerToken(req)
@@ -61,7 +42,7 @@ export function isAdminAuthorized(req: NextRequest): boolean {
     } catch {
       return false
     }
-    // A malformed hash is a misconfiguration, not a reason to fall back to a weaker check.
+    // A malformed hash is a misconfiguration, not a reason to fall back to the weaker check.
     if (expected.length !== 32) return false
     return timingSafeEqual(sha256(candidate), expected)
   }
@@ -71,12 +52,7 @@ export function isAdminAuthorized(req: NextRequest): boolean {
   return secretMatches(candidate, plaintext)
 }
 
-/**
- * True when the request may run a scheduled job.
- *
- * Vercel Cron sends `Authorization: Bearer $CRON_SECRET` automatically, so that is the primary
- * path; the admin token is also accepted so the jobs stay manually triggerable.
- */
+/** Vercel Cron sends `Bearer $CRON_SECRET`; the admin token also works so jobs stay triggerable. */
 export function isCronAuthorized(req: NextRequest): boolean {
   const candidate = bearerToken(req)
   if (!candidate) return false
@@ -85,4 +61,33 @@ export function isCronAuthorized(req: NextRequest): boolean {
   if (cronSecret && secretMatches(candidate, cronSecret)) return true
 
   return isAdminAuthorized(req)
+}
+
+/** Who acted. `userId` is null for the shared ADMIN_TOKEN, which cannot identify a person. */
+export interface AdminActor {
+  userId: number | null
+  label: string
+}
+
+/** Authorize by either credential — shared token or an admin's session. Null when neither holds. */
+export async function resolveAdmin(req: NextRequest): Promise<AdminActor | null> {
+  if (isAdminAuthorized(req)) return { userId: null, label: "admin-token" }
+
+  const userId = verifySessionToken(req.cookies.get(SESSION_COOKIE_NAME)?.value)
+  if (userId === null) return null
+
+  try {
+    await ensureSchema()
+    const [row] = await db
+      .select({ username: users.username, role: users.role, disabled: users.disabled })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1)
+    if (!row || row.disabled || row.role !== "admin") return null
+    return { userId, label: row.username }
+  } catch (err) {
+    // A database failure must not be read as "allow".
+    console.error("[admin-auth] role lookup failed:", err)
+    return null
+  }
 }

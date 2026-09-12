@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server"
-import { isAdminAuthorized as authorized } from "@/lib/admin-auth"
+import { resolveAdmin } from "@/lib/admin-auth"
 import { checkEntryById } from "@/lib/health-sweep"
 
 export const dynamic = "force-dynamic"
@@ -8,7 +8,8 @@ export const maxDuration = 60
 
 // Owner-only: re-verify one pool entry on demand, without sweeping the whole pool.
 export async function POST(req: NextRequest) {
-  if (!authorized(req)) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
+  const actor = await resolveAdmin(req)
+  if (!actor) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
 
   let body: { id?: number }
   try {
