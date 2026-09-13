@@ -70,6 +70,28 @@ Deezer Account):
 - `uptimePct`: rolling pass rate of scheduled checks, or `null` before the first check.
 - Caching: `public, s-maxage=60, stale-while-revalidate=300`.
 
+A `history` object accompanies `categories`, holding one point per day for the window
+`health_log` retains (14 days — the sweep prunes at 30):
+
+```json
+{
+  "history": {
+    "days": 14,
+    "overall": [
+      { "day": "2026-09-13", "label": "13 Sep", "checks": 48, "ok": 47, "pct": 97.9, "partial": true }
+    ],
+    "categories": [
+      { "service": "tidal", "kind": "account", "points": [] }
+    ]
+  }
+}
+```
+
+`pct` is `null` for a day nothing was checked, which is not the same as a day everything failed,
+and `partial` marks today's still-accumulating bucket. The field is additive: it is computed
+separately from `categories` and degrades to empty arrays if the aggregate fails, so a client that
+predates it is unaffected.
+
 ```bash
 curl https://archivepool.vercel.app/api/status
 ```

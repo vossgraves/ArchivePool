@@ -23,18 +23,53 @@ export function toneFor(status: string): StatusTone {
     case "alive":
     case "approved":
     case "active":
+    case "operational":
+    case "premium":
+    case "held":
       return "ok"
     case "pending":
     case "preview":
     case "degraded":
+    case "expiring":
+    case "disabled":
       return "warn"
     case "rejected":
     case "dead":
     case "revoked":
+    case "down":
+    case "expired":
       return "danger"
     default:
       return "neutral"
   }
+}
+
+/** Text colour for a tone, where there is no Badge in the cell to borrow one from. */
+export const TONE_TEXT: Record<StatusTone, string> = {
+  ok: "text-ok",
+  warn: "text-warn",
+  danger: "text-destructive",
+  neutral: "text-muted-foreground",
+}
+
+/** Fill for a dot, bar segment or meter. */
+export const TONE_BG: Record<StatusTone, string> = {
+  ok: "bg-ok",
+  warn: "bg-warn",
+  danger: "bg-destructive",
+  neutral: "bg-muted-foreground",
+}
+
+/**
+ * The same four signals as a raw colour value, for SVG `fill`/`stroke` and CSS gradients, which
+ * cannot take a Tailwind class. Charts resolve their colour through here rather than naming a
+ * token directly, so a series and the badge beside it cannot disagree.
+ */
+export const TONE_VAR: Record<StatusTone, string> = {
+  ok: "var(--ok)",
+  warn: "var(--warn)",
+  danger: "var(--destructive)",
+  neutral: "var(--muted-foreground)",
 }
 
 export function Badge({
@@ -55,6 +90,31 @@ export function Badge({
       )}
     >
       {children}
+    </span>
+  )
+}
+
+/** Decorative: whatever names the status in words sits beside it, never replaced by the colour. */
+export function StatusDot({
+  tone,
+  pulse = false,
+  className,
+}: {
+  tone: StatusTone
+  pulse?: boolean
+  className?: string
+}) {
+  return (
+    <span className={cn("relative flex shrink-0", className ?? "size-2")} aria-hidden="true">
+      {pulse ? (
+        <span
+          className={cn(
+            "absolute inline-flex h-full w-full animate-ping rounded-full opacity-60",
+            TONE_BG[tone],
+          )}
+        />
+      ) : null}
+      <span className={cn("relative inline-flex h-full w-full rounded-full", TONE_BG[tone])} />
     </span>
   )
 }

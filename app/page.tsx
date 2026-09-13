@@ -29,8 +29,8 @@ export default function Page() {
 
           <p className="max-w-[62ch] text-sm leading-relaxed text-muted-foreground text-pretty">
             The community pool behind ArchiveTune’s multi-source playback. Health-checked every
-            half hour, credentials encrypted end-to-end, and the feed is never public — request a
-            free API key with an account.
+            hour, credentials encrypted end-to-end, and the feed is never public — request a free
+            API key with an account.
           </p>
 
           <div className="mt-1 flex flex-wrap items-center gap-2">

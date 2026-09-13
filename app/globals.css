@@ -35,8 +35,12 @@
 }
 
 /*
- * One theme, achromatic. `layout.tsx` hardcodes class="dark" on <html>, so this is the only
- * block that ever renders.
+ * Two themes, both achromatic. `layout.tsx` puts class="dark" on <html> and a blocking script
+ * removes it for a reader who chose light, so dark stays the default (including with JavaScript
+ * off) and neither theme flashes the other on first paint. See docs/DASHBOARD.md, "Theme".
+ *
+ * Nothing outside these two blocks may name a colour. A raw `bg-amber-500/15` reads as amber in
+ * both themes, which is how the old status chips ended up unreadable on a light surface.
  *
  * Deliberately pure gray (chroma 0) rather than the cool hue-255 tint this file used to carry:
  * any residual hue competes with the only saturated colours on the page, which are the ok / warn
@@ -46,6 +50,40 @@
  * Surfaces are stacked by lightness (background → card → secondary), never by shadow, so the
  * page stays legible at any window size and in a screenshot.
  */
+:root {
+  color-scheme: light;
+  /* Same surface ladder as dark, inverted: the page is a step below the panels rather than a step
+     above them, so a stack of panels still separates without a shadow. */
+  --background: oklch(0.97 0 0);
+  --foreground: oklch(0.2 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.2 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.2 0 0);
+  --primary: oklch(0.21 0 0);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.94 0 0);
+  --secondary-foreground: oklch(0.21 0 0);
+  --muted: oklch(0.94 0 0);
+  --muted-foreground: oklch(0.44 0 0);
+  --accent: oklch(0.92 0 0);
+  --accent-foreground: oklch(0.21 0 0);
+  /* Darker and slightly more saturated than their dark-theme counterparts. The same oklch(0.74)
+     green that reads as a signal on near-black fails contrast as text on near-white, and these
+     tones are used as text (uptime figures, badge labels), not only as fills. */
+  --destructive: oklch(0.53 0.2 25);
+  --ok: oklch(0.5 0.13 158);
+  --warn: oklch(0.52 0.12 75);
+  --border: oklch(0 0 0 / 12%);
+  --input: oklch(0 0 0 / 16%);
+  --ring: oklch(0.21 0 0 / 35%);
+  --radius: 0.5rem;
+  /* A top highlight only makes sense where the surface is darker than the light hitting it. On
+     white cards it is invisible at best and a smear at worst, so light opts out of edge-lit. */
+  --edge-highlight: transparent;
+  --grain-opacity: 0.016;
+}
+
 .dark {
   color-scheme: dark;
   --background: oklch(0.1 0 0);
@@ -75,6 +113,8 @@
   --input: oklch(1 0 0 / 13%);
   --ring: oklch(0.97 0 0 / 40%);
   --radius: 0.5rem;
+  --edge-highlight: oklch(1 0 0 / 6%);
+  --grain-opacity: 0.022;
 }
 
 @layer base {
@@ -176,13 +216,30 @@
     inset: 0;
     z-index: 50;
     pointer-events: none;
-    opacity: 0.022;
+    opacity: var(--grain-opacity);
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
   }
 
   /* Hairline top highlight — suggests a single light source above the surface. */
   .edge-lit {
-    box-shadow: inset 0 1px 0 0 oklch(1 0 0 / 6%);
+    box-shadow: inset 0 1px 0 0 var(--edge-highlight);
+  }
+
+  /*
+   * Diagonal stripes over a chart bar, ported from Evil Charts' hatched bar variant. Marks a
+   * period that has not finished, so a half-height column for today does not read as a collapse.
+   * Needs a positioned parent.
+   */
+  .hatched::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image: repeating-linear-gradient(
+      135deg,
+      var(--background) 0 2px,
+      transparent 2px 6px
+    );
+    opacity: 0.55;
   }
 
   /* Mono uppercase micro-label: the section eyebrow used across every panel. */

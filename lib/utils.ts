@@ -56,3 +56,33 @@ export function formatAgo(value: string | number | Date | null | undefined): str
 export function formatCount(value: number): string {
   return numberFormat.format(value)
 }
+
+/** Days out at which a declared expiry starts being called out rather than merely displayed. */
+export const EXPIRY_SOON_DAYS = 14
+
+/** Compact countdown ("in 40m", "in 6h", "in 12d", "expired"), the mirror of formatAgo. */
+export function formatUntil(value: string | number | Date | null | undefined): string {
+  const date = toDate(value)
+  if (!date) return "no expiry"
+  const seconds = Math.floor((date.getTime() - Date.now()) / 1000)
+  if (seconds <= 0) return "expired"
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `in ${Math.max(minutes, 1)}m`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `in ${hours}h`
+  return `in ${Math.floor(hours / 24)}d`
+}
+
+/**
+ * Where a declared expiry stands. `none` is not `ok`: an entry with no expiry is served forever,
+ * which is a different thing from one whose expiry is comfortably away.
+ */
+export function expiryState(
+  value: string | number | Date | null | undefined,
+): "none" | "expired" | "expiring" | "ok" {
+  const date = toDate(value)
+  if (!date) return "none"
+  const days = (date.getTime() - Date.now()) / 86_400_000
+  if (days <= 0) return "expired"
+  return days <= EXPIRY_SOON_DAYS ? "expiring" : "ok"
+}

@@ -131,11 +131,13 @@ against your database, and configure the same GitHub Actions scheduler described
 ## API
 
 Full reference (endpoints, auth, encryption format, curl examples, error codes):
-**[`docs/API.md`](docs/API.md)**.
+**[`docs/API.md`](docs/API.md)**. What the signed-in dashboard shows, and the chart/theme rules the
+UI is built from: **[`docs/DASHBOARD.md`](docs/DASHBOARD.md)**.
 
 Public (no auth, CORS-open):
 
-- `GET /api/status` — aggregate health per service/kind for the status page.
+- `GET /api/status` — aggregate health per service/kind for the status page, plus a daily
+  pass-rate history for the window `health_log` retains.
 
 Pool JSON:
 

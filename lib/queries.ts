@@ -2,7 +2,7 @@ import "server-only"
 import { and, desc, eq, sql } from "drizzle-orm"
 import { decryptAtRest, encryptForClient } from "./crypto"
 import { db } from "./db"
-import { accountEntries, apiKeyLeases, instanceEntries } from "./db/schema"
+import { accountEntries, apiKeyLeases, apiKeyRequests, apiKeys, instanceEntries } from "./db/schema"
 import { ensureSchema } from "./db/ensure"
 import { CATEGORIES, type Kind, type Service } from "./sources"
 
@@ -419,4 +419,441 @@ export async function getDiscovery(service: Service): Promise<{ streaming: strin
   // The app treats "streaming" as the preferred audio-serving list; we expose the same URLs
   // there so verified instances are tried first, and mirror them under "api".
   return { streaming: urls, api: urls }
+}
+
+/*
+ * ---------------------------------------------------------------------------------------------
+ * Dashboard reads. Everything below is for /dashboard and the status board; see docs/DASHBOARD.md.
+ * They live here so no client component ever queries a pool table, and so none of them can reach
+ * `payload` by accident: each selects its columns by name, and `payload` is never one of them.
+ * ---------------------------------------------------------------------------------------------
+ */
+
+/** One day of health-check history. `pct` is null for a day nothing was checked, not 0. */
+export interface UptimePoint {
+  day: string
+  /** Formatted server-side: an Intl format resolved in the browser would not match the SSR pass. */
+  label: string
+  checks: number
+  ok: number
+  pct: number | null
+  /** Today, still accumulating checks — charts draw it dashed rather than as a fall. */
+  partial: boolean
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+/** health_log is pruned at 30 days by the sweep, so a longer window would silently flatten out. */
+export const HISTORY_DAYS = 14
+
+function dayKey(date: Date): string {
+  return date.toISOString().slice(0, 10)
+}
+
+function dayGrid(days: number): { day: string; label: string; partial: boolean }[] {
+  const today = new Date()
+  today.setUTCHours(0, 0, 0, 0)
+  return Array.from({ length: days }, (_, i) => {
+    const date = new Date(today)
+    date.setUTCDate(date.getUTCDate() - (days - 1 - i))
+    return {
+      day: dayKey(date),
+      label: `${date.getUTCDate()} ${MONTHS[date.getUTCMonth()]}`,
+      partial: i === days - 1,
+    }
+  })
+}
+
+function toPoints(
+  buckets: Map<string, { checks: number; ok: number }>,
+  days = HISTORY_DAYS,
+): UptimePoint[] {
+  return dayGrid(days).map((slot) => {
+    const bucket = buckets.get(slot.day)
+    const checks = bucket?.checks ?? 0
+    const ok = bucket?.ok ?? 0
+    return {
+      ...slot,
+      checks,
+      ok,
+      pct: checks > 0 ? Math.round((ok / checks) * 1000) / 10 : null,
+    }
+  })
+}
+
+interface HistoryRow {
+  service: string
+  kind: string
+  day: string
+  checks: number
+  ok: number
+}
+
+/**
+ * Daily pass rate per category, joined back to the entry tables because health_log records only an
+ * entry id — ids are unique across the pair, which is what makes one join per table safe.
+ */
+async function readHistory(entryIds?: number[]): Promise<HistoryRow[]> {
+  await ensureSchema()
+  const scope =
+    entryIds === undefined
+      ? sql`true`
+      : entryIds.length === 0
+        ? sql`false`
+        : sql`h.entry_id in ${entryIds}`
+  const result = await db.execute(sql`
+    with entries as (
+      select id, service, 'account' as kind from account_entries
+      union all
+      select id, service, 'api' as kind from instance_entries
+    )
+    select e.service as service,
+           e.kind as kind,
+           to_char(date_trunc('day', h.checked_at at time zone 'utc'), 'YYYY-MM-DD') as day,
+           count(*)::int as checks,
+           count(*) filter (where h.ok)::int as ok
+    from health_log h
+    join entries e on e.id = h.entry_id
+    where h.checked_at >= now() - make_interval(days => ${HISTORY_DAYS}) and ${scope}
+    group by 1, 2, 3
+  `)
+  return (result.rows ?? []) as unknown as HistoryRow[]
+}
+
+function bucketBy(rows: HistoryRow[], match?: (row: HistoryRow) => boolean) {
+  const buckets = new Map<string, { checks: number; ok: number }>()
+  for (const row of rows) {
+    if (match && !match(row)) continue
+    const current = buckets.get(row.day) ?? { checks: 0, ok: 0 }
+    current.checks += Number(row.checks)
+    current.ok += Number(row.ok)
+    buckets.set(row.day, current)
+  }
+  return buckets
+}
+
+/** Pool-wide daily history, plus the same series split per public category. */
+export async function getPoolHistory(): Promise<{
+  overall: UptimePoint[]
+  categories: { service: Service; kind: Kind; points: UptimePoint[] }[]
+}> {
+  const rows = await readHistory()
+  return {
+    overall: toPoints(bucketBy(rows)),
+    categories: CATEGORIES.map((cat) => ({
+      service: cat.service,
+      kind: cat.kind,
+      points: toPoints(bucketBy(rows, (r) => r.service === cat.service && r.kind === cat.kind)),
+    })),
+  }
+}
+
+/** A read key the signed-in user owns. No hash, ever — only the prefix is renderable. */
+export interface DashboardKey {
+  id: number
+  name: string
+  reason: string
+  prefix: string
+  revoked: boolean
+  useCount: number
+  lastUsedAt: string | null
+  createdAt: string
+  /** Account entries this key is currently sticky on. See docs/LEASE_RESEARCH.md. */
+  heldEntries: number
+}
+
+export interface DashboardRequest {
+  id: number
+  subject: string
+  reason: string
+  status: string
+  reviewNote: string
+  resultingKeyId: number | null
+  createdAt: string
+  reviewedAt: string | null
+}
+
+/** An entry one of the user's keys is holding. Masked label only; the payload is never selected. */
+export interface DashboardLease {
+  keyId: number
+  keyName: string
+  entryId: number
+  service: string
+  label: string
+  status: string
+  premium: boolean
+  leasedAt: string
+  expiresAt: string | null
+  lastCheckedAt: string | null
+}
+
+export interface DashboardContribution {
+  id: number
+  kind: Kind
+  service: string
+  label: string
+  status: string
+  premium: boolean
+  disabled: boolean
+  removed: boolean
+  expiresAt: string | null
+  lastCheckedAt: string | null
+  latencyMs: number | null
+  checkCount: number
+  okCount: number
+  uptimePct: number | null
+  createdAt: string
+}
+
+export interface DashboardSnapshot {
+  keys: DashboardKey[]
+  requests: DashboardRequest[]
+  leases: DashboardLease[]
+  contributions: DashboardContribution[]
+  /** Daily pass rate across the user's own contributions. Empty when they have none. */
+  contributionHistory: UptimePoint[]
+  pool: CategoryStatus[]
+  poolHistory: UptimePoint[]
+  /** Which sections failed to load, so the page can say so instead of rendering a confident zero. */
+  failed: string[]
+}
+
+const iso = (value: Date | string | null | undefined): string | null =>
+  value == null ? null : new Date(value).toISOString()
+
+/**
+ * A dashboard section that cannot load must degrade to "unavailable" rather than 500 the page: a
+ * reader whose history query timed out still needs the keys panel to revoke a leaked key.
+ */
+async function section<T>(name: string, load: () => Promise<T>, fallback: T, failed: string[]) {
+  try {
+    return await load()
+  } catch (err) {
+    console.error(`[dashboard] ${name} failed:`, err)
+    failed.push(name)
+    return fallback
+  }
+}
+
+/**
+ * Everything /dashboard renders, in one server-side read.
+ *
+ * [username] is the contributor credit, which is how an entry is tied back to a person at all —
+ * the pool tables deliberately hold no user id (docs/SCHEMA.md). Anonymous contributions therefore
+ * cannot appear here, and that is the contributor's choice being honoured, not a gap.
+ */
+export async function getDashboard(userId: number, username: string): Promise<DashboardSnapshot> {
+  await ensureSchema()
+  const failed: string[] = []
+
+  const [keyRows, requestRows, leaseRows, accountRows, instanceRows, pool, poolHistory] =
+    await Promise.all([
+      section(
+        "keys",
+        () =>
+          db
+            .select({
+              id: apiKeys.id,
+              name: apiKeys.name,
+              reason: apiKeys.reason,
+              prefix: apiKeys.prefix,
+              revoked: apiKeys.revoked,
+              useCount: apiKeys.useCount,
+              lastUsedAt: apiKeys.lastUsedAt,
+              createdAt: apiKeys.createdAt,
+            })
+            .from(apiKeys)
+            .where(and(eq(apiKeys.userId, userId), eq(apiKeys.deleted, false)))
+            .orderBy(desc(apiKeys.createdAt)),
+        [],
+        failed,
+      ),
+      section(
+        "requests",
+        () =>
+          db
+            .select({
+              id: apiKeyRequests.id,
+              subject: apiKeyRequests.subject,
+              reason: apiKeyRequests.reason,
+              status: apiKeyRequests.status,
+              reviewNote: apiKeyRequests.reviewNote,
+              resultingKeyId: apiKeyRequests.resultingKeyId,
+              createdAt: apiKeyRequests.createdAt,
+              reviewedAt: apiKeyRequests.reviewedAt,
+            })
+            .from(apiKeyRequests)
+            .where(eq(apiKeyRequests.userId, userId))
+            .orderBy(desc(apiKeyRequests.createdAt)),
+        [],
+        failed,
+      ),
+      section(
+        "leases",
+        () =>
+          db
+            .select({
+              keyId: apiKeyLeases.keyId,
+              keyName: apiKeys.name,
+              entryId: accountEntries.id,
+              service: accountEntries.service,
+              label: accountEntries.label,
+              status: accountEntries.status,
+              premium: accountEntries.premium,
+              disabled: accountEntries.disabled,
+              leasedAt: apiKeyLeases.leasedAt,
+              expiresAt: accountEntries.expiresAt,
+              lastCheckedAt: accountEntries.lastCheckedAt,
+            })
+            .from(apiKeyLeases)
+            .innerJoin(apiKeys, eq(apiKeys.id, apiKeyLeases.keyId))
+            .innerJoin(accountEntries, eq(accountEntries.id, apiKeyLeases.entryId))
+            .where(
+              and(
+                eq(apiKeys.userId, userId),
+                eq(apiKeys.deleted, false),
+                // Expired lease rows are left behind deliberately (recordKeyLeases upserts rather
+                // than prunes), so the TTL has to be applied on read or the panel shows holds the
+                // pool would no longer honour.
+                sql`${apiKeyLeases.leasedAt} > now() - make_interval(hours => ${LEASE_TTL_HOURS})`,
+              ),
+            )
+            .orderBy(desc(apiKeyLeases.leasedAt)),
+        [],
+        failed,
+      ),
+      section(
+        "contributions",
+        () =>
+          db
+            .select({
+              id: accountEntries.id,
+              service: accountEntries.service,
+              label: accountEntries.label,
+              status: accountEntries.status,
+              premium: accountEntries.premium,
+              disabled: accountEntries.disabled,
+              removed: accountEntries.removed,
+              expiresAt: accountEntries.expiresAt,
+              lastCheckedAt: accountEntries.lastCheckedAt,
+              latencyMs: accountEntries.latencyMs,
+              checkCount: accountEntries.checkCount,
+              okCount: accountEntries.okCount,
+              createdAt: accountEntries.createdAt,
+            })
+            .from(accountEntries)
+            .where(eq(accountEntries.contributor, username))
+            .orderBy(desc(accountEntries.createdAt)),
+        [],
+        failed,
+      ),
+      section(
+        "contributions",
+        () =>
+          db
+            .select({
+              id: instanceEntries.id,
+              service: instanceEntries.service,
+              label: instanceEntries.label,
+              status: instanceEntries.status,
+              premium: instanceEntries.premium,
+              disabled: instanceEntries.disabled,
+              removed: instanceEntries.removed,
+              expiresAt: instanceEntries.expiresAt,
+              lastCheckedAt: instanceEntries.lastCheckedAt,
+              latencyMs: instanceEntries.latencyMs,
+              checkCount: instanceEntries.checkCount,
+              okCount: instanceEntries.okCount,
+              createdAt: instanceEntries.createdAt,
+            })
+            .from(instanceEntries)
+            .where(eq(instanceEntries.contributor, username))
+            .orderBy(desc(instanceEntries.createdAt)),
+        [],
+        failed,
+      ),
+      section("pool", () => getStatus(), [], failed),
+      section("pool history", async () => (await getPoolHistory()).overall, [], failed),
+    ])
+
+  const held = new Map<number, number>()
+  for (const lease of leaseRows) held.set(lease.keyId, (held.get(lease.keyId) ?? 0) + 1)
+
+  const toContribution = (row: (typeof accountRows)[number], kind: Kind): DashboardContribution => ({
+    id: row.id,
+    kind,
+    service: row.service,
+    label: row.label,
+    status: row.status,
+    premium: row.premium,
+    disabled: row.disabled,
+    removed: row.removed,
+    expiresAt: iso(row.expiresAt),
+    lastCheckedAt: iso(row.lastCheckedAt),
+    latencyMs: row.latencyMs,
+    checkCount: row.checkCount,
+    okCount: row.okCount,
+    uptimePct: row.checkCount > 0 ? Math.round((row.okCount / row.checkCount) * 1000) / 10 : null,
+    createdAt: iso(row.createdAt)!,
+  })
+
+  const contributions = [
+    ...accountRows.map((r) => toContribution(r, "account")),
+    ...instanceRows.map((r) => toContribution(r, "api")),
+  ].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+
+  const contributionHistory = await section(
+    "contribution history",
+    async () =>
+      contributions.length === 0
+        ? []
+        : toPoints(bucketBy(await readHistory(contributions.map((c) => c.id)))),
+    [],
+    failed,
+  )
+
+  return {
+    keys: keyRows.map((k) => ({
+      id: k.id,
+      name: k.name,
+      reason: k.reason,
+      prefix: k.prefix,
+      revoked: k.revoked,
+      useCount: k.useCount,
+      lastUsedAt: iso(k.lastUsedAt),
+      createdAt: iso(k.createdAt)!,
+      heldEntries: held.get(k.id) ?? 0,
+    })),
+    requests: requestRows.map((r) => ({
+      id: r.id,
+      subject: r.subject,
+      reason: r.reason,
+      status: r.status,
+      reviewNote: r.reviewNote,
+      resultingKeyId: r.resultingKeyId,
+      createdAt: iso(r.createdAt)!,
+      reviewedAt: iso(r.reviewedAt),
+    })),
+    leases: leaseRows
+      // A disabled entry is no longer served, so listing it as "held" would be a lie the reader
+      // cannot check.
+      .filter((l) => !l.disabled)
+      .map((l) => ({
+        keyId: l.keyId,
+        keyName: l.keyName,
+        entryId: l.entryId,
+        service: l.service,
+        label: l.label,
+        status: l.status,
+        premium: l.premium,
+        leasedAt: iso(l.leasedAt)!,
+        expiresAt: iso(l.expiresAt),
+        lastCheckedAt: iso(l.lastCheckedAt),
+      })),
+    contributions,
+    contributionHistory,
+    pool,
+    poolHistory,
+    failed: Array.from(new Set(failed)),
+  }
 }
