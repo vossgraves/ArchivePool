@@ -50,15 +50,25 @@ export const metadata: Metadata = {
 }
 
 export const viewport: Viewport = {
-  colorScheme: "dark",
+  colorScheme: "dark light",
   width: "device-width",
   initialScale: 1,
   maximumScale: 5,
   viewportFit: "cover",
-  // Matches --background (oklch(0.1 0 0)) so mobile browser chrome blends into the page instead
-  // of banding. Re-sample if the token changes: this is a build-time string, not a CSS read.
-  themeColor: "#030303",
+  // Matches --background in each theme so mobile browser chrome blends into the page instead of
+  // banding. Re-sample if a token changes: these are build-time strings, not CSS reads.
+  themeColor: [
+    { media: "(prefers-color-scheme: dark)", color: "#030303" },
+    { media: "(prefers-color-scheme: light)", color: "#f5f5f5" },
+  ],
 }
+
+/**
+ * Applies the stored theme before first paint. Inline and blocking on purpose: a theme resolved
+ * after hydration renders one theme and then swaps, which is the flash every toggle exists to
+ * avoid. `dark` is on <html> already, so with JavaScript off the site stays dark as it always was.
+ */
+const THEME_SCRIPT = `try{var c=localStorage.getItem("archivepool-theme");var d=c==="dark"||(c!=="light"&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.classList.toggle("dark",d)}catch(e){}`
 
 export default function RootLayout({
   children,
@@ -66,7 +76,16 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="en" className={`dark ${geistSans.variable} ${geistMono.variable}`}>
+    // suppressHydrationWarning: THEME_SCRIPT edits this element's class list before React
+    // hydrates, which is a mismatch React would otherwise report on every load.
+    <html
+      lang="en"
+      className={`dark ${geistSans.variable} ${geistMono.variable}`}
+      suppressHydrationWarning
+    >
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
+      </head>
       <body className="grain bg-background text-foreground font-sans antialiased">
         {/* Keyboard and screen-reader users can jump past the header straight to content. */}
         <a

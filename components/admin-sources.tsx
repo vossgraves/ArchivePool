@@ -8,6 +8,7 @@ import { Panel } from "@/components/ui/panel"
 import { Badge, toneFor } from "@/components/ui/badge"
 import { Dialog } from "@/components/ui/dialog"
 import { Field } from "@/components/ui/field"
+import { Empty } from "@/components/ui/empty"
 import { Notice } from "@/components/ui/notice"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -354,13 +355,9 @@ export function AdminSources() {
       <Skeleton className="h-20" />
     </>
   ) : inCategoryCount === 0 ? (
-    <p className="rounded-md border border-dashed border-border px-4 py-8 text-center text-xs text-muted-foreground">
-      Nothing has been contributed for {category.label} yet.
-    </p>
+    <Empty>Nothing has been contributed for {category.label} yet.</Empty>
   ) : rows.length === 0 ? (
-    <p className="rounded-md border border-dashed border-border px-4 py-8 text-center text-xs text-muted-foreground">
-      No entries match this filter in {category.label}.
-    </p>
+    <Empty>No entries match this filter in {category.label}.</Empty>
   ) : (
     <ul className="flex flex-col gap-2">
       {rows.map((row) => {

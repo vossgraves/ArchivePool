@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { AnimatePresence, motion, useReducedMotion } from "motion/react"
 import { ChevronDown, Menu, X } from "lucide-react"
 import { BrandMark } from "@/components/brand-mark"
+import { ThemeToggle } from "@/components/theme-toggle"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -15,7 +16,12 @@ const NAV = [
   { href: "/submit", label: "Contribute", key: "submit" as const },
 ]
 
-export function SiteHeader({ active }: { active?: "status" | "docs" | "submit" }) {
+/** Only reachable with an account, so it joins the nav once one is known rather than 401ing. */
+const SIGNED_IN_NAV = { href: "/dashboard", label: "Dashboard", key: "dashboard" as const }
+
+type NavKey = "status" | "docs" | "submit" | "dashboard"
+
+export function SiteHeader({ active }: { active?: NavKey }) {
   const router = useRouter()
   const reduce = useReducedMotion()
   const [user, setUser] = useState<string | null>(null)
@@ -52,6 +58,8 @@ export function SiteHeader({ active }: { active?: "status" | "docs" | "submit" }
     }
   }, [menuOpen])
 
+  const items = user ? [...NAV, SIGNED_IN_NAV] : NAV
+
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" })
     setUser(null)
@@ -79,7 +87,7 @@ export function SiteHeader({ active }: { active?: "status" | "docs" | "submit" }
         <div className="flex items-center gap-1">
           {/* Desktop nav */}
           <nav aria-label="Primary" className="hidden items-center gap-1 text-sm md:flex">
-            {NAV.map((item) => {
+            {items.map((item) => {
               const isActive = active === item.key
               return (
                 <Link
@@ -112,6 +120,8 @@ export function SiteHeader({ active }: { active?: "status" | "docs" | "submit" }
               <Menu className="size-4.5" aria-hidden="true" />
             )}
           </button>
+
+          <ThemeToggle className="ml-1 hidden sm:flex" />
 
           {!loaded ? (
             <div className="ml-1 h-8 w-20 animate-pulse rounded-md bg-secondary/60" />
@@ -192,7 +202,7 @@ export function SiteHeader({ active }: { active?: "status" | "docs" | "submit" }
             className="overflow-hidden border-t border-border bg-background/95 backdrop-blur-md md:hidden"
           >
             <div className="mx-auto flex max-w-5xl flex-col gap-1 px-4 py-3">
-              {NAV.map((item) => {
+              {items.map((item) => {
                 const isActive = active === item.key
                 return (
                   <Link
@@ -211,6 +221,10 @@ export function SiteHeader({ active }: { active?: "status" | "docs" | "submit" }
                   </Link>
                 )
               })}
+              <div className="mt-1 flex items-center justify-between gap-3 border-t border-border px-3 pt-3 sm:hidden">
+                <span className="label-mono">Theme</span>
+                <ThemeToggle />
+              </div>
             </div>
           </motion.nav>
         )}

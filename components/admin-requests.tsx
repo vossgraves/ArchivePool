@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button"
 import { Panel } from "@/components/ui/panel"
 import { Badge, toneFor } from "@/components/ui/badge"
 import { Dialog } from "@/components/ui/dialog"
+import { Empty } from "@/components/ui/empty"
 import { Notice } from "@/components/ui/notice"
 import { formatDateTime } from "@/lib/utils"
 
@@ -184,9 +185,7 @@ export function AdminRequests() {
           <div className="h-24 animate-pulse rounded-md bg-secondary/60" />
         </>
       ) : visible.length === 0 ? (
-        <p className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
-          {filter === "pending" ? "Nothing waiting for review." : "No requests yet."}
-        </p>
+        <Empty>{filter === "pending" ? "Nothing waiting for review." : "No requests yet."}</Empty>
       ) : (
         visible.map((r) => {
           const busy = busyId === r.id
