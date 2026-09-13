@@ -16,7 +16,7 @@ const ENDPOINTS = [
     method: "GET",
     path: "/api/status",
     auth: "public",
-    desc: "Aggregate, credential-free health per category (alive/dead/premium counts, uptime). This is what the home page renders.",
+    desc: "Aggregate, credential-free health per category (alive/dead/premium counts, uptime) plus a daily pass-rate history for the window the health log retains. This is what the home page renders.",
   },
   {
     method: "GET",

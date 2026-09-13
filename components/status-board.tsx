@@ -1,14 +1,17 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useState } from "react"
 import Link from "next/link"
 import useSWR from "swr"
 import { motion, useReducedMotion } from "motion/react"
-import type { CategoryStatus } from "@/lib/queries"
-import { Badge, toneFor, type StatusTone } from "@/components/ui/badge"
+import type { CategoryStatus, UptimePoint } from "@/lib/queries"
+import { Badge, StatusDot, TONE_TEXT, toneFor, type StatusTone } from "@/components/ui/badge"
 import { Button, buttonVariants } from "@/components/ui/button"
+import { BarSeries, SegmentBar, Sparkline, TrendChart } from "@/components/ui/chart"
+import { Empty } from "@/components/ui/empty"
 import { Notice } from "@/components/ui/notice"
 import { Panel } from "@/components/ui/panel"
+import { Stat, useCountUp } from "@/components/ui/stat"
 import {
   Table,
   TableBody,
@@ -24,6 +27,12 @@ import { cn, formatAgo, formatCount, formatDateTime } from "@/lib/utils"
 interface StatusPayload {
   generatedAt: string
   categories: CategoryStatus[]
+  /** Added after the original payload, so an older cached response simply has no trend to draw. */
+  history?: {
+    days: number
+    overall: UptimePoint[]
+    categories: { service: string; kind: string; points: UptimePoint[] }[]
+  }
 }
 
 /** The per-category figures the board draws, as returned by getStatus(). */
@@ -49,22 +58,13 @@ async function fetcher(url: string): Promise<StatusPayload> {
  */
 const SKELETON_COUNT = 6
 
-/** Not `toneFor` alone: it answers neutral for operational/down/unknown, which would paint a
- *  working pool and an empty one identically. "degraded" is reused verbatim so the board and the
- *  admin chips can never disagree. */
-const HEALTH: Record<CategoryStatus["health"], { label: string; tone: StatusTone; dot: string }> = {
-  operational: { label: "Operational", tone: "ok", dot: "bg-ok" },
-  degraded: { label: "Degraded", tone: toneFor("degraded"), dot: "bg-warn" },
-  down: { label: "Down", tone: "danger", dot: "bg-destructive" },
-  unknown: { label: "No data", tone: "neutral", dot: "bg-border" },
-}
-
-/** Turns a tone back into a text colour, for cells with no Badge to borrow one from. */
-const TONE_TEXT: Record<StatusTone, string> = {
-  ok: "text-ok",
-  warn: "text-warn",
-  danger: "text-destructive",
-  neutral: "text-muted-foreground",
+/** Only the wording lives here. Colour comes from the shared tone map, which now answers for the
+ *  health words too, so the board and the admin chips cannot disagree about what green means. */
+const HEALTH: Record<CategoryStatus["health"], { label: string; tone: StatusTone }> = {
+  operational: { label: "Operational", tone: toneFor("operational") },
+  degraded: { label: "Degraded", tone: toneFor("degraded") },
+  down: { label: "Down", tone: toneFor("down") },
+  unknown: { label: "No data", tone: toneFor("unknown") },
 }
 
 /** The skeleton and zero-entry rows span COLUMN_COUNT, so adding one here cannot break them. */
@@ -78,6 +78,9 @@ const COLUMNS: { label: string; head: string }[] = [
   { label: "Pending", head: "text-right" },
   { label: "Dead", head: "text-right" },
   { label: "Uptime", head: "text-right" },
+  // Lifetime uptime cannot show a recovery or a slide; the sparkline beside it is the same figure
+  // per day for the window health_log keeps.
+  { label: "14d", head: "text-left" },
   { label: "Mix", head: "text-left" },
   { label: "Checked", head: "text-left" },
 ]
@@ -113,119 +116,24 @@ function sumStats(cats: CategoryStatus[]): Stats {
   )
 }
 
-/**
- * Counts up to `value`. With reduced motion the figure still returns, it just never moves.
- * Frames are cancelled on unmount and on a mid-ramp target change, so a 60s poll cannot stack
- * ramps that fight over state.
- */
-function useCountUp(value: number, animate: boolean, duration = 700) {
-  const [display, setDisplay] = useState(value)
-  // What is on screen right now. Held in a ref rather than as "the last target" so an interrupted
-  // ramp hands the next one the number the user was actually shown.
-  const drawn = useRef(value)
-
-  useEffect(() => {
-    if (!animate) {
-      drawn.current = value
-      setDisplay(value)
-      return
-    }
-    const from = drawn.current
-    if (from === value) return
-    const start = performance.now()
-    let raf = 0
-    const tick = (now: number) => {
-      const t = Math.min(1, (now - start) / duration)
-      const eased = 1 - Math.pow(1 - t, 3)
-      const next = Math.round(from + (value - from) * eased)
-      drawn.current = next
-      setDisplay(next)
-      if (t < 1) raf = requestAnimationFrame(tick)
-    }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
-  }, [value, animate, duration])
-
-  return display
+/** A pass rate is only good news above ~95%: the sweep runs hourly, so 90% is a daily failure. */
+function rateTone(pct: number | null): StatusTone {
+  if (pct === null) return "neutral"
+  return pct >= 95 ? "ok" : pct >= 80 ? "warn" : "danger"
 }
 
-/** Decorative: the word beside it carries the status, hence aria-hidden over a colour-only label. */
-function HealthDot({
-  health,
-  animate,
-  className,
-}: {
-  health: CategoryStatus["health"]
-  animate: boolean
-  className?: string
-}) {
-  return (
-    <span className={cn("relative flex shrink-0", className ?? "size-2")} aria-hidden="true">
-      {animate && health === "operational" ? (
-        <span
-          className={cn(
-            "absolute inline-flex h-full w-full animate-ping rounded-full opacity-60",
-            HEALTH[health].dot,
-          )}
-        />
-      ) : null}
-      <span className={cn("relative inline-flex h-full w-full rounded-full", HEALTH[health].dot)} />
-    </span>
-  )
+function asPoints(points: UptimePoint[] | undefined) {
+  return (points ?? []).map((p) => ({ label: p.label, value: p.pct, partial: p.partial }))
 }
 
-/**
- * Composition as one stacked bar. aria-hidden: the same figures stand as text in their own
- * columns, so this is emphasis, never the only place a number exists.
- *
- * `aliveOnly` avoids full-strength `bg-foreground` — white is the brightest token on the page, so
- * non-premium entries outshouted the green premium ones and an all-white DEGRADED row read as
- * "all good".
- */
-function SegmentBar({ stats, animate }: { stats: Stats; animate: boolean }) {
-  if (stats.total === 0) {
-    return <div className="h-1.5 w-32 rounded-full bg-secondary" aria-hidden="true" />
-  }
-  const aliveOnly = Math.max(stats.alive - stats.premium, 0)
-  const segments = [
-    { w: stats.premium / stats.total, cls: "bg-ok" },
-    { w: aliveOnly / stats.total, cls: "bg-foreground/40" },
-    { w: stats.pending / stats.total, cls: "bg-muted-foreground/30" },
-    { w: stats.dead / stats.total, cls: "bg-destructive/60" },
-  ].filter((s) => s.w > 0)
-
-  return (
-    <div
-      className="flex h-1.5 w-32 gap-px overflow-hidden rounded-full bg-secondary"
-      aria-hidden="true"
-    >
-      {segments.map((s, i) => {
-        const width = `${s.w * 100}%`
-        return (
-          <motion.div
-            key={i}
-            className={cn("h-full", s.cls)}
-            {...(animate
-              ? {
-                  initial: { width: 0 },
-                  animate: { width },
-                  transition: { duration: 0.6, delay: i * 0.06, ease: "easeOut" as const },
-                }
-              : { style: { width } })}
-          />
-        )
-      })}
-    </div>
-  )
-}
-
-function Stat({ label, value, tone }: { label: string; value: string; tone?: string }) {
-  return (
-    <div className="flex min-w-0 flex-col gap-1">
-      <span className={cn("font-mono text-lg leading-none", tone)}>{value}</span>
-      <span className="label-mono">{label}</span>
-    </div>
-  )
+/** Segments for the shared meter: one category's composition, premium first. */
+function mixSegments(stats: Stats) {
+  return [
+    { value: stats.premium, tone: "ok" as const },
+    { value: Math.max(stats.alive - stats.premium, 0), tone: "neutral" as const, muted: true },
+    { value: stats.pending, tone: "warn" as const },
+    { value: stats.dead, tone: "danger" as const },
+  ]
 }
 
 /**
@@ -249,6 +157,12 @@ export function StatusBoard({ fallback }: { fallback?: StatusPayload }) {
   const aliveCount = useCountUp(totals.alive, animate)
   const premiumCount = useCountUp(totals.premium, animate)
   const trouble = categories.filter((c) => c.health === "degraded" || c.health === "down")
+  const history = data?.history
+  const windowChecks = (history?.overall ?? []).reduce((a, p) => a + p.checks, 0)
+  const windowOk = (history?.overall ?? []).reduce((a, p) => a + p.ok, 0)
+  const windowPct = windowChecks > 0 ? Math.round((windowOk / windowChecks) * 1000) / 10 : null
+  const sparkFor = (service: string, kind: string) =>
+    history?.categories.find((c) => c.service === service && c.kind === kind)?.points
 
   /*
    * Spoken status of the board. `aria-live` belongs on the updated line and nowhere else, and that
@@ -328,7 +242,11 @@ export function StatusBoard({ fallback }: { fallback?: StatusPayload }) {
           className="flex flex-wrap items-center justify-between gap-x-8 gap-y-4 rounded-md border border-border bg-background/40 px-4 py-3.5"
         >
           <div className="flex min-w-0 items-center gap-3">
-            <HealthDot health={overall.health} animate={animate} className="size-3" />
+            <StatusDot
+              tone={HEALTH[overall.health].tone}
+              pulse={animate && overall.health === "operational"}
+              className="size-3"
+            />
             <div className="min-w-0">
               <h3 className="truncate text-sm font-medium">{overall.label}</h3>
               <p className="mt-1 truncate text-xs text-muted-foreground">
@@ -352,12 +270,12 @@ export function StatusBoard({ fallback }: { fallback?: StatusPayload }) {
                 <Stat
                   label="Premium"
                   value={formatCount(premiumCount)}
-                  tone={totals.premium > 0 ? TONE_TEXT[toneFor("alive")] : undefined}
+                  tone={totals.premium > 0 ? toneFor("alive") : undefined}
                 />
                 <Stat
                   label="Unreachable"
                   value={formatCount(totals.dead)}
-                  tone={totals.dead > 0 ? TONE_TEXT[toneFor("dead")] : undefined}
+                  tone={totals.dead > 0 ? toneFor("dead") : undefined}
                 />
               </>
             ) : (
@@ -400,6 +318,49 @@ export function StatusBoard({ fallback }: { fallback?: StatusPayload }) {
         ) : null}
       </Panel>
 
+      {history && windowChecks > 0 ? (
+        <Panel
+          label={`Uptime · last ${history.days} days`}
+          description="Scheduled checks only. A day with no bar was a day the sweep did not run, which is not the same as a day everything failed."
+          bodyClassName="grid gap-5 md:grid-cols-2"
+        >
+          <div className="flex flex-col gap-2">
+            <div className="flex items-baseline justify-between gap-3">
+              <h3 className="label-mono">Pass rate</h3>
+              <span className="font-mono text-sm">
+                {windowPct === null ? "—" : `${formatCount(windowPct)}%`}
+              </span>
+            </div>
+            <TrendChart
+              max={100}
+              maxLabel="100%"
+              tone={rateTone(windowPct)}
+              format={(n) => `${formatCount(n)}%`}
+              points={asPoints(history.overall)}
+            />
+          </div>
+          <div className="flex flex-col gap-2">
+            <div className="flex items-baseline justify-between gap-3">
+              <h3 className="label-mono">Checks per day</h3>
+              <span className="font-mono text-sm">{formatCount(windowChecks)}</span>
+            </div>
+            <BarSeries
+              format={(n) => formatCount(n)}
+              columns={history.overall.map((p) => ({
+                label: p.label,
+                partial: p.partial,
+                // Failures on top: a stack reads from the baseline up, so the anomaly has to cap
+                // the column or a bad day looks like a short one.
+                segments: [
+                  { label: "failed", value: p.checks - p.ok, tone: "danger" as const },
+                  { label: "passed", value: p.ok, tone: "ok" as const },
+                ],
+              }))}
+            />
+          </div>
+        </Panel>
+      ) : null}
+
       <Panel
         label="Pools"
         description="One row per category the public feed exposes. Total is everything the pool holds; Alive is only what it may hand to an app. Aggregate health is all that is public — entries never are."
@@ -414,7 +375,7 @@ export function StatusBoard({ fallback }: { fallback?: StatusPayload }) {
             tracking a figure back to its category across a horizontal scroll, and a highlight
             that follows the pointer is what makes that possible. It is --muted, so it stays
             achromatic and cannot be mistaken for a status. */}
-        <Table className="min-w-[56rem] text-left text-xs">
+        <Table className="min-w-[62rem] text-left text-xs">
           <TableCaption className="sr-only">
             Pool status by category: entry counts, uptime and the time of the last health check
           </TableCaption>
@@ -449,11 +410,11 @@ export function StatusBoard({ fallback }: { fallback?: StatusPayload }) {
             ) : categories.length === 0 ? (
               <TableRow className="border-0 hover:bg-transparent">
                 <TableCell colSpan={COLUMN_COUNT} className="px-4 py-3">
-                  <p className="rounded-md border border-dashed border-border px-4 py-8 text-center text-xs text-muted-foreground">
+                  <Empty>
                     {error
                       ? "Nothing to show yet — the status feed has never answered."
                       : "No pools are being tracked yet."}
-                  </p>
+                  </Empty>
                 </TableCell>
               </TableRow>
             ) : (
@@ -474,24 +435,28 @@ export function StatusBoard({ fallback }: { fallback?: StatusPayload }) {
                       // An empty category keeps its row, with the reason in words rather than
                       // a line of zeroes. Deezer and Apple Music are account-only.
                       <TableCell colSpan={COLUMN_COUNT - 1} className="px-3 py-2">
-                        <p className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
-                          No entries in this pool yet.{" "}
-                          <Link
-                            href="/submit"
-                            className={cn(
-                              buttonVariants({ variant: "outline", size: "xs" }),
-                              "mb-px inline-flex",
-                            )}
-                          >
-                            Contribute one
-                          </Link>
-                        </p>
+                        <Empty
+                          className="gap-2 px-3 py-3 sm:flex-row sm:justify-center"
+                          action={
+                            <Link
+                              href="/submit"
+                              className={cn(buttonVariants({ variant: "outline", size: "xs" }))}
+                            >
+                              Contribute one
+                            </Link>
+                          }
+                        >
+                          No entries in this pool yet.
+                        </Empty>
                       </TableCell>
                     ) : (
                       <>
                         <TableCell className={TXT_CELL}>
                           <span className="flex items-center gap-2">
-                            <HealthDot health={cat.health} animate={animate} />
+                            <StatusDot
+                              tone={HEALTH[cat.health].tone}
+                              pulse={animate && cat.health === "operational"}
+                            />
                             {/* The word, not the colour: the dot repeats it, it never replaces it. */}
                             <Badge tone={health.tone}>{health.label}</Badge>
                           </span>
@@ -527,7 +492,18 @@ export function StatusBoard({ fallback }: { fallback?: StatusPayload }) {
                           )}
                         </TableCell>
                         <TableCell className="px-3 py-3">
-                          <SegmentBar stats={cat} animate={animate} />
+                          {/* Deliberately no figure of its own: the Uptime cell to its left is the
+                              number, and this is only its shape over the retained window. */}
+                          <Sparkline
+                            className="h-6 w-16"
+                            max={100}
+                            tone={rateTone(cat.uptimePct)}
+                            points={asPoints(sparkFor(cat.service, cat.kind))}
+                            label={`${cat.label}: daily pass rate over the retained window`}
+                          />
+                        </TableCell>
+                        <TableCell className="px-3 py-3">
+                          <SegmentBar segments={mixSegments(cat)} />
                         </TableCell>
                         <TableCell className={cn(TXT_CELL, "text-muted-foreground")}>
                           <span
@@ -568,7 +544,16 @@ export function StatusBoard({ fallback }: { fallback?: StatusPayload }) {
                   <span className="sr-only">Not pooled</span>
                 </TableCell>
                 <TableCell className="px-3 py-2.5">
-                  <SegmentBar stats={totals} animate={animate} />
+                  <Sparkline
+                    className="h-6 w-16"
+                    max={100}
+                    tone={rateTone(windowPct)}
+                    points={asPoints(history?.overall)}
+                    label="All pools: daily pass rate over the retained window"
+                  />
+                </TableCell>
+                <TableCell className="px-3 py-2.5">
+                  <SegmentBar segments={mixSegments(totals)} />
                 </TableCell>
                 <TableCell className={cn(TXT_CELL, "py-2.5 text-muted-foreground")}>
                   {formatAgo(data.generatedAt)}
