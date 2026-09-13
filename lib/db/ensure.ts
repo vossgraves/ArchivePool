@@ -122,6 +122,11 @@ const STATEMENTS: string[] = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_api_key_leases_entry ON api_key_leases (entry_id)`,
 
+  // 2026-09-13: contributor-declared expiry, so a lapsed plan stops being leased on time.
+  `ALTER TABLE account_entries ADD COLUMN IF NOT EXISTS expires_at timestamptz`,
+  `ALTER TABLE instance_entries ADD COLUMN IF NOT EXISTS expires_at timestamptz`,
+  `CREATE INDEX IF NOT EXISTS idx_account_entries_expires ON account_entries (expires_at)`,
+
   // 2026-09-12: named admins and an audit trail.
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'user'`,
   `CREATE TABLE IF NOT EXISTS audit_log (

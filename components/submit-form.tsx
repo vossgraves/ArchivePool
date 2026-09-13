@@ -389,6 +389,14 @@ export function SubmitForm({ username = null }: { username?: string | null }) {
       )}
 
       <Field
+        label="Expires on"
+        name="expiresAt"
+        mono={false}
+        placeholder="2026-10-07"
+        hint="Optional. The plan's end date from the account check, as YYYY-MM-DD. Past it the entry stops being handed out — a lapsed plan usually still signs in, it just quietly drops to previews, which a health check cannot tell apart mid-cycle."
+      />
+
+      <Field
         label="Note"
         name="note"
         mono={false}

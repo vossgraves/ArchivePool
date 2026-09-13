@@ -6,6 +6,26 @@ import { isKind, isService, type Kind, type Service } from "@/lib/sources"
 import { getSessionUserId } from "@/lib/sessions"
 import { findUsernameById } from "@/lib/users"
 
+/**
+ * Parses the contributor's declared expiry. Date-only input is pinned to the end of that day in
+ * UTC, so "expires today" stays servable for the rest of the day rather than dying at midnight
+ * in whatever zone the server happens to run in. A past or unparseable date is rejected rather
+ * than silently dropped, since an entry with no expiry is treated as never expiring.
+ */
+function parseExpiry(raw: string): { value: Date | null; error: string | null } {
+  const trimmed = raw.trim()
+  if (!trimmed) return { value: null, error: null }
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(trimmed)
+  const parsed = new Date(dateOnly ? `${trimmed}T23:59:59Z` : trimmed)
+  if (Number.isNaN(parsed.getTime())) {
+    return { value: null, error: "Enter the expiry as YYYY-MM-DD, or leave it blank." }
+  }
+  if (parsed.getTime() <= Date.now()) {
+    return { value: null, error: "That expiry date has already passed." }
+  }
+  return { value: parsed, error: null }
+}
+
 export interface SubmitState {
   ok: boolean
   message: string
@@ -105,6 +125,9 @@ export async function submitSource(_prev: SubmitState, form: FormData): Promise<
   const invalid = validate(service, kind, payload)
   if (invalid) return { ok: false, message: invalid }
 
+  const expiry = parseExpiry(String(form.get("expiresAt") ?? ""))
+  if (expiry.error) return { ok: false, message: expiry.error }
+
   // Attribution is opt-in, and the form carries only a boolean — never a name. The credited
   // username is resolved from the verified session server-side, so a client cannot claim to be
   // somebody else. Logged-out or unchecked submissions stay anonymous (contributor = null).
@@ -117,7 +140,7 @@ export async function submitSource(_prev: SubmitState, form: FormData): Promise<
   // Validate immediately so the contributor gets instant feedback.
   let result
   try {
-    result = await ingestSource(service, kind, payload, { contributor })
+    result = await ingestSource(service, kind, payload, { contributor, expiresAt: expiry.value })
   } catch (e) {
     console.log("[v0] submit ingest failed:", e instanceof Error ? e.stack : e)
     return { ok: false, message: describeSaveError(e) }
