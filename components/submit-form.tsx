@@ -198,19 +198,19 @@ export function SubmitForm({ username = null }: { username?: string | null }) {
       <div className="flex flex-col gap-3">
         <span className="text-sm font-medium">Service</span>
         <Segmented
-          options={["tidal", "qobuz", "deezer", "apple-music"] as Service[]}
+          options={["tidal", "qobuz", "deezer", "apple-music", "amazon-music"] as Service[]}
           value={service}
           onChange={(next) => {
             setService(next)
-            // Deezer and Apple Music have no self-hosted instance tier, so an "api"
-            // submission is meaningless for them.
-            if (next === "deezer" || next === "apple-music") setKind("account")
+            // Deezer, Apple Music and Amazon Music have no self-hosted instance tier, so an
+            // "api" submission is meaningless for them.
+            if (next === "deezer" || next === "apple-music" || next === "amazon-music") setKind("account")
           }}
           labels={SERVICE_LABELS}
         />
       </div>
 
-      {service !== "deezer" && service !== "apple-music" && (
+      {service !== "deezer" && service !== "apple-music" && service !== "amazon-music" && (
         <div className="flex flex-col gap-3">
           <span className="text-sm font-medium">Type</span>
           <Segmented options={["api", "account"] as Kind[]} value={kind} onChange={setKind} labels={KIND_LABELS} />
@@ -301,6 +301,23 @@ export function SubmitForm({ username = null }: { username?: string | null }) {
             active subscription — full-track playback. It expires when you sign out of the web
             player, so re-submit if your token stops working. The dev (Bearer) JWT is not needed:
             apps fetch their own.
+          </p>
+        </div>
+      ) : service === "amazon-music" ? (
+        <div className="flex flex-col gap-4">
+          <Field
+            key="amazon-music-session"
+            label="Amazon session artifact"
+            name="session"
+            required
+            placeholder="Paste the saved Amazon Music web session"
+            hint="Sign in to music.amazon.com, then copy the Amazon Music session cookie value from your browser's dev tools (Application → Cookies)."
+          />
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            Amazon&apos;s Music Web API is approval-gated, so this pool cannot probe the session: the
+            entry is checked for shape only and handed out on that basis, and the app reports it dead
+            if Amazon rejects it during playback. Signing in directly in the app is the better option
+            unless you specifically want to share the account.
           </p>
         </div>
       ) : service === "deezer" ? (

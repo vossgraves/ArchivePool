@@ -1,10 +1,10 @@
 import { createHash } from "crypto"
 
-export type Service = "tidal" | "qobuz" | "deezer" | "apple-music"
+export type Service = "tidal" | "qobuz" | "deezer" | "apple-music" | "amazon-music"
 export type Kind = "api" | "account"
 export type Status = "pending" | "alive" | "preview" | "dead"
 
-export const SERVICES: Service[] = ["tidal", "qobuz", "deezer", "apple-music"]
+export const SERVICES: Service[] = ["tidal", "qobuz", "deezer", "apple-music", "amazon-music"]
 export const KINDS: Kind[] = ["api", "account"]
 
 export const SERVICE_LABELS: Record<Service, string> = {
@@ -12,6 +12,7 @@ export const SERVICE_LABELS: Record<Service, string> = {
   qobuz: "Qobuz",
   deezer: "Deezer",
   "apple-music": "Apple Music",
+  "amazon-music": "Amazon Music",
 }
 
 export const KIND_LABELS: Record<Kind, string> = {
@@ -31,10 +32,19 @@ export const CATEGORIES: { service: Service; kind: Kind; label: string }[] = [
   // Apple Music is account-only too: the credential is the personal Media-User-Token
   // (0.Ap…) from a contributor's Apple Music web session.
   { service: "apple-music", kind: "account", label: "Apple Music Account" },
+  // Amazon Music is account-only for the same reason: the credential is a personal web-session
+  // artifact, and there is no self-hosted instance tier to pool beside it.
+  { service: "amazon-music", kind: "account", label: "Amazon Music Account" },
 ]
 
 export function isService(v: unknown): v is Service {
-  return v === "tidal" || v === "qobuz" || v === "deezer" || v === "apple-music"
+  return (
+    v === "tidal" ||
+    v === "qobuz" ||
+    v === "deezer" ||
+    v === "apple-music" ||
+    v === "amazon-music"
+  )
 }
 export function isKind(v: unknown): v is Kind {
   return v === "api" || v === "account"
@@ -48,6 +58,11 @@ export function fingerprint(service: Service, kind: Kind, payload: Record<string
   } else if (service === "deezer") {
     // Deezer's credential is the ARL cookie; there is no token or username to fall back to.
     basis = String(payload.arl ?? "").trim()
+  } else if (service === "amazon-music") {
+    // Amazon's credential is the web-session artifact the app stores under `session`; it is
+    // neither a token nor a username, so it needs its own basis or every Amazon entry would
+    // fingerprint identically and collapse to one row.
+    basis = String(payload.session ?? "").trim()
   } else {
     // Prefer a token; otherwise fall back to username/password pair.
     const token = String(payload.token ?? "").trim()
@@ -86,6 +101,8 @@ export function maskLabel(service: Service, kind: Kind, payload: Record<string, 
   }
   const token = String(payload.token ?? "").trim()
   if (token) return `${svc} Account · ****${token.slice(-4)}`
+  const session = String(payload.session ?? "").trim()
+  if (session) return `${svc} Account · ****${session.slice(-4)}`
   return `${svc} Account`
 }
 

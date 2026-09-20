@@ -482,6 +482,35 @@ async function checkDeezerAccount(payload: Record<string, unknown>): Promise<Che
   }
 }
 
+/**
+ * Amazon Music accounts.
+ *
+ * There is no probe to run: Amazon's Music Web API is approval-gated, so a pool deployment cannot
+ * ask Amazon whether a session is still good. The check therefore verifies the *shape* only and
+ * accepts a well-formed entry, with the real verdict coming from the app — when a session is
+ * rejected during playback, the app reports it dead and the entry leaves rotation on the next
+ * sweep. Anything malformed is rejected here instead of being handed to every user of the pool.
+ *
+ * Do not read `alive` as "Amazon confirmed this works". It means "this is well-formed enough to
+ * hand out, and nothing has reported it dead yet".
+ */
+async function checkAmazonMusicAccount(payload: Record<string, unknown>): Promise<CheckResult> {
+  const session = String(payload.session ?? "").trim()
+  if (!session) {
+    return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: "missing session artifact" }
+  }
+  if (session.length < 16) {
+    return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: "session artifact looks truncated" }
+  }
+  return {
+    ok: true,
+    premium: payload.premium === true,
+    status: "alive",
+    latencyMs: 0,
+    detail: "unverified (shape only) — Amazon's API has no public probe; the app reports failures",
+  }
+}
+
 export async function runCheck(
   service: Service,
   kind: Kind,
@@ -492,6 +521,7 @@ export async function runCheck(
   if (service === "tidal") return checkTidalAccount(payload, entryFingerprint)
   if (service === "deezer") return checkDeezerAccount(payload)
   if (service === "apple-music") return checkAppleMusicAccount(payload)
+  if (service === "amazon-music") return checkAmazonMusicAccount(payload)
   return checkQobuzAccount(payload)
 }
 

@@ -218,6 +218,7 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
     // long-lived token would only widen the blast radius.
     deezer: group("deezer"),
     "apple-music": group("apple-music"),
+    "amazon-music": group("amazon-music"),
   }
 
   await stampLeases(leasedIds, accountEntries)
@@ -250,6 +251,8 @@ export async function leaseInstances(clientKey?: Buffer | null) {
     qobuz: group("qobuz"),
     deezer: group("deezer"),
     "apple-music": group("apple-music"),
+    // Amazon has no instance tier; the list stays empty so the shape matches the other services.
+    "amazon-music": group("amazon-music"),
   }
 
   await stampLeases(leasedIds, instanceEntries)
@@ -272,6 +275,7 @@ export async function leasePool(clientKey?: Buffer | null, keyId?: number | null
       qobuz: { apis: apis.qobuz, accounts: accounts.qobuz },
       deezer: { apis: apis.deezer, accounts: accounts.deezer },
       "apple-music": { apis: apis["apple-music"], accounts: accounts["apple-music"] },
+      "amazon-music": { apis: apis["amazon-music"], accounts: accounts["amazon-music"] },
     },
   }
 }

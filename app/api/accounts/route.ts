@@ -87,6 +87,7 @@ export async function GET(req: NextRequest) {
       qobuz: { accounts: accounts.qobuz },
       deezer: { accounts: accounts.deezer },
       "apple-music": { accounts: accounts["apple-music"] },
+      "amazon-music": { accounts: accounts["amazon-music"] },
     },
     {
       headers: {

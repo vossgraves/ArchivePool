@@ -68,6 +68,15 @@ function buildPayload(service: Service, kind: Kind, form: FormData): Record<stri
       note,
     }
   }
+  if (service === "amazon-music") {
+    // The credential is the web-session artifact, and the app stores and reads it under `session`
+    // (PoolAccountManager.parseAmazon) — not `token`, so it travels in its own field.
+    return {
+      session: String(form.get("session") ?? "").trim(),
+      premium: String(form.get("premium") ?? "") === "on" || String(form.get("premium") ?? "") === "true",
+      note,
+    }
+  }
   // qobuz account
   return {
     token: String(form.get("token") ?? "").trim(),
@@ -103,6 +112,14 @@ function validate(service: Service, kind: Kind, payload: Record<string, unknown>
     const token = String(payload.token ?? "").trim()
     if (!token) return "Apple Music submissions need a Media-User-Token."
     if (!token.startsWith("0.")) return "That doesn't look like a Media-User-Token — it should start with \"0.\"."
+    return null
+  }
+  if (service === "amazon-music") {
+    const session = String(payload.session ?? "").trim()
+    if (!session) return "Amazon Music submissions need the account session artifact."
+    // Same floor the app applies on sign-in (AmazonLoginScreen.MIN_SESSION_LENGTH): a shorter
+    // value is a paste error, and letting it in would only burn a health check and a lease slot.
+    if (session.length < 16) return "That session value looks truncated — paste the whole thing."
     return null
   }
   if (!String(payload.token ?? "").trim()) return "A token is required for account submissions."
