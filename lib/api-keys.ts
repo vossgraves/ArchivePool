@@ -105,7 +105,7 @@ export async function identifyReadKey(req: NextRequest, alwaysEnforce = false): 
     .then(() => {})
     .catch(() => {})
 
-  return { ok: true, keyId: row.id }
+  return { ok: true, keyId: row.id, scope }
 }
 
 /** Boolean-only wrapper over [identifyReadKey]. */
