@@ -183,6 +183,14 @@ In the ArchiveTune repo, set:
 The app fetches `/api/discovery/tidal` and `/api/discovery/qobuz`, merges them with any of the
 user's own instances, and health-checks before use. A blank URL/key simply disables discovery.
 
+## Go backend (optional)
+
+`server/` contains a standard-library-only Go implementation of the entire `/api/*` surface: the
+same routes, JSON shapes, status codes and headers, with Postgres reached over the raw wire protocol
+(no third-party modules). See [`server/README.md`](server/README.md) for the route-by-route parity
+checklist and run instructions. The Next app is unchanged and can keep serving the frontend while the
+Go server handles `/api/*`.
+
 ## Notes
 
 - Payloads (tokens, credentials, instance URLs) are only exposed through the pool JSON endpoints —
