@@ -113,23 +113,32 @@ func TestEncryptAtRestRequiresKeyForSensitiveFields(t *testing.T) {
 func TestTransformEncryptOnlyTouchesSensitiveStrings(t *testing.T) {
 	t.Setenv("POOL_ENCRYPTION_KEY", nodeAtRestKeyB64)
 	payload := Payload{
-		"token":        "tok",
-		"appId":        "12345",
-		"baseUrl":      "https://example.com",
-		"premium":      true,
-		"latency":      float64(12),
-		"empty":        "",
-		"note":         "hello",
-		"preEncrypted": nodeAtRestCiphertext,
+		"token":                 "tok",
+		"appId":                 "12345",
+		"session":               "sess-value",
+		"bypassToken":           "btok",
+		"turnstileJwt":          "jwt-value",
+		"turnstileJwtExpiresAt": "2026-09-20T12:00:00Z",
+		"baseUrl":               "https://example.com",
+		"premium":               true,
+		"latency":               float64(12),
+		"empty":                 "",
+		"note":                  "hello",
+		"preEncrypted":          nodeAtRestCiphertext,
 	}
 	stored, err := EncryptAtRest(payload)
 	if err != nil {
 		t.Fatalf("EncryptAtRest: %v", err)
 	}
-	for _, field := range []string{"token", "appId", "note"} {
+	for _, field := range []string{"token", "appId", "note", "session", "bypassToken", "turnstileJwt"} {
 		if !IsEncrypted(stored[field]) {
 			t.Fatalf("%s should be encrypted, got %#v", field, stored[field])
 		}
+	}
+	// A Turnstile expiry is a timestamp, not a secret: a client needs it in the clear to skip a
+	// token that is already stale.
+	if stored["turnstileJwtExpiresAt"] != "2026-09-20T12:00:00Z" {
+		t.Fatalf("turnstileJwtExpiresAt must stay readable, got %#v", stored["turnstileJwtExpiresAt"])
 	}
 	if stored["baseUrl"] != "https://example.com" {
 		t.Fatalf("baseUrl must stay readable, got %#v", stored["baseUrl"])
@@ -146,7 +155,8 @@ func TestTransformEncryptOnlyTouchesSensitiveStrings(t *testing.T) {
 	}
 
 	back := DecryptAtRest(stored)
-	if back["token"] != "tok" || back["appId"] != "12345" || back["note"] != "hello" {
+	if back["token"] != "tok" || back["appId"] != "12345" || back["note"] != "hello" ||
+		back["session"] != "sess-value" || back["bypassToken"] != "btok" || back["turnstileJwt"] != "jwt-value" {
 		t.Fatalf("round trip lost data: %#v", back)
 	}
 }

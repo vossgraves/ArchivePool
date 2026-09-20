@@ -50,6 +50,14 @@ func TestFingerprintMatchesTypeScript(t *testing.T) {
 			"b6e8a0491012f6b01600c2f1a0938fe7f582b8f244f085e851c37a1b55fbe87a",
 		},
 		{
+			// The instance tier fingerprints by URL like every other instance: the auth material on
+			// the entry (a bypass token, a Turnstile JWT) must not become part of the dedupe key, or
+			// rotating a token would insert a second row for the same instance.
+			"amazon instances hash the base URL, not the auth material",
+			ServiceAmazonMusic, KindAPI, map[string]any{"baseUrl": "HTTPS://Inst.example.com/Foo//", "bypassToken": "btok", "turnstileJwt": "jwt"},
+			"50ada1eaca9c9d347a2f49cb5011ec595432b06bce8dbc1e801ad72de49f31fc",
+		},
+		{
 			"apple music hashes the media-user-token",
 			ServiceAppleMusic, KindAccount, map[string]any{"token": "0.abc"},
 			"9e5a2200f2ba6f2b095e18961608a96f2487c412866964a02148d281495d238a",
@@ -98,6 +106,8 @@ func TestMaskLabelMatchesTypeScript(t *testing.T) {
 		{"longer usernames are elided", ServiceTidal, KindAccount, map[string]any{"username": "alice"}, "Tidal Account · al…"},
 		{"token tail", ServiceQobuz, KindAccount, map[string]any{"token": "tok12345"}, "Qobuz Account · ****2345"},
 		{"session tail", ServiceAmazonMusic, KindAccount, map[string]any{"session": "sess12345"}, "Amazon Music Account · ****2345"},
+		{"amazon instance shows its host", ServiceAmazonMusic, KindAPI, map[string]any{"baseUrl": "https://inst.example.com/", "bypassToken": "btok"}, "Amazon Music API · inst.example.com"},
+		{"amazon instance without a parseable URL", ServiceAmazonMusic, KindAPI, map[string]any{"baseUrl": ""}, "Amazon Music API"},
 		{"no identifier at all", ServiceAppleMusic, KindAccount, map[string]any{}, "Apple Music Account"},
 	}
 	for _, tc := range cases {
@@ -139,7 +149,8 @@ func TestCategoriesCoverEveryPublicCategory(t *testing.T) {
 	}{
 		{ServiceTidal, KindAPI}, {ServiceTidal, KindAccount},
 		{ServiceQobuz, KindAPI}, {ServiceQobuz, KindAccount},
-		{ServiceDeezer, KindAccount}, {ServiceAppleMusic, KindAccount}, {ServiceAmazonMusic, KindAccount},
+		{ServiceDeezer, KindAccount}, {ServiceAppleMusic, KindAccount},
+		{ServiceAmazonMusic, KindAPI}, {ServiceAmazonMusic, KindAccount},
 	}
 	if len(Categories) != len(want) {
 		t.Fatalf("expected %d categories, got %d", len(want), len(Categories))

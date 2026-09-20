@@ -261,7 +261,8 @@ export async function leaseInstances(clientKey?: Buffer | null, scope?: KeyScope
     qobuz: group("qobuz"),
     deezer: group("deezer"),
     "apple-music": group("apple-music"),
-    // Amazon has no instance tier; the list stays empty so the shape matches the other services.
+    // Amazon instances are pooled like any other: this group fills from `instance_entries` rows
+    // whose service is amazon-music (see CATEGORIES in lib/sources.ts).
     "amazon-music": group("amazon-music"),
   }
 

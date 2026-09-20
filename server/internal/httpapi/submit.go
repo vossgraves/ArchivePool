@@ -113,6 +113,20 @@ func (s *Server) submitSource(ctx context.Context, r *http.Request, form url.Val
 	return SubmitState{OK: true, Status: &status, Premium: &premium, CreditedTo: credited, Message: message}
 }
 
+// optionalAmazonAuth carries the optional Amazon instance auth material onto an instance OR account
+// payload: the operator's long-lived `bypassToken` and/or a pre-minted Cloudflare Turnstile
+// `turnstileJwt` with the moment it expires. Blank fields are omitted, never sent as "", so an
+// Amazon payload written before this existed keeps its exact shape. The two tokens are credentials
+// and are encrypted like every other one; the expiry is a plain timestamp and stays readable.
+func optionalAmazonAuth(payload map[string]any, form url.Values) map[string]any {
+	for _, field := range []string{"bypassToken", "turnstileJwt", "turnstileJwtExpiresAt"} {
+		if value := trimString(form.Get(field)); value != "" {
+			payload[field] = value
+		}
+	}
+	return payload
+}
+
 // buildSubmitPayload mirrors buildPayload: absent optional fields are omitted, never sent as "".
 func buildSubmitPayload(service pool.Service, kind pool.Kind, form url.Values) map[string]any {
 	note := trimString(form.Get("note"))
@@ -133,6 +147,9 @@ func buildSubmitPayload(service pool.Service, kind pool.Kind, form url.Values) m
 		payload := map[string]any{"baseUrl": trimString(form.Get("baseUrl"))}
 		payload = optional(payload, "healthPath", form.Get("healthPath"))
 		payload = optional(payload, "probeUrl", form.Get("probeUrl"))
+		if service == pool.ServiceAmazonMusic {
+			payload = optionalAmazonAuth(payload, form)
+		}
 		return withNote(payload)
 	}
 	switch service {
@@ -150,12 +167,14 @@ func buildSubmitPayload(service pool.Service, kind pool.Kind, form url.Values) m
 		return withNote(map[string]any{"token": trimString(form.Get("token"))})
 	case pool.ServiceAmazonMusic:
 		// The credential is the web-session artifact, and the app stores and reads it under `session`
-		// — not `token`, so it travels in its own field.
+		// — not `token`, so it travels in its own field. The optional instance auth material rides
+		// along, so one submission can carry both the account and the instance token it is used with.
 		raw := form.Get("premium")
-		return withNote(map[string]any{
+		payload := map[string]any{
 			"session": trimString(form.Get("session")),
 			"premium": raw == "on" || raw == "true",
-		})
+		}
+		return withNote(optionalAmazonAuth(payload, form))
 	default:
 		payload := map[string]any{
 			"token":     trimString(form.Get("token")),
@@ -172,7 +191,10 @@ func validateSubmit(service pool.Service, kind pool.Kind, payload map[string]any
 	if kind == pool.KindAPI {
 		raw := payloadString(payload, "baseUrl")
 		parsed, err := url.Parse(raw)
-		if err != nil {
+		// url.Parse returns a nil URL alongside its error (e.g. for "%zz"), so the error has to be
+		// handled before the scheme is read: dereferencing it panicked the handler on a hand-crafted
+		// baseUrl.
+		if err != nil || parsed == nil {
 			return "Enter a valid base URL (including https://)."
 		}
 		if parsed.Scheme != "http" && parsed.Scheme != "https" {

@@ -104,6 +104,13 @@ function classify(ok: boolean, premium: boolean): Status {
   return premium ? "alive" : "preview"
 }
 
+/**
+ * The hi-res markers every instance probe looks for, whichever body it is reading. Literal `flac`
+ * matches a capability list; the `"quality"` arm matches a track or manifest field. Mirrors Go's
+ * `hiResRe`.
+ */
+const HI_RES_RE = /hi_res|hires|lossless|flac|24bit|"quality"\s*:\s*"(lossless|hi_res|hi-res)/
+
 /** Alive when the base URL answers without a server error; premium inferred from a probe. */
 async function checkApi(service: Service, payload: Record<string, unknown>): Promise<CheckResult> {
   const baseUrl = String(payload.baseUrl ?? "").trim().replace(/\/+$/, "")
@@ -126,9 +133,103 @@ async function checkApi(service: Service, payload: Record<string, unknown>): Pro
       const probeTarget = probeUrl ? (probeUrl.startsWith("http") ? probeUrl : `${baseUrl}${probeUrl.startsWith("/") ? "" : "/"}${probeUrl}`) : target
       const { res: probeRes } = await timedFetch(probeTarget)
       const text = (await probeRes.text()).slice(0, 20_000).toLowerCase()
-      premium = /hi_res|hires|lossless|flac|24bit|"quality"\s*:\s*"(lossless|hi_res|hi-res)/.test(text)
+      premium = HI_RES_RE.test(text)
     } catch {
       premium = false
+    }
+
+    return { ok: true, premium, status: classify(true, premium), latencyMs: ms, detail: `HTTP ${res.status}` }
+  } catch (e) {
+    return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: reason(e) }
+  }
+}
+
+/** Every Amazon instance serves its liveness document here unless the contributor overrides it. */
+const AMAZON_HEALTH_PATH = "/health"
+
+/**
+ * `status` values an Amazon instance uses to say it is NOT serving. Deliberately a denylist: an
+ * instance that answers its health endpoint at all is up unless it names one of these, so a new
+ * liveness word cannot silently turn every healthy instance dead. Compared with `=== true` so a
+ * status that collides with an `Object.prototype` name is not mistaken for a match.
+ */
+const AMAZON_HEALTH_ERROR_STATUSES: Record<string, true> = {
+  error: true,
+  err: true,
+  fail: true,
+  failed: true,
+  failure: true,
+  down: true,
+  dead: true,
+  unhealthy: true,
+  unavailable: true,
+  offline: true,
+  disabled: true,
+}
+
+/**
+ * Amazon Music instances.
+ *
+ * A self-hosted Amazon instance publishes its own liveness document, so unlike the Tidal/Qobuz
+ * restream check this one can ask the instance directly: `GET {baseUrl}{healthPath || "/health"}`
+ * must answer HTTP 2xx *and* a JSON object whose `status` is not an error. The generic checkApi
+ * cannot express that — it treats anything below 500 as reachable, so an instance answering
+ * `{"status":"error"}` with a 200 would be handed to every app as working.
+ *
+ * Premium comes from the same hi-res markers every other instance uses, read from `probeUrl` when
+ * one is given and from the health body otherwise. An instance that reports a bare
+ * `{"status":"ok"}` is therefore `preview`, and the pool's admission policy declines to store it —
+ * that is the existing pool-wide rule, not an Amazon-specific one, and it is what keeps a lossy
+ * instance out of a lossless pool.
+ */
+async function checkAmazonMusicInstance(payload: Record<string, unknown>): Promise<CheckResult> {
+  const baseUrl = String(payload.baseUrl ?? "").trim().replace(/\/+$/, "")
+  if (!baseUrl) return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: "missing baseUrl" }
+
+  const healthPath = String(payload.healthPath ?? "").trim() || AMAZON_HEALTH_PATH
+  const target = `${baseUrl}${healthPath.startsWith("/") ? "" : "/"}${healthPath}`
+
+  try {
+    const { res, ms } = await timedFetch(target)
+    if (res.status < 200 || res.status >= 300) {
+      return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: `HTTP ${res.status}` }
+    }
+
+    const body = (await res.text()).slice(0, 20_000)
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(body)
+    } catch {
+      return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: "health response is not JSON" }
+    }
+    const record = typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : null
+    if (!record || record.status === undefined || record.status === null) {
+      return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: "health response has no status" }
+    }
+    // Only a named status is comparable: `String(value)` would render `false` as "false" and a
+    // number as its digits, and a blank one means the instance said nothing useful.
+    const named = typeof record.status === "string" ? record.status.trim() : String(record.status)
+    if (!named) {
+      return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: "health response has an empty status" }
+    }
+    if (AMAZON_HEALTH_ERROR_STATUSES[named.toLowerCase()] === true) {
+      return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: `status: ${named}` }
+    }
+
+    let premium = HI_RES_RE.test(body.toLowerCase())
+    const probeUrl = String(payload.probeUrl ?? "").trim()
+    if (probeUrl) {
+      // Same rule as every other instance: an explicit probe replaces the health body as the
+      // capability signal, so the contributor decides what "lossless" is measured against.
+      premium = false
+      try {
+        const probeTarget = probeUrl.startsWith("http") ? probeUrl : `${baseUrl}${probeUrl.startsWith("/") ? "" : "/"}${probeUrl}`
+        const { res: probeRes } = await timedFetch(probeTarget)
+        const probeText = (await probeRes.text()).slice(0, 20_000).toLowerCase()
+        premium = HI_RES_RE.test(probeText)
+      } catch {
+        premium = false
+      }
     }
 
     return { ok: true, premium, status: classify(true, premium), latencyMs: ms, detail: `HTTP ${res.status}` }
@@ -517,6 +618,9 @@ export async function runCheck(
   payload: Record<string, unknown>,
   entryFingerprint?: string,
 ): Promise<CheckResult> {
+  // Amazon instances publish their own liveness document, so they are checked against it rather
+  // than through the generic reachability rule (see checkAmazonMusicInstance).
+  if (kind === "api" && service === "amazon-music") return checkAmazonMusicInstance(payload)
   if (kind === "api") return checkApi(service, payload)
   if (service === "tidal") return checkTidalAccount(payload, entryFingerprint)
   if (service === "deezer") return checkDeezerAccount(payload)

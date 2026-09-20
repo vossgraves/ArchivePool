@@ -51,6 +51,13 @@ var sensitiveKeys = map[string]bool{
 	"userId":        true,
 	"countryCode":   true,
 	"note":          true,
+	// Amazon Music: the account's web-session artifact (the same kind of bearer value as `token`,
+	// and previously missing from this list), plus the instance tier's operator `bypassToken` and a
+	// pre-minted Turnstile `turnstileJwt`. `turnstileJwtExpiresAt` is a timestamp, not a secret, so
+	// a client can read it to skip an already-stale token.
+	"session":      true,
+	"bypassToken":  true,
+	"turnstileJwt": true,
 }
 
 // Payload is a decrypted/encrypted credential object (a jsonb column value).

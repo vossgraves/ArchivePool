@@ -131,6 +131,39 @@ when `READ_KEYS_ENFORCED=true`), `access-control-allow-origin: *` on the feed an
 `retry-after` on 429s. Route-level auth rules (read keys with scopes, `atp_session` cookie, admin
 token/hash or admin session, `CRON_SECRET`) are identical.
 
+### Amazon Music instance tier
+
+Amazon Music gained an instance tier (`amazon-music` / `api`) beside its existing account tier. No
+route's shape changed: the instance feed still answers `{streaming, api}` with base URLs only, the
+credential feed still answers `{service: {accounts: […]}}`, and the new auth material rides inside an
+entry's `payload`, encrypted like every other credential. The rows below are the additions; every
+route row above was re-checked and stays as documented.
+
+| Item | TypeScript | Go |
+| --- | --- | --- |
+| Category (`Amazon Music API`) | `lib/sources.ts` `CATEGORIES` | `internal/pool/sources.go` `Categories` |
+| Instance health | `lib/health.ts` `checkAmazonMusicInstance` | `internal/health/health.go` `checkAmazonMusicInstance` |
+| Submit fields | `app/actions/submit.ts` (`buildPayload`/`withAmazonAuth`) | `internal/httpapi/submit.go` (`buildSubmitPayload`/`optionalAmazonAuth`) |
+| Encrypted fields | `lib/crypto.ts` `SENSITIVE_KEYS` | `internal/crypto/crypto.go` `sensitiveKeys` |
+| Tests | none — the TS side is covered by `npx tsc --noEmit` plus a throwaway `tsx` harness run against the real `lib/health.ts` | `internal/health` `TestCheckAmazonMusicInstance` / `TestRunCheckRoutesAmazonInstancesToTheirOwnProbe`, `internal/pool` fingerprint+label vectors, `internal/httpapi` `TestBuildSubmitPayload` / `TestValidateSubmitAmazon`, `internal/crypto` allowlist |
+
+Rules, identical in both implementations:
+
+* **Liveness.** `GET {baseUrl}{healthPath || "/health"}` must answer HTTP 2xx *and* a JSON object
+  whose `status` is not one of `error, err, fail, failed, failure, down, dead, unhealthy,
+  unavailable, offline, disabled` (case-insensitive). Every other instance service keeps the
+  generic "below 500 is reachable" rule, so a 200 carrying `{"status":"error"}` is still accepted
+  for Tidal/Qobuz and rejected for Amazon.
+* **Premium.** The shared hi-res markers, read from `probeUrl` when the contributor gave one and
+  from the health body otherwise — a bare `{"status":"ok"}` instance is therefore `preview`, and the
+  unchanged admission policy declines to store it.
+* **Auth material.** `bypassToken`, `turnstileJwt` and `turnstileJwtExpiresAt` are accepted (all
+  optional, blank ones omitted) on both an Amazon `api` and an Amazon `account` payload. The first
+  two are in the sensitive-field allowlist, so they are AES-256-GCM ciphertext at rest and in every
+  response; the expiry deliberately stays readable so a client can skip an already-stale token.
+* **Fingerprint.** An Amazon instance dedupes on `normalizeUrl(baseUrl)` — never on its auth
+  material, which rotates — while the Amazon account keeps deduping on `session`.
+
 ### Crypto parity
 
 | Layer | Behaviour |
@@ -140,6 +173,11 @@ token/hash or admin session, `CRON_SECRET`) are identical.
 | Client (legacy) | `POOL_CLIENT_KEY` |
 | Passwords | scrypt `N=16384, r=8, p=1, keylen=64`, stored `N:r:p:salt:hash` (hex) |
 | Sessions | `atp_session` = `<userId>.<expiresAtMs>.<base64url HMAC-SHA256>`, httpOnly, `SameSite=Lax`, `Path=/`, 30 days, `Secure` when `NODE_ENV=production` |
+
+The allowlist gained `session`, `bypassToken` and `turnstileJwt` in this change (amazon auth
+material); `turnstileJwtExpiresAt` is deliberately not on it. Before that, an Amazon account's
+`session` was the one pooled credential stored in plaintext, which the `internal/crypto` allowlist
+test now pins.
 
 ## Intentional deviations
 
@@ -196,8 +234,11 @@ Tests and what they pin:
   the category table; and live tests (`DATABASE_URL`) that execute the lease SQL — keyed/unkeyed,
   scoped/global, and the replacement query — **inside a rolled-back transaction**, so the credential
   path's SQL is verified without writing anything.
-* `internal/health` — the Amazon shape-only rules (including that `premium` must be a real boolean)
-  and every branch of `describeSaveError`'s configuration diagnosis.
+* `internal/health` — the Amazon shape-only account rules (including that `premium` must be a real
+  boolean), the Amazon instance probe against an `httptest` server (2xx + JSON `status` rules, the
+  error-status denylist, `healthPath` and `probeUrl` joining, the hi-res premium signal, and that
+  the dispatch sends Amazon instances there while every other service keeps the generic rule), and
+  every branch of `describeSaveError`'s configuration diagnosis.
 * `internal/ratelimit`, `internal/cache` — sliding-window semantics (`retry-after`, expiry,
   independence, cap) and TTL/read-through/single-flight/invalidation semantics, both with an injected
   clock.

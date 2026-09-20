@@ -158,8 +158,8 @@ func LeaseAccounts(ctx context.Context, database *db.DB, clientKey []byte, keyID
 	groups := ServiceAccounts{
 		Tidal: group(ServiceTidal),
 		Qobuz: group(ServiceQobuz),
-		// Deezer, Apple Music and Amazon Music are account-only; empty instance lists keep the
-		// response shape symmetric. Apple's dev JWT is deliberately not pooled.
+		// Deezer and Apple Music are account-only, so their instance lists stay empty and the
+		// response shape matches. Apple's dev JWT is deliberately not pooled.
 		Deezer:      group(ServiceDeezer),
 		AppleMusic:  group(ServiceAppleMusic),
 		AmazonMusic: group(ServiceAmazonMusic),
@@ -208,7 +208,8 @@ func LeaseInstances(ctx context.Context, database *db.DB, clientKey []byte, scop
 		Qobuz:      group(ServiceQobuz),
 		Deezer:     group(ServiceDeezer),
 		AppleMusic: group(ServiceAppleMusic),
-		// Amazon has no instance tier; the list stays empty so the shape matches.
+		// Amazon instances are pooled like any other: the group fills from `instance_entries`
+		// rows whose service is amazon-music (see Categories).
 		AmazonMusic: group(ServiceAmazonMusic),
 	}
 

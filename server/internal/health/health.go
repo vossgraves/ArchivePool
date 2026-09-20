@@ -82,6 +82,11 @@ var (
 // persist a rotated refresh token back onto the row it came from.
 func RunCheck(ctx context.Context, database *db.DB, service pool.Service, kind pool.Kind, payload map[string]any, entryFingerprint string) CheckResult {
 	if kind == pool.KindAPI {
+		// Amazon instances publish their own liveness document, so they are checked against it
+		// rather than through the generic reachability rule (see checkAmazonMusicInstance).
+		if service == pool.ServiceAmazonMusic {
+			return checkAmazonMusicInstance(ctx, payload)
+		}
 		return checkAPI(ctx, payload)
 	}
 	switch service {
@@ -170,6 +175,121 @@ func checkAPI(ctx context.Context, payload map[string]any) CheckResult {
 }
 
 var hiResRe = regexp.MustCompile(`hi_res|hires|lossless|flac|24bit|"quality"\s*:\s*"(lossless|hi_res|hi-res)`)
+
+// amazonHealthPath is where every Amazon instance serves its liveness document unless the
+// contributor overrides it.
+const amazonHealthPath = "/health"
+
+// amazonHealthErrorStatuses are the `status` values an Amazon instance uses to say it is NOT
+// serving. Deliberately a denylist: an instance that answers its health endpoint at all is up
+// unless it names one of these, so a new liveness word cannot silently turn every healthy
+// instance dead. Transcribed from lib/health.ts.
+var amazonHealthErrorStatuses = map[string]bool{
+	"error":       true,
+	"err":         true,
+	"fail":        true,
+	"failed":      true,
+	"failure":     true,
+	"down":        true,
+	"dead":        true,
+	"unhealthy":   true,
+	"unavailable": true,
+	"offline":     true,
+	"disabled":    true,
+}
+
+// checkAmazonMusicInstance ports lib/health.ts checkAmazonMusicInstance.
+//
+// A self-hosted Amazon instance publishes its own liveness document, so unlike the Tidal/Qobuz
+// restream check this one can ask the instance directly: `GET {baseUrl}{healthPath || "/health"}`
+// must answer HTTP 2xx *and* a JSON object whose `status` is not an error. checkAPI cannot express
+// that — it treats anything below 500 as reachable, so an instance answering
+// `{"status":"error"}` with a 200 would be handed to every app as working.
+//
+// Premium comes from the same hi-res markers every other instance uses, read from `probeUrl` when
+// one is given and from the health body otherwise, so the pool's admission rule is unchanged.
+func checkAmazonMusicInstance(ctx context.Context, payload map[string]any) CheckResult {
+	baseURL := strings.TrimRight(strings.TrimSpace(str(payload["baseUrl"])), "/")
+	if baseURL == "" {
+		return CheckResult{Status: pool.StatusDead, Detail: "missing baseUrl"}
+	}
+
+	healthPath := strings.TrimSpace(str(payload["healthPath"]))
+	if healthPath == "" {
+		healthPath = amazonHealthPath
+	}
+	sep := "/"
+	if strings.HasPrefix(healthPath, "/") {
+		sep = ""
+	}
+	target := baseURL + sep + healthPath
+
+	started := time.Now()
+	res, err := httpx.Get(ctx, target, nil, timeoutMs)
+	if err != nil {
+		return CheckResult{Status: pool.StatusDead, Detail: httpx.Reason(err)}
+	}
+	ms := int(time.Since(started).Milliseconds())
+	status := res.StatusCode
+	if status < 200 || status >= 300 {
+		_ = res.Body.Close()
+		return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: "HTTP " + strconv.Itoa(status)}
+	}
+
+	body, err := httpx.ReadLimitedText(res, 20000)
+	if err != nil {
+		return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: httpx.Reason(err)}
+	}
+	var parsed any
+	if err := json.Unmarshal([]byte(body), &parsed); err != nil {
+		return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: "health response is not JSON"}
+	}
+	// A JSON scalar (`123`, `"ok"`, `null`) parses but is no health document; the TS falls into the
+	// same branch through its `typeof parsed === "object"` guard.
+	parsedMap, isObject := parsed.(map[string]any)
+	if !isObject {
+		return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: "health response has no status"}
+	}
+	raw, ok := parsedMap["status"]
+	if !ok || raw == nil {
+		return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: "health response has no status"}
+	}
+	named := strings.TrimSpace(str(raw))
+	if named == "" {
+		return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: "health response has an empty status"}
+	}
+	if amazonHealthErrorStatuses[strings.ToLower(named)] {
+		return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: "status: " + named}
+	}
+
+	premium := hiResRe.MatchString(strings.ToLower(body))
+	if probeURL := strings.TrimSpace(str(payload["probeUrl"])); probeURL != "" {
+		// Same rule as every other instance: an explicit probe replaces the health body as the
+		// capability signal, so the contributor decides what "lossless" is measured against.
+		premium = false
+		probeTarget := probeURL
+		if !strings.HasPrefix(probeURL, "http") {
+			psep := "/"
+			if strings.HasPrefix(probeURL, "/") {
+				psep = ""
+			}
+			probeTarget = baseURL + psep + probeURL
+		}
+		if probeRes, err := httpx.Get(ctx, probeTarget, nil, timeoutMs); err == nil {
+			if text, err := httpx.ReadLimitedText(probeRes, 20000); err == nil {
+				premium = hiResRe.MatchString(strings.ToLower(text))
+			}
+		}
+	}
+
+	return CheckResult{
+		OK:        true,
+		Premium:   premium,
+		Status:    classify(true, premium),
+		LatencyMs: ms,
+		Detail:    "HTTP " + strconv.Itoa(status),
+	}
+}
 
 // isTidalRefreshToken reports whether a Tidal JWT is a refresh token rather than an access token.
 // The payload is read without verifying the signature, which is safe because the answer only decides

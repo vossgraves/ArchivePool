@@ -8,7 +8,9 @@ non-sensitive fields the server needs in the clear keep working — most importa
 
 `SENSITIVE_KEYS` in `lib/crypto.ts` is an explicit allowlist, not a heuristic. A credential field
 missing from that set is stored in plaintext, which is how `arl` and `masterSecret` have to be
-listed by name even though "it's obviously a secret".
+listed by name even though "it's obviously a secret" — as do Amazon Music's `session`,
+`bypassToken` and `turnstileJwt`. `turnstileJwtExpiresAt` is deliberately absent: it is a
+timestamp a client needs in the clear.
 
 ## Two keys
 

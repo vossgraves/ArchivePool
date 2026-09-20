@@ -35,15 +35,34 @@ export interface SubmitState {
   creditedTo?: string | null
 }
 
+/**
+ * Optional Amazon instance auth material, carried on an instance OR an account entry.
+ *
+ * An Amazon instance authenticates its callers with a Cloudflare Turnstile JWT: normally the app
+ * mints one by solving the challenge against that instance, but the pool can carry a pre-minted
+ * one (`turnstileJwt`, with `turnstileJwtExpiresAt` so a client can skip a stale one) or the
+ * instance operator's long-lived `bypassToken` instead. Every field is optional and omitted when
+ * blank, so an Amazon payload written before this existed keeps its exact shape — and the token
+ * itself is encrypted like any other credential, because it is a bearer value.
+ */
+function withAmazonAuth(payload: Record<string, unknown>, form: FormData): Record<string, unknown> {
+  for (const field of ["bypassToken", "turnstileJwt", "turnstileJwtExpiresAt"] as const) {
+    const value = String(form.get(field) ?? "").trim()
+    if (value) payload[field] = value
+  }
+  return payload
+}
+
 function buildPayload(service: Service, kind: Kind, form: FormData): Record<string, unknown> {
   const note = String(form.get("note") ?? "").trim() || undefined
   if (kind === "api") {
-    return {
+    const payload: Record<string, unknown> = {
       baseUrl: String(form.get("baseUrl") ?? "").trim(),
       healthPath: String(form.get("healthPath") ?? "").trim() || undefined,
       probeUrl: String(form.get("probeUrl") ?? "").trim() || undefined,
       note,
     }
+    return service === "amazon-music" ? withAmazonAuth(payload, form) : payload
   }
   if (service === "tidal") {
     return {
@@ -70,12 +89,17 @@ function buildPayload(service: Service, kind: Kind, form: FormData): Record<stri
   }
   if (service === "amazon-music") {
     // The credential is the web-session artifact, and the app stores and reads it under `session`
-    // (PoolAccountManager.parseAmazon) — not `token`, so it travels in its own field.
-    return {
-      session: String(form.get("session") ?? "").trim(),
-      premium: String(form.get("premium") ?? "") === "on" || String(form.get("premium") ?? "") === "true",
-      note,
-    }
+    // (PoolAccountManager.parseAmazon) — not `token`, so it travels in its own field. The optional
+    // instance auth material rides along, so one submission can carry both the account and the
+    // instance token it is used with.
+    return withAmazonAuth(
+      {
+        session: String(form.get("session") ?? "").trim(),
+        premium: String(form.get("premium") ?? "") === "on" || String(form.get("premium") ?? "") === "true",
+        note,
+      },
+      form,
+    )
   }
   // qobuz account
   return {

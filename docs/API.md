@@ -105,7 +105,8 @@ curl https://archivepool.vercel.app/api/status
 The full pool as the app consumes it. Leases **up to 3 entries per category**
 (`LEASE_PER_CATEGORY`) rather than the whole pool: selection is premium-first, then
 least-recently-leased, and the server stamps `last_leased_at` so rotation advances across
-requests. `apis` is always an empty list for Deezer (Deezer has no self-hosted instance tier).
+requests. `apis` is always an empty list for Deezer and Apple Music (neither has a self-hosted
+instance tier); Amazon Music has both an instance tier (`apis`) and an account tier.
 
 For **account** entries, this is also a sticky per-key lease: a resolved read key (its `api_keys`
 row id) keeps the same entries across repeated fetches for 72h (`LEASE_TTL_HOURS`) rather than
@@ -129,6 +130,8 @@ Account entries carry the fields the app needs per service:
 - Tidal: `token`, `refreshToken?`, `countryCode?`, `premium`
 - Qobuz: `token`, `appId`, `appSecret`, `premium`
 - Deezer: `arl`, `masterSecret?`, `premium`
+- Amazon Music: `session`, `premium`, plus `bypassToken?` and `turnstileJwt?` / `turnstileJwtExpiresAt?`
+  when the contributor pooled the instance auth material alongside the account
 
 plus `id`, `status`, `latencyMs`, `lastCheckedAt`. When `encrypted` is `true`, every
 sensitive field is ciphertext (see [Encryption](#encryption)).
@@ -166,6 +169,19 @@ Verified instance base URLs in the `{ streaming, api }` shape the ArchiveTune ap
 
 On a database failure the route degrades to an empty feed (`{ "streaming": [], "api": [] }`)
 so the app treats it as "no contributed instances" rather than crashing.
+
+### `GET /api/instances/amazon-music`
+
+Same route and shape (`GET /api/instances/{service}`, key-gated when `READ_KEYS_ENFORCED=true`),
+for Amazon Music instances. The URLs are verified differently from a Tidal/Qobuz restream: an
+Amazon instance publishes its own liveness document at `GET {baseUrl}{healthPath || "/health"}`,
+which must answer HTTP 2xx with a JSON object whose `status` is not an error value. Premium is read
+from the same hi-res markers as everywhere else — from `probeUrl` when the contributor gave one,
+otherwise from the health body.
+
+Auth material for those instances (`bypassToken`, or a pre-minted `turnstileJwt` with
+`turnstileJwtExpiresAt`) never appears in this feed: it travels on the entry and is delivered only
+through the credential feed, encrypted like every other credential.
 
 ---
 
@@ -319,6 +335,9 @@ validation server-side. The `/submit` page supports:
   an appId/token pair.
 - **Deezer accounts** — pasting an `arl` cookie.
 - **API instances** — a `baseUrl` for Tidal/Qobuz restream instances.
+- **Amazon Music instances** — a `baseUrl` verified against that instance's own `/health`
+  document, with optional instance auth material: the operator's `bypassToken`, or a pre-minted
+  `turnstileJwt` plus its `turnstileJwtExpiresAt`.
 
 Manual submissions are verified immediately; automatic sweeps re-check them on the
 schedule. `POST /api/qobuz/login` exists as a JSON route used by the submit form
@@ -330,8 +349,9 @@ and returns `400`/`401` on missing or bad credentials.
 ## Encryption
 
 Sensitive fields (`token`, `appId`, `appSecret`, `arl`, `masterSecret`, `refreshToken`,
-passwords, usernames, cookies, email, etc.) are encrypted in two independent
-AES-256-GCM layers. Keys are base64-encoded 32-byte values (`openssl rand -base64 32`).
+passwords, usernames, cookies, email, `session`, `bypassToken`, `turnstileJwt`, etc.) are
+encrypted in two independent AES-256-GCM layers. Keys are base64-encoded 32-byte values
+(`openssl rand -base64 32`).
 
 - **At rest** — `POOL_ENCRYPTION_KEY`, server-side only. Rows in `source_entries.payload`
   are ciphertext, so a database dump leaks nothing. Losing this key makes stored

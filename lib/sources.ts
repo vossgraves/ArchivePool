@@ -32,8 +32,12 @@ export const CATEGORIES: { service: Service; kind: Kind; label: string }[] = [
   // Apple Music is account-only too: the credential is the personal Media-User-Token
   // (0.Ap…) from a contributor's Apple Music web session.
   { service: "apple-music", kind: "account", label: "Apple Music Account" },
-  // Amazon Music is account-only for the same reason: the credential is a personal web-session
-  // artifact, and there is no self-hosted instance tier to pool beside it.
+  // Amazon Music has both tiers. A self-hosted instance answers `GET {baseUrl}/health`, and what
+  // it needs from the pool is auth material rather than an account: the operator's bypass token,
+  // or a Turnstile JWT minted by solving a challenge against that instance. The account tier
+  // beside it stays as it was — a personal web-session artifact — and the two are independent, so
+  // an instance can be pooled for everyone while an account is pooled only for its owner.
+  { service: "amazon-music", kind: "api", label: "Amazon Music API" },
   { service: "amazon-music", kind: "account", label: "Amazon Music Account" },
 ]
 

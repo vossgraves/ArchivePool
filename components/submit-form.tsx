@@ -53,6 +53,46 @@ function Field({
 }
 
 /**
+ * Optional Amazon instance auth material, shared by the instance and account branches: the
+ * instance operator's bypass token, and/or a pre-minted Cloudflare Turnstile JWT with the moment
+ * it expires. The app normally solves the instance's challenge itself, so an operator only fills
+ * these in when they hold one already — and the pool stores them encrypted, like every other
+ * credential.
+ */
+function AmazonInstanceAuth() {
+  return (
+    <details className="rounded-md border border-border">
+      <summary className="cursor-pointer px-3 py-2 text-sm text-muted-foreground">
+        Instance auth (optional)
+      </summary>
+      <div className="flex flex-col gap-4 border-t border-border p-3">
+        <Field
+          key="amazon-bypassToken"
+          label="Bypass token"
+          name="bypassToken"
+          placeholder="Operator-issued token"
+          hint="Skips the instance's Turnstile challenge. Long-lived; encrypted at rest like any other credential."
+        />
+        <Field
+          key="amazon-turnstileJwt"
+          label="Turnstile JWT"
+          name="turnstileJwt"
+          placeholder="Pre-minted token"
+          hint="Optional. A token you already solved the instance's challenge for; the app mints its own when this is absent."
+        />
+        <Field
+          key="amazon-turnstileJwtExpiresAt"
+          label="Turnstile JWT expires"
+          name="turnstileJwtExpiresAt"
+          placeholder="2026-09-20T12:00:00Z"
+          hint="Optional. When the token above stops working, so a client can skip it without a failed call. Not a secret."
+        />
+      </div>
+    </details>
+  )
+}
+
+/**
  * Parses a pasted Qobuz "account drop" message into the fields we need. Handles the common
  * formats seen in share messages, e.g.:
  *   Token ➠ LD3q...       (also "user_auth_token", "auth token", with :, =, or ➠/→/- separators)
@@ -202,15 +242,16 @@ export function SubmitForm({ username = null }: { username?: string | null }) {
           value={service}
           onChange={(next) => {
             setService(next)
-            // Deezer, Apple Music and Amazon Music have no self-hosted instance tier, so an
-            // "api" submission is meaningless for them.
-            if (next === "deezer" || next === "apple-music" || next === "amazon-music") setKind("account")
+            // Deezer and Apple Music have no self-hosted instance tier, so an "api" submission is
+            // meaningless for them. Amazon Music does have one — its instance answers
+            // GET {baseUrl}/health — so both kinds stay selectable there.
+            if (next === "deezer" || next === "apple-music") setKind("account")
           }}
           labels={SERVICE_LABELS}
         />
       </div>
 
-      {service !== "deezer" && service !== "apple-music" && service !== "amazon-music" && (
+      {service !== "deezer" && service !== "apple-music" && (
         <div className="flex flex-col gap-3">
           <span className="text-sm font-medium">Type</span>
           <Segmented options={["api", "account"] as Kind[]} value={kind} onChange={setKind} labels={KIND_LABELS} />
@@ -226,10 +267,15 @@ export function SubmitForm({ username = null }: { username?: string | null }) {
             name="baseUrl"
             required
             placeholder="https://instance.example.com"
-            hint="The restream / instance endpoint that resolves stream URLs."
+            hint={
+              service === "amazon-music"
+                ? "The Amazon instance base URL the app should call."
+                : "The restream / instance endpoint that resolves stream URLs."
+            }
           />
           <Field label="Health path" name="healthPath" placeholder="/health" hint="Optional path used to verify the instance is up." />
           <Field label="Premium probe URL" name="probeUrl" placeholder="/track/12345" hint="Optional. A response mentioning FLAC / hi-res marks it premium." />
+          {service === "amazon-music" ? <AmazonInstanceAuth /> : null}
         </div>
       ) : service === "tidal" ? (
         <div className="flex flex-col gap-4">
@@ -313,11 +359,14 @@ export function SubmitForm({ username = null }: { username?: string | null }) {
             placeholder="Paste the saved Amazon Music web session"
             hint="Sign in to music.amazon.com, then copy the Amazon Music session cookie value from your browser's dev tools (Application → Cookies)."
           />
+          <AmazonInstanceAuth />
           <p className="text-xs text-muted-foreground leading-relaxed">
             Amazon&apos;s Music Web API is approval-gated, so this pool cannot probe the session: the
             entry is checked for shape only and handed out on that basis, and the app reports it dead
             if Amazon rejects it during playback. Signing in directly in the app is the better option
-            unless you specifically want to share the account.
+            unless you specifically want to share the account. To pool an instance instead — a base
+            URL the app calls, with the auth material above — submit an
+            {" "}<span className="text-foreground">API / Instance</span> entry for Amazon Music.
           </p>
         </div>
       ) : service === "deezer" ? (
