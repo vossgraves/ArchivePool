@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server"
 import { identifyReadKey } from "@/lib/api-keys"
-import { readInstanceSnapshot } from "@/lib/edge-snapshot"
+import { SNAPSHOT_CACHE_CONTROL, readInstanceSnapshot } from "@/lib/edge-snapshot"
 import { getDiscovery } from "@/lib/queries"
 import { clientIp, rateLimit } from "@/lib/rate-limit"
 import { DISCOVERY_TTL_MS, cached } from "@/lib/ttl-cache"
@@ -37,7 +37,7 @@ export async function GET(req: NextRequest) {
     )
     if (snapshot) {
       return NextResponse.json(snapshot, {
-        headers: { "cache-control": "public, s-maxage=300, stale-while-revalidate=3600" },
+        headers: { "cache-control": SNAPSHOT_CACHE_CONTROL },
       })
     }
 

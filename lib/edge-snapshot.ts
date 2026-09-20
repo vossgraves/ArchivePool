@@ -80,3 +80,20 @@ export async function readInstanceSnapshot(service: Service): Promise<Discovery 
     return null
   }
 }
+
+/**
+ * Cache-Control for a snapshot answer, resolved once per deployment.
+ *
+ * Public caching is only honest while the feed is public. Vercel's CDN keys on the URL and does not
+ * vary on `Authorization`, so a response cached from a keyed request would be handed straight to the
+ * next anonymous caller — the key check would run once and then be bypassed for everyone afterwards.
+ * With READ_KEYS_ENFORCED the answer is per-key and must stay private: the snapshot still saves the
+ * database read, it just cannot also save the function invocation.
+ *
+ * A constant rather than a function because all three instance/discovery routes must agree on it;
+ * one of them diverging is the leak this exists to prevent.
+ */
+export const SNAPSHOT_CACHE_CONTROL =
+  process.env.READ_KEYS_ENFORCED === "true"
+    ? "private, no-store"
+    : "public, s-maxage=300, stale-while-revalidate=3600"
