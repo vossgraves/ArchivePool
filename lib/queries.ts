@@ -21,6 +21,12 @@ export interface CategoryStatus {
 }
 
 /** Aggregate, credential-free status for the public page. */
+/**
+ * The board's figures, read through a short TTL cache.
+ *
+ * Nothing here changes between health sweeps, but the board and any monitoring poll it far more
+ * often than that, and every miss wakes the database compute for five minutes. See lib/ttl-cache.ts.
+ */
 export async function getStatus(): Promise<CategoryStatus[]> {
   await ensureSchema()
   const accounts = await db

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { HISTORY_DAYS, getPoolHistory, getStatus, type CategoryStatus } from "@/lib/queries"
+import { STATUS_TTL_MS, cached } from "@/lib/ttl-cache"
 
 export const dynamic = "force-dynamic"
 
@@ -12,7 +13,11 @@ export async function GET() {
   // return and turns a blank board into a diagnosis.
   let categories: CategoryStatus[]
   try {
-    categories = await getStatus()
+    // Cached for a few minutes: these figures only move when a health sweep runs, while the board
+    // and any monitoring poll far more often, and every miss wakes the database compute for five
+    // minutes (lib/ttl-cache.ts). The cron route invalidates this when a sweep finishes, so the
+    // staleness is bounded by the TTL rather than by the sweep interval.
+    categories = await cached("status", STATUS_TTL_MS, getStatus)
   } catch (err) {
     console.error("[status] database unavailable:", err)
     return NextResponse.json(

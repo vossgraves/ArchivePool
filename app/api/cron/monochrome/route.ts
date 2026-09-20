@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server"
 import { isCronAuthorized as authorized } from "@/lib/admin-auth"
 import { syncMonochromeInstances } from "@/lib/monochrome"
 import { syncSpotiFlacInstances } from "@/lib/spotiflac"
+import { invalidate } from "@/lib/ttl-cache"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 60
@@ -25,6 +26,9 @@ export async function GET(req: NextRequest) {
   }))
 
   const ok = !("error" in monochrome) || !("error" in spotiflac)
+  // New instances may have been pooled; drop the cached discovery feeds so the next client sees
+  // them instead of waiting out the TTL.
+  invalidate("discovery:")
   return NextResponse.json(
     { ok, monochrome, spotiflac, ranAt: new Date().toISOString() },
     { status: ok ? 200 : 500 },

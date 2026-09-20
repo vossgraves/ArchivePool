@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server"
 import { verifyReadKey } from "@/lib/api-keys"
 import { getDiscovery } from "@/lib/queries"
+import { DISCOVERY_TTL_MS, cached } from "@/lib/ttl-cache"
 
 export const dynamic = "force-dynamic"
 
@@ -13,7 +14,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ streaming: [], api: [] }, { status: 401 })
   }
   try {
-    const data = await getDiscovery("tidal")
+    const data = await cached("discovery:tidal", DISCOVERY_TTL_MS, () => getDiscovery("tidal"))
     return NextResponse.json(data, {
       headers: { "cache-control": "private, no-store" },
     })

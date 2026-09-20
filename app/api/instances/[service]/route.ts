@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server"
 import { verifyReadKey } from "@/lib/api-keys"
 import { getDiscovery } from "@/lib/queries"
 import { isService } from "@/lib/sources"
+import { DISCOVERY_TTL_MS, cached } from "@/lib/ttl-cache"
 
 export const dynamic = "force-dynamic"
 
@@ -27,7 +28,10 @@ export async function GET(
     return NextResponse.json({ streaming: [], api: [] }, { status: 401 })
   }
   try {
-    const data = await getDiscovery(service)
+    // Cached for a few minutes. Instances only change when a sweep runs, clients poll far more
+    // often than that, and every miss wakes the database compute for five minutes — see
+    // lib/ttl-cache.ts for what that costs on the Free plan.
+    const data = await cached(`discovery:${service}`, DISCOVERY_TTL_MS, () => getDiscovery(service))
     return NextResponse.json(data, {
       headers: { "cache-control": "private, no-store" },
     })

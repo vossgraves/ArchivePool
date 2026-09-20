@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server"
 import { isCronAuthorized as authorized } from "@/lib/admin-auth"
 import { runHealthSweep } from "@/lib/health-sweep"
 import { ingestExternalSources } from "@/lib/external-sources"
+import { invalidate } from "@/lib/ttl-cache"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 60
@@ -27,5 +28,8 @@ export async function GET(req: NextRequest) {
   }
 
   const summary = await runHealthSweep()
+  // The board's figures just changed; drop the cached copy so the next reader sees this sweep
+  // rather than waiting out the TTL.
+  invalidate("status")
   return NextResponse.json({ ok: true, external, ...summary, ranAt: new Date().toISOString() })
 }
