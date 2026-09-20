@@ -45,7 +45,18 @@ type Stats = Pick<CategoryStatus, "total" | "alive" | "premium" | "dead" | "pend
  */
 async function fetcher(url: string): Promise<StatusPayload> {
   const res = await fetch(url)
-  if (!res.ok) throw new Error(`status feed responded ${res.status}`)
+  if (!res.ok) {
+    // The route reports *why* it failed — a suspended database, a rejected connection — so carry
+    // that through rather than a bare status code. "Not responding" and "the database is
+    // suspended" look identical on screen otherwise, and only one of them is actionable.
+    const detail = await res
+      .json()
+      .then((body: { detail?: string }) => body?.detail)
+      .catch(() => undefined)
+    throw new Error(
+      detail ? `status feed responded ${res.status}: ${detail}` : `status feed responded ${res.status}`,
+    )
+  }
   return (await res.json()) as StatusPayload
 }
 
@@ -116,7 +127,7 @@ function sumStats(cats: CategoryStatus[]): Stats {
   )
 }
 
-/** A pass rate is only good news above ~95%: the sweep runs hourly, so 90% is a daily failure. */
+/** A pass rate is only good news above ~95%: the sweep runs every 6 hours, so 90% is a daily failure. */
 function rateTone(pct: number | null): StatusTone {
   if (pct === null) return "neutral"
   return pct >= 95 ? "ok" : pct >= 80 ? "warn" : "danger"
@@ -147,7 +158,12 @@ export function StatusBoard({ fallback }: { fallback?: StatusPayload }) {
   const animate = !reduce
   const { data, error, isLoading, mutate } = useSWR("/api/status", fetcher, {
     fallbackData: fallback,
-    refreshInterval: 60_000,
+    // Five hours, not a minute. The figures only change when the health sweep runs (every 6 hours
+    // from the cron workflow), so a 60s poll was 1,440 requests a day for a board that changes
+    // four times — and every one of those requests touches the database, which is what spends the
+    // free tier's compute budget. The manual refresh button and the focus revalidation still give
+    // an impatient reader a fresh read on demand.
+    refreshInterval: 5 * 60 * 60 * 1000,
     revalidateOnFocus: true,
   })
 
@@ -299,7 +315,11 @@ export function StatusBoard({ fallback }: { fallback?: StatusPayload }) {
               ? `The board could not be refreshed. These are the last good figures, from ${formatDateTime(
                   data.generatedAt,
                 )}.`
-              : "The board could not be loaded — /api/status is not responding. It is retried every minute."}
+              : "The board could not be loaded."}{" "}
+            <span className="font-mono text-xs opacity-80">
+              {error instanceof Error ? error.message : "status feed unavailable"}
+            </span>{" "}
+            It retries every five hours, or hit Refresh now.
           </Notice>
         ) : null}
 

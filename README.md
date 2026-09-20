@@ -110,8 +110,13 @@ Without a scheduler nothing auto-disables dead sources, so this step is required
 once per day, and a more frequent expression there does not merely get throttled — it makes the
 deployment fail outright. Once a day is far too coarse for a pool health sweep.
 
-Use the included GitHub Actions workflows instead (`.github/workflows/health-cron.yml`, hourly, and `monochrome-cron.yml`, every 12 hours). They only `curl` a URL, so they work on any
+Use the included GitHub Actions workflows instead (`.github/workflows/health-cron.yml`, every 6 hours, and `monochrome-cron.yml`, every 12 hours). They only `curl` a URL, so they work on any
 host:
+
+The 6-hour cadence is a Neon budget decision, not a freshness one: every sweep wakes the compute
+and a wake keeps it running for its auto-suspend window, so an hourly sweep spends ~60h/month of
+the free tier's 100h before the app's own discovery traffic is counted — at which point Neon
+suspends the project and every query starts failing. See the comment in `health-cron.yml`.
 
 1. In this repo's **Settings → Secrets and variables → Actions**, add:
    - `HEALTH_URL` = your deployment's base URL (e.g. `https://archivepool.vercel.app`).

@@ -20,7 +20,7 @@ export default function Page() {
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-ok opacity-70" />
               <span className="relative inline-flex size-1.5 rounded-full bg-ok" />
             </span>
-            Checked hourly
+            Checked every 6 hours
           </span>
 
           <h1 className="max-w-3xl text-3xl font-semibold leading-[1.1] tracking-tight text-balance sm:text-4xl">
@@ -29,8 +29,8 @@ export default function Page() {
 
           <p className="max-w-[62ch] text-sm leading-relaxed text-muted-foreground text-pretty">
             The community pool behind ArchiveTune’s multi-source playback. Health-checked every
-            hour, credentials encrypted end-to-end, and the feed is never public — request a free
-            API key with an account.
+            six hours, credentials encrypted end-to-end, and the feed is never public — request a
+            free API key with an account.
           </p>
 
           <div className="mt-1 flex flex-wrap items-center gap-2">

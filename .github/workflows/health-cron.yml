@@ -15,10 +15,16 @@ name: Health check cron
 
 on:
   schedule:
-    # Every hour. GitHub cron is UTC and may run a few minutes late under load.
-    # Hourly keeps the Neon compute-wake burn low on free tier (15-min pings exhaust the
-    # 100h/month quota in ~3-4 weeks; hourly stretches it 4x).
-    - cron: "0 * * * *"
+    # Every 6 hours. GitHub cron is UTC and may run a few minutes late under load.
+    #
+    # The cadence is set by Neon's compute budget, not by how fresh the pool feels. Every sweep
+    # wakes the compute, and a wake keeps it running for its auto-suspend window (5 minutes by
+    # default), so an hourly sweep burns ~2h/day = ~60h/month of the free tier's 100h — which the
+    # app's own discovery traffic then pushes over, at which point Neon suspends the project and
+    # every query starts failing. Four sweeps a day costs ~20 minutes/day (~10h/month) and leaves
+    # real headroom for users. Lowering the project's auto-suspend window (e.g. to 1 minute) cuts
+    # the per-wake cost further; do that before ever raising this frequency again.
+    - cron: "0 */6 * * *"
   workflow_dispatch: {} # allow manual runs from the Actions tab
 
 jobs:
