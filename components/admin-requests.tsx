@@ -4,10 +4,12 @@ import { useCallback, useEffect, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Panel } from "@/components/ui/panel"
 import { Badge, toneFor } from "@/components/ui/badge"
+import { CopyButton } from "@/components/ui/copy-button"
 import { Dialog } from "@/components/ui/dialog"
 import { Empty } from "@/components/ui/empty"
 import { Notice } from "@/components/ui/notice"
-import { formatDateTime } from "@/lib/utils"
+import { isService, SERVICE_LABELS } from "@/lib/sources"
+import { cn, formatDateTime } from "@/lib/utils"
 
 interface RequestRow {
   id: number
@@ -20,6 +22,17 @@ interface RequestRow {
   createdAt: string
   reviewedAt: string | null
   username: string | null
+  // The scoped-key request columns landed after this panel, and the list route may not serialise
+  // them yet. Both spellings stay optional so the dialog simply omits the lines — rather than
+  // failing to compile — against either API build.
+  requestedService?: string | null
+  requested_service?: string | null
+  discordId?: string | null
+  discord_id?: string | null
+  telegramId?: string | null
+  telegram_id?: string | null
+  contactNote?: string | null
+  contact_note?: string | null
 }
 
 const MIN_NOTE = 10
@@ -29,6 +42,55 @@ const ERROR_COPY: Record<string, string> = {
   not_found_or_not_pending: "That request was already decided, or it no longer exists.",
   note_required: "A rejection needs a reason — the requester sees it.",
   unauthorized: "Admin token rejected. Unlock again from the top of the page.",
+}
+
+/** First non-blank value, so a free-text field that is present but empty reads as absent. */
+function firstFilled(...values: (string | null | undefined)[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim() !== "") return value
+  }
+  return null
+}
+
+/**
+ * One labelled line of the request dialog. Opaque values — ids, user agents — render as a
+ * monospace block that breaks anywhere so they cannot widen the dialog or hide behind an ellipsis,
+ * and `copy` puts the exact value on the clipboard without a text-selection dance.
+ *
+ * `null` renders nothing: the contact columns are newer than most rows, and an empty label beside
+ * a blank value is noise, not information.
+ */
+function Detail({
+  label,
+  value,
+  mono = false,
+  block = false,
+  copy = false,
+}: {
+  label: string
+  value: string | null
+  mono?: boolean
+  block?: boolean
+  copy?: boolean
+}) {
+  if (value === null) return null
+  return (
+    <div>
+      <dt className="label-mono">{label}</dt>
+      <dd className="mt-1 flex items-start gap-2">
+        <span
+          className={cn(
+            "min-w-0 flex-1 text-sm leading-relaxed text-foreground",
+            block && "whitespace-pre-wrap break-words",
+            mono && "break-all font-mono text-xs",
+          )}
+        >
+          {value}
+        </span>
+        {copy ? <CopyButton value={value} size="xs" variant="ghost" className="shrink-0" /> : null}
+      </dd>
+    </div>
+  )
 }
 
 /**
@@ -49,6 +111,7 @@ export function AdminRequests() {
   const [busyId, setBusyId] = useState<number | null>(null)
   const [filter, setFilter] = useState<"pending" | "all">("pending")
   const [rejecting, setRejecting] = useState<RequestRow | null>(null)
+  const [openRow, setOpenRow] = useState<RequestRow | null>(null)
   const [note, setNote] = useState("")
   const [noteError, setNoteError] = useState<string | null>(null)
 
@@ -147,6 +210,19 @@ export function AdminRequests() {
   const pendingCount = rows?.filter((r) => r.status === "pending").length ?? 0
   const visible = rows?.filter((r) => (filter === "pending" ? r.status === "pending" : true)) ?? []
 
+  // NULL `requested_service` means "any service", but the line is only shown once the column is
+  // actually in the payload — an older API must not imply a request had no preference.
+  const requestedSpecified =
+    openRow !== null &&
+    (openRow.requestedService !== undefined || openRow.requested_service !== undefined)
+  const requestedRaw = firstFilled(openRow?.requestedService, openRow?.requested_service)
+  const requestedLabel =
+    requestedRaw === null
+      ? "Any service"
+      : isService(requestedRaw)
+        ? SERVICE_LABELS[requestedRaw]
+        : requestedRaw
+
   return (
     <Panel
       label="Key requests"
@@ -192,9 +268,18 @@ export function AdminRequests() {
           return (
             <article
               key={r.id}
-              className="rounded-md border border-border bg-background/40 p-4 transition-colors hover:border-input"
+              className="relative rounded-md border border-border bg-background/40 p-4 transition-colors hover:border-input focus-within:border-input"
             >
-              <div className="flex flex-wrap items-start justify-between gap-3">
+              {/* Covers the card so the whole row opens the record. A sibling of the content, not
+                  a wrapper: the row already holds Accept/Deny buttons, and a button cannot legally
+                  contain another. */}
+              <button
+                type="button"
+                onClick={() => setOpenRow(r)}
+                aria-label={`Read the full request from ${r.username ?? "this user"}: ${r.subject}`}
+                className="absolute inset-0 rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+              />
+              <div className="pointer-events-none flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <h3 className="min-w-0 truncate text-sm font-medium text-foreground">
@@ -225,7 +310,7 @@ export function AdminRequests() {
                 </div>
 
                 {r.status === "pending" ? (
-                  <div className="flex shrink-0 items-center gap-2">
+                  <div className="pointer-events-auto relative z-10 flex shrink-0 items-center gap-2">
                     <Button
                       size="sm"
                       onClick={() => void decide(r, "approve")}
@@ -304,6 +389,67 @@ export function AdminRequests() {
             {noteError ?? `${note.trim().length}/${MIN_NOTE} characters minimum · ⌘↵ to send`}
           </p>
         </div>
+      </Dialog>
+
+      <Dialog
+        open={openRow !== null}
+        onClose={() => setOpenRow(null)}
+        title="Request details"
+        description={openRow ? `#${openRow.id} · ${openRow.subject}` : undefined}
+        className="max-w-lg"
+        footer={
+          <Button variant="outline" onClick={() => setOpenRow(null)}>
+            Close
+          </Button>
+        }
+      >
+        {openRow ? (
+          <dl className="flex flex-col gap-3.5">
+            <div>
+              <dt className="label-mono">Status</dt>
+              <dd className="mt-1">
+                <Badge tone={toneFor(openRow.status)}>{openRow.status}</Badge>
+              </dd>
+            </div>
+            <Detail label="Subject" value={firstFilled(openRow.subject)} block />
+            <Detail
+              label="Requester"
+              value={openRow.username ? `@${openRow.username}` : "unknown user"}
+            />
+            {requestedSpecified ? (
+              <Detail label="Requested service" value={requestedLabel} />
+            ) : null}
+            <Detail label="Reason" value={firstFilled(openRow.reason)} block />
+            <Detail
+              label="Discord ID"
+              value={firstFilled(openRow.discordId, openRow.discord_id)}
+              mono
+              copy
+            />
+            <Detail
+              label="Telegram ID"
+              value={firstFilled(openRow.telegramId, openRow.telegram_id)}
+              mono
+              copy
+            />
+            <Detail
+              label="Contact note"
+              value={firstFilled(openRow.contactNote, openRow.contact_note)}
+              block
+              copy
+            />
+            <Detail label="IP address" value={firstFilled(openRow.ipAddress)} mono copy />
+            <Detail label="User agent" value={firstFilled(openRow.userAgent)} mono copy />
+            <Detail label="Submitted" value={formatDateTime(openRow.createdAt)} />
+            <Detail
+              label="Reviewed"
+              value={openRow.reviewedAt ? formatDateTime(openRow.reviewedAt) : null}
+            />
+            {openRow.status === "rejected" && openRow.reviewNote ? (
+              <Detail label="Review note" value={firstFilled(openRow.reviewNote)} block />
+            ) : null}
+          </dl>
+        ) : null}
       </Dialog>
     </Panel>
   )

@@ -4,6 +4,7 @@ import type { NextRequest } from "next/server"
 import { db } from "@/lib/db"
 import { ensureSchema } from "@/lib/db/ensure"
 import { apiKeys, apiKeyRequests, users } from "@/lib/db/schema"
+import { isService, type Service } from "@/lib/sources"
 
 const KEY_PREFIX = "atp_"
 
@@ -44,7 +45,18 @@ export interface ReadKeyIdentity {
    * than inventing an identity — an unauthenticated caller must never be able to hold a lease.
    */
   keyId: number | null
+  /**
+   * The single service this key may read, or null for every service. null is the pre-scope
+   * behaviour, so a key minted before scoping — or a legacy/admin key — keeps working unchanged.
+   */
+  scope: KeyScope
 }
+
+/**
+ * The source a read key is restricted to. `null` means every service. Named so a caller can
+ * carry the resolved scope (identity → lease queries) without re-deriving it from the key row.
+ */
+export type KeyScope = Service | null
 
 /**
  * Validates the key and resolves its row id in one lookup, so per-key leasing needs no second
@@ -56,32 +68,34 @@ export async function identifyReadKey(req: NextRequest, alwaysEnforce = false): 
   const candidate = extractKey(req)
 
   // Gating off: allow, and skip the query entirely when nothing was presented.
-  if (!enforced && !candidate) return { ok: true, keyId: null }
+  if (!enforced && !candidate) return { ok: true, keyId: null, scope: null }
 
-  if (!candidate) return { ok: false, keyId: null }
+  if (!candidate) return { ok: false, keyId: null, scope: null }
 
   const keyHash = hashKey(candidate)
   const [row] = await db
-    .select({ id: apiKeys.id, keyHash: apiKeys.keyHash, revoked: apiKeys.revoked })
+    .select({ id: apiKeys.id, keyHash: apiKeys.keyHash, revoked: apiKeys.revoked, service: apiKeys.service })
     .from(apiKeys)
     .where(and(eq(apiKeys.keyHash, keyHash), eq(apiKeys.deleted, false)))
     .limit(1)
 
+  const scope: KeyScope = row && isService(row.service) ? row.service : null
+
   if (!enforced) {
     // Resolve the id for leasing only; skip the use_count bump, which would silently change
     // what that dashboard number counts on an unenforced deployment.
-    if (!row || row.revoked) return { ok: true, keyId: null }
+    if (!row || row.revoked) return { ok: true, keyId: null, scope: null }
     const a = Buffer.from(row.keyHash)
     const b = Buffer.from(keyHash)
-    if (a.length !== b.length || !timingSafeEqual(a, b)) return { ok: true, keyId: null }
-    return { ok: true, keyId: row.id }
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return { ok: true, keyId: null, scope: null }
+    return { ok: true, keyId: row.id, scope }
   }
 
-  if (!row || row.revoked) return { ok: false, keyId: null }
+  if (!row || row.revoked) return { ok: false, keyId: null, scope: null }
 
   const a = Buffer.from(row.keyHash)
   const b = Buffer.from(keyHash)
-  if (a.length !== b.length || !timingSafeEqual(a, b)) return { ok: false, keyId: null }
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return { ok: false, keyId: null, scope: null }
 
   // Best-effort; never block the request on it.
   void db
@@ -224,17 +238,38 @@ export async function deleteApiKey(id: number) {
 /** Cap on simultaneously active (non-revoked) keys a single account may hold. */
 export const MAX_KEYS_PER_USER = 10
 
+/** The requester's declared scope and reach details, carried onto the request row. */
+export interface KeyRequestDetails {
+  /** The single service the requester wants; null = any. */
+  requestedService: KeyScope
+  discordId: string | null
+  telegramId: string | null
+  contactNote: string | null
+}
+
 export async function createKeyRequest(
   userId: number,
   subject: string,
   reason: string,
   ip: string,
   ua: string,
+  details: KeyRequestDetails,
 ) {
   await ensureSchema()
   const [row] = await db
     .insert(apiKeyRequests)
-    .values({ userId, subject, reason, ipAddress: ip, userAgent: ua, status: "pending" })
+    .values({
+      userId,
+      subject,
+      reason,
+      ipAddress: ip,
+      userAgent: ua,
+      requestedService: details.requestedService,
+      discordId: details.discordId,
+      telegramId: details.telegramId,
+      contactNote: details.contactNote,
+      status: "pending",
+    })
     .returning({ id: apiKeyRequests.id })
   return row
 }
@@ -340,7 +375,15 @@ export async function claimApprovedKey(userId: number, requestId: number): Promi
     const { key, keyHash, prefix } = generateKey()
     const [created] = await tx
       .insert(apiKeys)
-      .values({ name: req.subject, keyHash, prefix, userId, reason: req.reason })
+      .values({
+        name: req.subject,
+        keyHash,
+        prefix,
+        userId,
+        reason: req.reason,
+        // The approved scope becomes the key's scope: what was asked for is what is granted.
+        service: req.requestedService,
+      })
       .returning({ id: apiKeys.id })
 
     await tx

@@ -7,6 +7,7 @@ import {
   listUserApiKeys,
   listUserRequests,
 } from "@/lib/api-keys"
+import { isService } from "@/lib/sources"
 
 export const dynamic = "force-dynamic"
 
@@ -29,12 +30,20 @@ export async function GET() {
   }
 }
 
-/** Request a new API key (subject + reason). Admin must approve. Limited to 1 per IP+UA. */
+/** Request a new API key (subject, reason, optional source + contact details). Admin must approve. Limited to 1 per IP+UA. */
 export async function POST(req: NextRequest) {
   const userId = await getSessionUserId()
   if (!userId) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
 
-  let body: { subject?: string; name?: string; reason?: string }
+  let body: {
+    subject?: string
+    name?: string
+    reason?: string
+    requestedService?: string | null
+    discordId?: string
+    telegramId?: string
+    contactNote?: string
+  }
   try {
     body = await req.json()
   } catch {
@@ -42,6 +51,11 @@ export async function POST(req: NextRequest) {
   }
   const subject = (body.subject ?? body.name ?? "").trim().slice(0, 64)
   const reason = (body.reason ?? "").trim().slice(0, 500)
+  // Absent or unrecognised means "any service" — the same meaning as NULL in the column.
+  const requestedService = isService(body.requestedService) ? body.requestedService : null
+  const discordId = (body.discordId ?? "").trim().slice(0, 64) || null
+  const telegramId = (body.telegramId ?? "").trim().slice(0, 64) || null
+  const contactNote = (body.contactNote ?? "").trim().slice(0, 500) || null
   if (!subject) {
     return NextResponse.json({ error: "invalid_input", detail: "Subject is required." }, { status: 400 })
   }
@@ -71,7 +85,12 @@ export async function POST(req: NextRequest) {
     )
   }
   try {
-    const created = await createKeyRequest(userId, subject, reason, ip, ua)
+    const created = await createKeyRequest(userId, subject, reason, ip, ua, {
+      requestedService,
+      discordId,
+      telegramId,
+      contactNote,
+    })
     return NextResponse.json(
       { id: created.id, status: "pending" },
       { headers: { "cache-control": "private, no-store" } },

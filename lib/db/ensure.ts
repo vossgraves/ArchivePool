@@ -25,6 +25,10 @@ const STATEMENTS: string[] = [
     ip_address       text NOT NULL DEFAULT '',
     user_agent       text NOT NULL DEFAULT '',
     resulting_key_id integer REFERENCES api_keys(id) ON DELETE SET NULL,
+    requested_service text,
+    discord_id       text,
+    telegram_id      text,
+    contact_note     text,
     review_note      text NOT NULL DEFAULT '',
     reviewed_at      timestamptz,
     reviewed_by      integer REFERENCES users(id) ON DELETE SET NULL,
@@ -112,6 +116,13 @@ const STATEMENTS: string[] = [
   `ALTER TABLE account_entries ADD COLUMN IF NOT EXISTS contributor text`,
   `ALTER TABLE instance_entries ADD COLUMN IF NOT EXISTS contributor text`,
   `ALTER TABLE api_key_requests ADD COLUMN IF NOT EXISTS review_note text NOT NULL DEFAULT ''`,
+  // 2026-09-20: a read key may be scoped to one source; NULL = every service (pre-scope behaviour).
+  // The request side also carries the requester's contact details for the admin queue.
+  `ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS service text`,
+  `ALTER TABLE api_key_requests ADD COLUMN IF NOT EXISTS requested_service text`,
+  `ALTER TABLE api_key_requests ADD COLUMN IF NOT EXISTS discord_id text`,
+  `ALTER TABLE api_key_requests ADD COLUMN IF NOT EXISTS telegram_id text`,
+  `ALTER TABLE api_key_requests ADD COLUMN IF NOT EXISTS contact_note text`,
   // 2026-09: per-key sticky leases, so one valid key can no longer walk the whole pool.
   `CREATE TABLE IF NOT EXISTS api_key_leases (
     key_id    integer NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,

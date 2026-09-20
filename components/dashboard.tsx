@@ -19,6 +19,7 @@ import { DashboardContributions } from "@/components/dashboard-contributions"
 import { DashboardPool } from "@/components/dashboard-pool"
 import { DashboardSummary } from "@/components/dashboard-summary"
 import { cn, expiryState, formatAgo, formatCount, formatDateTime, formatDay, formatUntil } from "@/lib/utils"
+import { SERVICES, SERVICE_LABELS, type Service } from "@/lib/sources"
 
 /**
  * A key the user is entitled to but has not seen yet: approved by an admin, no key minted so far.
@@ -46,6 +47,11 @@ export function Dashboard({
   const reduce = useReducedMotion()
   const [subject, setSubject] = useState("")
   const [reason, setReason] = useState("")
+  // "any" is the absence of a scope: it is sent as null and stored as NULL.
+  const [requestService, setRequestService] = useState<Service | "any">("any")
+  const [discord, setDiscord] = useState("")
+  const [telegram, setTelegram] = useState("")
+  const [contactNote, setContactNote] = useState("")
   const [formError, setFormError] = useState<string | null>(null)
   const [formOpen, setFormOpen] = useState(snapshot.keys.length === 0)
   const [creating, setCreating] = useState(false)
@@ -79,7 +85,14 @@ export function Dashboard({
       const res = await fetch("/api/keys", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ subject, reason }),
+        body: JSON.stringify({
+          subject,
+          reason,
+          requestedService: requestService === "any" ? null : requestService,
+          discordId: discord,
+          telegramId: telegram,
+          contactNote,
+        }),
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
@@ -92,6 +105,10 @@ export function Dashboard({
       })
       setSubject("")
       setReason("")
+      setRequestService("any")
+      setDiscord("")
+      setTelegram("")
+      setContactNote("")
       router.refresh()
     } finally {
       setCreating(false)
@@ -336,9 +353,31 @@ export function Dashboard({
             />
             Request {keys.length > 0 || requests.length > 0 ? "another" : "a"} key
           </summary>
-          {/* Both controls go through the shared Field, which is where the label/`aria-describedby`
-              wiring lives. `mono` is off: these are prose, not credentials. */}
+          {/* The text controls go through the shared Field, which is where the label/
+              `aria-describedby` wiring lives. `mono` is off: these are prose, not credentials. */}
           <form onSubmit={createRequest} className="flex flex-col gap-3 border-t border-border p-3.5">
+            <div className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium">Source</span>
+              <div className="inline-flex w-full flex-wrap rounded-md border border-border p-1">
+                {(["any", ...SERVICES] as const).map((opt) => (
+                  <button
+                    key={opt}
+                    type="button"
+                    onClick={() => setRequestService(opt)}
+                    className={`flex-1 whitespace-nowrap rounded px-3 py-1.5 text-sm font-medium transition-colors ${
+                      requestService === opt
+                        ? "bg-primary text-primary-foreground"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {opt === "any" ? "Any" : SERVICE_LABELS[opt]}
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs leading-relaxed text-muted-foreground text-pretty">
+                A key scoped to one source never receives another's credentials.
+              </p>
+            </div>
             <Field
               label="Subject"
               name="subject"
@@ -360,6 +399,36 @@ export function Dashboard({
               hint={`${formatCount(reason.trim().length)}/10 minimum`}
               value={reason}
               onValueChange={setReason}
+            />
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field
+                label="Discord ID"
+                name="discordId"
+                mono={false}
+                maxLength={64}
+                placeholder="Optional"
+                value={discord}
+                onValueChange={setDiscord}
+              />
+              <Field
+                label="Telegram ID"
+                name="telegramId"
+                mono={false}
+                maxLength={64}
+                placeholder="Optional"
+                value={telegram}
+                onValueChange={setTelegram}
+              />
+            </div>
+            <Field
+              label="Note"
+              name="contactNote"
+              mono={false}
+              rows={2}
+              maxLength={500}
+              placeholder="Optional — anything else the reviewer should know"
+              value={contactNote}
+              onValueChange={setContactNote}
             />
             <div className="flex justify-end">
               <Button type="submit" disabled={creating}>

@@ -5,6 +5,7 @@ import { db } from "./db"
 import { accountEntries, apiKeyLeases, apiKeyRequests, apiKeys, instanceEntries } from "./db/schema"
 import { ensureSchema } from "./db/ensure"
 import { CATEGORIES, type Kind, type Service } from "./sources"
+import type { KeyScope } from "./api-keys"
 
 export interface CategoryStatus {
   service: Service
@@ -167,9 +168,10 @@ function toLeased(
 /**
  * Leases account credentials per service: held-by-this-key first, then premium, then
  * least-recently-leased. A thin pool degrades to fewer entries rather than erroring.
- * A null [keyId] collapses this to the plain global rotation.
+ * A null [keyId] collapses this to the plain global rotation, and a null [scope] to every
+ * service — a scoped key's groups other than its own come back empty.
  */
-export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | null) {
+export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | null, scope?: KeyScope) {
   await ensureSchema()
 
   const heldByKey =
@@ -193,7 +195,9 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
     .leftJoin(apiKeyLeases, heldByKey)
     // Excluded here rather than filtered afterwards, so a key whose leased entry died is never
     // stranded on it — the slot refills from the rest of the pool.
-    .where(accountServableWhere)
+    // A scoped key's row set is narrowed in SQL too, so it cannot even load another service's
+    // credentials, let alone return them.
+    .where(and(accountServableWhere, scope == null ? undefined : eq(accountEntries.service, scope)))
     // Held entries outrank even an unheld premium one: the app has these cached, and churning
     // them costs more than the better pick gains. NULLS FIRST because Postgres defaults to
     // NULLS LAST on ASC and a never-leased entry is the least recently used. `id` makes the
@@ -233,12 +237,12 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
 }
 
 /** Kept separate from [leaseAccounts] so a caller can never receive tokens by asking for URLs. */
-export async function leaseInstances(clientKey?: Buffer | null) {
+export async function leaseInstances(clientKey?: Buffer | null, scope?: KeyScope) {
   await ensureSchema()
   const rows = await db
     .select()
     .from(instanceEntries)
-    .where(instanceServableWhere)
+    .where(and(instanceServableWhere, scope == null ? undefined : eq(instanceEntries.service, scope)))
     .orderBy(
       desc(instanceEntries.premium),
       sql`${instanceEntries.lastLeasedAt} asc nulls first`,
@@ -270,10 +274,10 @@ export async function leaseInstances(clientKey?: Buffer | null) {
  * predating the split. New clients should consume /api/accounts (tokens) and
  * /api/instances/[service] (URLs) separately.
  */
-export async function leasePool(clientKey?: Buffer | null, keyId?: number | null) {
+export async function leasePool(clientKey?: Buffer | null, keyId?: number | null, scope?: KeyScope) {
   const [{ accounts }, { apis }] = await Promise.all([
-    leaseAccounts(clientKey, keyId),
-    leaseInstances(clientKey),
+    leaseAccounts(clientKey, keyId, scope),
+    leaseInstances(clientKey, scope),
   ])
   return {
     pool: {

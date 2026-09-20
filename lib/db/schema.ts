@@ -117,6 +117,8 @@ export const apiKeys = pgTable("api_keys", {
   keyHash: text("key_hash").notNull().unique(),
   prefix: text("prefix").notNull(),
   revoked: boolean("revoked").notNull().default(false),
+  // The single service this key may read; NULL = every service (the pre-scope behaviour).
+  service: text("service"),
   // Optional one-line reason given when the key was requested (shown in the dashboard list).
   reason: text("reason").notNull().default(""),
   // Soft delete: hidden from every list (and rejected by verifyReadKey) but the row is retained.
@@ -164,6 +166,12 @@ export const apiKeyRequests = pgTable(
     ipAddress: text("ip_address").notNull().default(""),
     userAgent: text("user_agent").notNull().default(""),
     resultingKeyId: integer("resulting_key_id").references(() => apiKeys.id),
+    // What the requester asked for; NULL = any service. Copied onto the key at claim time.
+    requestedService: text("requested_service"),
+    // How to reach the requester. Optional, and shown only to the reviewing admin.
+    discordId: text("discord_id"),
+    telegramId: text("telegram_id"),
+    contactNote: text("contact_note"),
     // Shown to the requester. Empty unless rejected.
     reviewNote: text("review_note").notNull().default(""),
     reviewedAt: timestamp("reviewed_at", { withTimezone: true }),

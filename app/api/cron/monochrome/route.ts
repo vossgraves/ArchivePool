@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server"
 import { isCronAuthorized as authorized } from "@/lib/admin-auth"
+import { writeInstanceSnapshot } from "@/lib/edge-snapshot"
 import { syncMonochromeInstances } from "@/lib/monochrome"
 import { syncSpotiFlacInstances } from "@/lib/spotiflac"
 import { invalidate } from "@/lib/ttl-cache"
@@ -26,9 +27,12 @@ export async function GET(req: NextRequest) {
   }))
 
   const ok = !("error" in monochrome) || !("error" in spotiflac)
-  // New instances may have been pooled; drop the cached discovery feeds so the next client sees
-  // them instead of waiting out the TTL.
+  // Publish the servable URLs to Blob so the discovery routes can answer from it without waking
+  // the database; then drop the cached feeds (and the routes' cached snapshot lookups) so the next
+  // client sees the new instances instead of waiting out the TTL.
+  await writeInstanceSnapshot()
   invalidate("discovery:")
+  invalidate("snapshot:")
   return NextResponse.json(
     { ok, monochrome, spotiflac, ranAt: new Date().toISOString() },
     { status: ok ? 200 : 500 },

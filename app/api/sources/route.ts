@@ -62,9 +62,11 @@ export async function GET(req: NextRequest) {
 
   // Leases a few entries per category rather than returning the whole pool, so a leaked key
   // (or a baked-in build key) exposes a handful of credentials instead of every one we hold.
-  // See LEASE_PER_CATEGORY_ACCOUNT for why this is not 1.
+  // See LEASE_PER_CATEGORY_ACCOUNT for why this is not 1. `identity.scope` narrows a scoped key
+  // to its one service; the other services stay present in the response as empty `{ apis, accounts }`
+  // pairs, so the legacy shape is byte-compatible.
   const clientKey = v2 && readKey ? deriveClientKey(readKey) : null
-  const { pool } = await leasePool(clientKey, identity.keyId)
+  const { pool } = await leasePool(clientKey, identity.keyId, identity.scope)
   return NextResponse.json(
     {
       version: 1,

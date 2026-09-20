@@ -49,7 +49,11 @@ export async function GET() {
     },
     {
       headers: {
-        "cache-control": "public, s-maxage=60, stale-while-revalidate=300",
+        // Five minutes at the edge, an hour of stale-while-revalidate behind it. The figures only
+        // move when a health sweep runs (every 6 hours), so a CDN copy is as accurate as the
+        // function's own 5-minute in-process cache — and unlike that cache it costs no function
+        // invocation and no database wake at all, which is the whole point.
+        "cache-control": "public, s-maxage=300, stale-while-revalidate=3600",
         "access-control-allow-origin": "*",
       },
     },

@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
   revoked      boolean NOT NULL DEFAULT false,
   last_used_at timestamptz,
   use_count    integer NOT NULL DEFAULT 0,
+  service      text,                                  -- NULL = every service; else the one this key may read
   created_at   timestamptz NOT NULL DEFAULT now()
 );
 
@@ -131,6 +132,10 @@ CREATE TABLE IF NOT EXISTS api_key_requests (
   ip_address       text NOT NULL DEFAULT '',
   user_agent       text NOT NULL DEFAULT '',
   resulting_key_id integer REFERENCES api_keys(id) ON DELETE SET NULL,
+  requested_service text,                              -- NULL = any service; else the one requested
+  discord_id        text,                             -- how to reach the requester; optional
+  telegram_id       text,
+  contact_note      text,
   reviewed_at      timestamptz,
   reviewed_by      integer REFERENCES users(id) ON DELETE SET NULL,
   created_at       timestamptz NOT NULL DEFAULT now()
@@ -145,6 +150,15 @@ CREATE INDEX IF NOT EXISTS idx_api_key_requests_ip_ua ON api_key_requests (ip_ad
 ALTER TABLE api_key_requests ADD COLUMN IF NOT EXISTS review_note text NOT NULL DEFAULT '';
 ALTER TABLE account_entries ADD COLUMN IF NOT EXISTS contributor text;
 ALTER TABLE instance_entries ADD COLUMN IF NOT EXISTS contributor text;
+
+-- Scoped read keys (2026-09-20). `service` NULL is every service, i.e. the pre-scope behaviour, so
+-- the column adds no backfill. The request side records what was asked for plus the requester's
+-- contact details; the admin queue reads all four.
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS service text;
+ALTER TABLE api_key_requests ADD COLUMN IF NOT EXISTS requested_service text;
+ALTER TABLE api_key_requests ADD COLUMN IF NOT EXISTS discord_id text;
+ALTER TABLE api_key_requests ADD COLUMN IF NOT EXISTS telegram_id text;
+ALTER TABLE api_key_requests ADD COLUMN IF NOT EXISTS contact_note text;
 
 -- Per-read-key sticky leases: which account_entries a key currently holds. A key keeps the same
 -- entries until they expire (LEASE_TTL_HOURS, lib/queries.ts) or the app reports one dead/
