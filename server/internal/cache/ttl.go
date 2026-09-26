@@ -46,8 +46,35 @@ func New() *Cache {
 	return &Cache{store: map[string]entry{}, inflight: map[string]*flight{}, now: time.Now}
 }
 
+// StartEviction begins background cleanup of expired entries.
+func (c *Cache) StartEviction(interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for range ticker.C {
+			c.evictExpired()
+		}
+	}()
+}
+
+func (c *Cache) evictExpired() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.now()
+	for k, v := range c.store {
+		if v.expiresAt.Before(now) {
+			delete(c.store, k)
+		}
+	}
+}
+
 // Default is the process-wide cache the routes share (the TS keeps module-scope state).
 var Default = New()
+
+func init() {
+	// Start eviction on the default cache (runs every 5 minutes)
+	Default.StartEviction(5 * time.Minute)
+}
 
 // Cached reads through the cache under key, loading on a miss or an expired entry.
 func Cached[T any](c *Cache, ctx context.Context, key string, ttl time.Duration, load func(context.Context) (T, error)) (T, error) {
@@ -87,6 +114,14 @@ func (c *Cache) load(ctx context.Context, key string, ttl time.Duration, load fu
 	c.inflight[key] = f
 	c.mu.Unlock()
 
+	// Ensure cleanup even if load() panics
+	defer func() {
+		c.mu.Lock()
+		delete(c.inflight, key)
+		close(f.done)
+		c.mu.Unlock()
+	}()
+
 	value, err := load(ctx)
 
 	c.mu.Lock()
@@ -94,8 +129,6 @@ func (c *Cache) load(ctx context.Context, key string, ttl time.Duration, load fu
 		c.store[key] = entry{value: value, expiresAt: c.now().Add(ttl)}
 	}
 	f.value, f.err = value, err
-	delete(c.inflight, key)
-	close(f.done)
 	c.mu.Unlock()
 	return value, err
 }

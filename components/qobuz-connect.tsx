@@ -22,74 +22,70 @@ export function QobuzConnect() {
   const [manualSecret, setManualSecret] = useState("")
   const [manualSubmitting, setManualSubmitting] = useState(false)
 
-  const submit = useCallback(
-    async (e: React.FormEvent) => {
-      e.preventDefault()
-      setPhase("submitting")
-      setMessage("")
-      try {
-        const res = await fetch("/api/qobuz/login", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ username: email, password }),
-        })
-        const data = await res.json()
+  const submit = useCallback(async () => {
+    setPhase("submitting")
+    setMessage("")
+    try {
+      const res = await fetch("/api/qobuz/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ username: email, password }),
+      })
+      const data = await res.json()
 
-        if (data.state === "authorized") {
-          setPhase("success")
-          setMessage(
-            data.ok
-              ? data.premium
-                ? "Signed in. Your Qobuz account was verified and added to the pool as a premium source. Thank you!"
-                : "Signed in and added to the pool. The account works but lossless quality was not confirmed."
-              : `Signed in, but the live check failed (${data.detail}). It will be retried automatically.`,
-          )
-        } else if (data.state === "needs_secret") {
-          // Login worked but bundle scrape failed — ask for the secret manually.
-          setSecretData({
-            userAuthToken: data.userAuthToken,
-            appId: data.appId,
-            userId: data.userId,
-            countryCode: data.countryCode,
-          })
-          setPhase("needs_secret")
-          setMessage(data.detail ?? "")
-        } else {
-          setPhase("error")
-          setMessage(data.detail || "Login failed. Check your email and password.")
-        }
-      } catch {
+      if (data.state === "authorized") {
+        setPhase("success")
+        setMessage(
+          data.ok
+            ? data.premium
+              ? "Signed in. Your Qobuz account was verified and added to the pool as a premium source. Thank you!"
+              : "Signed in and added to the pool. The account works but lossless quality was not confirmed."
+            : `Signed in, but the live check failed (${data.detail}). It will be retried automatically.`,
+        )
+      } else if (data.state === "needs_secret") {
+        // Login worked but bundle scrape failed — ask for the secret manually.
+        setSecretData({
+          userAuthToken: data.userAuthToken,
+          appId: data.appId,
+          userId: data.userId,
+          countryCode: data.countryCode,
+        })
+        setPhase("needs_secret")
+        setMessage(data.detail ?? "")
+      } else {
         setPhase("error")
-        setMessage("Could not reach the server. Try again.")
+        setMessage(data.detail || "Login failed. Check your email and password.")
       }
-    },
-    [email, password],
-  )
+    } catch {
+      setPhase("error")
+      setMessage("Could not reach the server. Try again.")
+    }
+  }, [email, password])
 
   const submitWithSecret = useCallback(async () => {
     if (!secretData || !manualSecret.trim()) return
     setManualSubmitting(true)
     try {
-      const res = await fetch("/app/actions/submit", {
+      const formData = new FormData()
+      formData.set("service", "qobuz")
+      formData.set("kind", "account")
+      formData.set("token", secretData.userAuthToken)
+      formData.set("appId", secretData.appId)
+      formData.set("appSecret", manualSecret)
+      formData.set("username", secretData.userId)
+      if (secretData.countryCode) formData.set("countryCode", secretData.countryCode)
+      formData.set("note", "Added via Qobuz sign-in (manual secret)")
+
+      const res = await fetch("/api/submit", {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          service: "qobuz",
-          kind: "account",
-          token: secretData.userAuthToken,
-          appId: secretData.appId,
-          appSecret: manualSecret.trim(),
-          username: secretData.userId,
-          countryCode: secretData.countryCode,
-          note: "Added via Qobuz sign-in (manual secret)",
-        }),
+        body: formData,
       })
       const data = await res.json()
-      if (data.ok || data.saved) {
+      if (data.ok) {
         setPhase("success")
-        setMessage("Account added to the pool. Thank you!")
+        setMessage(data.message || "Added to the pool.")
       } else {
-        setMessage(data.detail || "Could not save. Try again.")
+        setMessage(data.message || "Failed to add. Check the app_secret.")
       }
     } catch {
       setMessage("Could not reach the server. Try again.")
@@ -117,7 +113,7 @@ export function QobuzConnect() {
       </div>
 
       {phase === "idle" || phase === "submitting" || phase === "error" ? (
-        <form onSubmit={submit} className="flex flex-col gap-3">
+        <div className="flex flex-col gap-3">
           <label className="flex flex-col gap-1.5">
             <span className="text-sm font-medium">Email</span>
             <input
@@ -143,7 +139,8 @@ export function QobuzConnect() {
             />
           </label>
           <button
-            type="submit"
+            type="button"
+            onClick={submit}
             disabled={phase === "submitting"}
             className="self-start rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
           >
@@ -152,7 +149,7 @@ export function QobuzConnect() {
           {message && (
             <p className="text-sm text-destructive leading-relaxed">{message}</p>
           )}
-        </form>
+        </div>
       ) : phase === "needs_secret" ? (
         <div className="flex flex-col gap-3">
           <p className="text-xs text-muted-foreground leading-relaxed">{message}</p>

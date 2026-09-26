@@ -87,70 +87,97 @@ func (d *DB) acquire(ctx context.Context) (*pgwire.Conn, error) {
 		return nil, ErrUnconfigured
 	}
 	for {
-		d.mu.Lock()
-		if d.closed {
-			d.mu.Unlock()
-			return nil, errors.New("db: pool is closed")
+		// Try to get an idle connection or create a new one
+		conn, shouldWait, err := d.tryAcquire()
+		if err != nil {
+			return nil, err
 		}
-		if n := len(d.idle); n > 0 {
-			c := d.idle[n-1]
-			d.idle = d.idle[:n-1]
-			d.mu.Unlock()
-			if c.Broken() {
-				_ = c.Close()
-				d.mu.Lock()
-				d.open--
-				d.mu.Unlock()
-				continue
-			}
-			return c, nil
+		if conn != nil {
+			return conn, nil
 		}
-		if d.open < d.maxConns {
-			d.open++
-			d.mu.Unlock()
-			c, err := pgwire.Dial(ctx, &d.cfg)
-			if err != nil {
-				d.mu.Lock()
-				d.open--
-				d.wakeLocked()
-				d.mu.Unlock()
-				return nil, err
-			}
-			return c, nil
-		}
-		ch := make(chan struct{})
-		d.waiters = append(d.waiters, ch)
-		d.mu.Unlock()
-
-		select {
-		case <-ch:
-		case <-ctx.Done():
+		if !shouldWait {
+			// Pool exhausted, need to wait
+			ch := make(chan struct{})
 			d.mu.Lock()
-			d.dropWaiterLocked(ch)
+			d.waiters = append(d.waiters, ch)
 			d.mu.Unlock()
-			return nil, ctx.Err()
+
+			select {
+			case <-ch:
+				// Woken up, try again
+				continue
+			case <-ctx.Done():
+				d.mu.Lock()
+				d.dropWaiterLocked(ch)
+				d.mu.Unlock()
+				return nil, ctx.Err()
+			}
 		}
 	}
+}
+
+// tryAcquire attempts to get a connection without blocking.
+// Returns (conn, shouldWait, error).
+func (d *DB) tryAcquire() (*pgwire.Conn, bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.closed {
+		return nil, false, errors.New("db: pool is closed")
+	}
+
+	// Try idle connection
+	for len(d.idle) > 0 {
+		n := len(d.idle)
+		c := d.idle[n-1]
+		d.idle = d.idle[:n-1]
+
+		if c.Broken() {
+			_ = c.Close()
+			d.open--
+			continue // Try next idle connection
+		}
+		return c, false, nil
+	}
+
+	// Try to create new connection
+	if d.open < d.maxConns {
+		d.open++
+		d.mu.Unlock()
+		ctx := context.Background()
+		c, err := pgwire.Dial(ctx, &d.cfg)
+		d.mu.Lock()
+		if err != nil {
+			d.open--
+			d.wakeLocked()
+			return nil, false, err
+		}
+		return c, false, nil
+	}
+
+	// Pool exhausted, caller should wait
+	return nil, false, nil
 }
 
 func (d *DB) release(c *pgwire.Conn) {
 	if c.Broken() {
 		_ = c.Close()
 		d.mu.Lock()
+		defer d.mu.Unlock()
 		d.open--
 		d.wakeLocked()
-		d.mu.Unlock()
 		return
 	}
+	
 	d.mu.Lock()
+	defer d.mu.Unlock()
+	
 	if d.closed {
-		d.mu.Unlock()
 		_ = c.Close()
 		return
 	}
 	d.idle = append(d.idle, c)
 	d.wakeLocked()
-	d.mu.Unlock()
 }
 
 // wakeLocked hands one waiter its slot (caller holds d.mu).
@@ -192,10 +219,11 @@ func (d *DB) Query(ctx context.Context, sql string, args ...any) (*Rows, error) 
 		return nil, err
 	}
 	res, err := c.Query(ctx, sql, args...)
-	d.release(c)
 	if err != nil {
+		d.release(c)
 		return nil, err
 	}
+	d.release(c)
 	return newRows(res), nil
 }
 

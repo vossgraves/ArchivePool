@@ -689,14 +689,14 @@ func (s *Server) handleAdminForceCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	sweepCh := make(chan sweepOutcome, 1)
 	monoCh := make(chan monoOutcome, 1)
-	go func() {
+	safeGo(func() {
 		summary, err := health.RunHealthSweep(ctx, s.DB, true)
 		sweepCh <- sweepOutcome{summary, err}
-	}()
-	go func() {
+	})
+	safeGo(func() {
 		result, err := health.SyncMonochromeInstances(ctx, s.DB)
 		monoCh <- monoOutcome{result, err}
-	}()
+	})
 	sweep := <-sweepCh
 	mono := <-monoCh
 

@@ -124,13 +124,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	ip := truncatedProxyIP(r, 64)
 	ua := truncate(header(r, "user-agent"), 256)
 	// Best-effort and off the request path, exactly as the TS `void updateLastLogin(...).catch()`.
-	go func(id int) {
+	safeGo(func() {
 		bg, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := auth.UpdateLastLogin(bg, s.DB, id, ip, ua); err != nil {
+		if err := auth.UpdateLastLogin(bg, s.DB, user.Int("id"), ip, ua); err != nil {
 			logf("[auth] updateLastLogin failed: %v", err)
 		}
-	}(user.Int("id"))
+	})
 
 	if err := auth.SetSessionCookie(w, user.Int("id"), s.Cfg.Production(), nowTime()); err != nil {
 		logf("[auth] session cookie failed: %v", err)

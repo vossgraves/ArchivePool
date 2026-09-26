@@ -111,13 +111,13 @@ func IdentifyReadKey(ctx context.Context, database *db.DB, r *http.Request, alwa
 
 	id := row.Int("id")
 	// Best-effort; never block the request on it (lib/api-keys.ts fires and forgets the same bump).
-	go func(id int) {
+	safeGo(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_, _ = database.Exec(ctx,
 			`update api_keys set use_count = use_count + 1, last_used_at = $1 where id = $2`,
 			time.Now(), id)
-	}(id)
+	})
 
 	return ReadKeyIdentity{OK: true, KeyID: &id, Scope: scope}, nil
 }
