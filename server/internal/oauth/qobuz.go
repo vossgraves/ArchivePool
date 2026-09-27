@@ -162,8 +162,10 @@ func ScrapeQobuzAppSecret(ctx context.Context) string {
 	return ""
 }
 
-// ValidateAppSecret signs a probe request and verifies the secret works. A network error is treated
-// as "ok" so an intermittent failure does not block a login.
+// ValidateAppSecret signs a probe request and verifies the secret works. It returns true only when
+// Qobuz answered and did not reject the signature. A network error is NOT a validated secret: the
+// caller maps false to the `needs_secret` state so the user can paste one manually, which is safer
+// than proceeding with an unverified secret.
 func ValidateAppSecret(ctx context.Context, appSecret, userAuthToken string) bool {
 	const probeTrack = "5966783"
 	const probeFormat = "5"
@@ -180,11 +182,11 @@ func ValidateAppSecret(ctx context.Context, appSecret, userAuthToken string) boo
 		"user-agent":        qobuzUA,
 	}, 12*time.Second)
 	if err != nil {
-		return true
+		return false
 	}
 	body, err := httpx.ReadText(res)
 	if err != nil {
-		return true
+		return false
 	}
 	// A bad secret returns an explicit "InvalidRequestSignature" error.
 	return !strings.Contains(strings.ToLower(body), "invalid request signature")

@@ -127,7 +127,7 @@ function validate(service: Service, kind: Kind, payload: Record<string, unknown>
     // the generic token requirement below.
     const arl = String(payload.arl ?? "").trim()
     if (!arl) return "Deezer submissions need an ARL cookie value."
-    if (!/^[a-f0-9]{100,}$/i.test(arl)) {
+    if (!/^[a-f0-9]{180,}$/i.test(arl)) {
       return "That doesn't look like an ARL — expected a long hexadecimal string."
     }
     return null

@@ -59,7 +59,10 @@ async function ampDevToken(): Promise<string | null> {
     if (!home.ok) return ampTokenCache?.token ?? null
     const html = await home.text()
     const bundle = /assets\/index-[^"']+\.js/.exec(html)?.[0]
-    if (!bundle) return ampTokenCache?.token ?? null
+    if (!bundle) {
+      console.warn("[health] apple dev token: no web-player bundle script found on music.apple.com")
+      return ampTokenCache?.token ?? null
+    }
     const jsRes = await fetch(`https://music.apple.com/${bundle}`, {
       headers: { "user-agent": APPLE_UA },
       cache: "no-store",
@@ -76,6 +79,7 @@ async function ampDevToken(): Promise<string | null> {
         return candidate
       }
     }
+    console.warn("[health] apple dev token: no usable AMPWebPlay JWT in the web-player bundle")
     return ampTokenCache?.token ?? null
   } catch {
     return ampTokenCache?.token ?? null
@@ -498,10 +502,13 @@ async function checkAppleMusicAccount(payload: Record<string, unknown>): Promise
       // scraping failure does not wipe healthy entries from rotation.
       return { ok: false, premium: false, status: "pending", latencyMs: 0, detail: "no dev token available" }
     }
-    const { res, ms } = await timedFetch(`${AMP_BASE}/v1/me/storefront`, {
+    const { res, ms } = await timedFetch(`${AMP_BASE}/v1/me/account?meta=subscription`, {
       headers: {
         authorization: `Bearer ${devToken}`,
         "media-user-token": token,
+        // gamdl (which reads the same endpoint) carries the token as a cookie; Apple accepts either
+        // carrier, so send both and the probe cannot hinge on which one this session prefers.
+        cookie: `media-user-token=${token}`,
         origin: "https://music.apple.com",
         referer: "https://music.apple.com/",
         "user-agent": APPLE_UA,
@@ -510,14 +517,27 @@ async function checkAppleMusicAccount(payload: Record<string, unknown>): Promise
     if (!res.ok) {
       return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: `HTTP ${res.status}` }
     }
-    const json = (await res.json()) as { data?: { id?: string; attributes?: { name?: string } }[] }
-    const storefront = json?.data?.[0]?.id
-    if (!storefront) {
-      return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: "no storefront in response" }
+    const json = (await res.json()) as {
+      meta?: { subscription?: { active?: boolean; storefront?: string } }
     }
-    // Active-subscription detection: a storefront resolving is the strongest cheap signal we
-    // have (anonymous/invalid tokens are rejected outright with 401/403).
-    return { ok: true, premium: true, status: "alive", latencyMs: ms, detail: `storefront ${storefront}` }
+    const subscription = json?.meta?.subscription
+    if (!subscription || typeof subscription.active !== "boolean") {
+      // Nothing to read an entitlement from: report pending rather than dead, so an unrecognised
+      // response shape does not wipe healthy entries from rotation.
+      return { ok: false, premium: false, status: "pending", latencyMs: ms, detail: "no subscription info in response" }
+    }
+    const storefront = typeof subscription.storefront === "string" ? subscription.storefront : ""
+    const detail = storefront ? `storefront ${storefront}` : "storefront unknown"
+    const active = subscription.active
+    // A resolving storefront alone does not prove a paid plan — `meta.subscription.active` is false
+    // for a signed-in free account, which must report "preview" rather than "alive".
+    return {
+      ok: true,
+      premium: active,
+      status: classify(true, active),
+      latencyMs: ms,
+      detail: active ? detail : `${detail} (no active subscription)`,
+    }
   } catch (err) {
     return {
       ok: false,

@@ -253,23 +253,37 @@ func IngestExternalSources(ctx context.Context, database *db.DB, maxNew int) (Ex
 	}
 	candidates := []candidate{}
 
-	// 1) Community shared Qobuz accounts (n8n webhook behind qbdlxui).
+	// 1) Community shared Qobuz accounts (n8n webhook behind qbdlxui). This feed also carries the
+	// (app_id, app_secret) pair the community is actually using, which the Firehawk rows below need
+	// too: the health check requires all three, so a credential-less row can only ever be rejected.
+	dominantID, dominantSecret := "", ""
 	if shared, ok := FetchQbdlxShared(ctx); ok && len(shared) > 0 {
+		entries := make([]map[string]any, 0, len(shared))
 		for _, a := range shared {
 			payload := map[string]any{"token": a.Token, "appId": a.AppID, "appSecret": a.AppSecret, "note": a.Note}
 			if a.Country != "" {
 				payload["country"] = a.Country
 			}
 			candidates = append(candidates, candidate{pool.ServiceQobuz, pool.KindAccount, payload})
+			entries = append(entries, map[string]any{"app_id": a.AppID, "app_secret": a.AppSecret})
 		}
+		dominantID, dominantSecret = dominantAppPair(entries)
 	} else {
 		summary.Errors = append(summary.Errors, "citegptapi webhook unreachable or empty")
 	}
 
-	// 2) firehawk52 rendered rentry (opportunistic — see the fetcher's comment).
+	// 2) firehawk52 rendered rentry (opportunistic — see the fetcher's comment). Its table lists
+	// tokens only, so the same dominant pair backfills them the way that feed backfills its own
+	// credential-less rows. With no pair known the rows are skipped rather than ingested as
+	// guaranteed rejects.
 	if qobuz, deezer, ok := FetchFirehawkRendered(ctx); ok {
-		for _, t := range qobuz {
-			candidates = append(candidates, candidate{pool.ServiceQobuz, pool.KindAccount, map[string]any{"token": t.Token}})
+		if dominantID != "" {
+			for _, t := range qobuz {
+				candidates = append(candidates, candidate{pool.ServiceQobuz, pool.KindAccount,
+					map[string]any{"token": t.Token, "appId": dominantID, "appSecret": dominantSecret}})
+			}
+		} else if len(qobuz) > 0 {
+			summary.Errors = append(summary.Errors, "firehawk qobuz tokens skipped: no app pair known")
 		}
 		for _, a := range deezer {
 			candidates = append(candidates, candidate{pool.ServiceDeezer, pool.KindAccount, map[string]any{"arl": a.ARL}})

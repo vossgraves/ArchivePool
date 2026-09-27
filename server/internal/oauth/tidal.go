@@ -7,6 +7,7 @@ import (
 	"context"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"archivepool/server/internal/httpx"
@@ -57,8 +58,10 @@ func StartDeviceAuth(ctx context.Context) (DeviceStart, error) {
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		status := res.StatusCode
-		_ = res.Body.Close()
-		return DeviceStart{}, &httpStatusError{status: status, prefix: "device_authorization failed"}
+		// Tidal explains a rejection in the body (`error`/`error_description`); include a short
+		// snippet so the route's `detail` says why rather than only the status code.
+		snippet, _ := httpx.ReadLimitedText(res, 200)
+		return DeviceStart{}, &httpStatusError{status: status, prefix: "device_authorization failed", body: strings.TrimSpace(snippet)}
 	}
 	var body struct {
 		DeviceCode              string `json:"deviceCode"`
@@ -147,6 +150,13 @@ func PollDeviceToken(ctx context.Context, deviceCode string) (PollOutcome, error
 type httpStatusError struct {
 	status int
 	prefix string
+	body   string
 }
 
-func (e *httpStatusError) Error() string { return e.prefix + ": HTTP " + strconv.Itoa(e.status) }
+func (e *httpStatusError) Error() string {
+	msg := e.prefix + ": HTTP " + strconv.Itoa(e.status)
+	if e.body != "" {
+		msg += " " + e.body
+	}
+	return msg
+}

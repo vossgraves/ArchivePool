@@ -139,7 +139,9 @@ export async function scrapeQobuzAppSecret(): Promise<string | null> {
 
 /**
  * Quick validation: sign a probe request and verify the secret works.
- * Returns true if the secret signs correctly (or if we can't confirm due to network issues).
+ * Returns true only when Qobuz answered and did not reject the signature. A network error is
+ * NOT a validated secret: the caller maps `false` to the `needs_secret` state so the user can
+ * paste one manually, which is safer than proceeding with an unverified secret.
  */
 export async function validateAppSecret(
   appSecret: string,
@@ -161,13 +163,14 @@ export async function validateAppSecret(
     const res = await fetch(url, {
       headers: { "x-app-id": QOBUZ_APP_ID, "x-user-auth-token": userAuthToken, "user-agent": UA },
       cache: "no-store",
+      signal: AbortSignal.timeout(12_000),
     })
     const body = await res.text()
     // A bad secret returns an explicit "InvalidRequestSignature" error.
     if (body.toLowerCase().includes("invalid request signature")) return false
     return true
   } catch {
-    // Network error — assume ok to not block login on intermittent failures.
-    return true
+    // Network error or timeout — we could not confirm the secret. Not validated.
+    return false
   }
 }

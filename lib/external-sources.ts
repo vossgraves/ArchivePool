@@ -87,17 +87,6 @@ export async function fetchFirehawkTokens(): Promise<{ qobuz: FirehawkQobuzToken
   return { qobuz: parseFirehawkQobuzTokens(raw), deezer: parseFirehawkDeezerArls(raw) }
 }
 
-// qbdlxui.alwaysdata.net — no public token API. The web UI is a Neutralino build whose JS
-// does not contain a token list. We keep the stub for future use if the site adds an API.
-export async function fetchQbdlxTokens(): Promise<FirehawkQobuzToken[] | null> {
-  // Probe the site's asset list for any JSON token endpoint
-  const html = await fetchText("https://qbdlxui.alwaysdata.net/")
-  if (!html) return null
-  // The HTML is just a shell loading /assets/index-*.js; no token API found in 2026-08.
-  // Return null to signal "not a viable source" — caller should fall back to firehawk52.
-  return null
-}
-
 // ─────────────────────────────────────────────────────────────────────────────────────
 // Community shared-account feeds
 // ─────────────────────────────────────────────────────────────────────────────────────
@@ -213,8 +202,11 @@ export async function ingestExternalSources(
   type Candidate = { service: "qobuz" | "deezer"; kind: "account"; payload: Record<string, unknown> }
   const candidates: Candidate[] = []
 
-  // 1) Community shared Qobuz accounts (n8n webhook behind qbdlxui).
+  // 1) Community shared Qobuz accounts (n8n webhook behind qbdlxui). This feed also carries the
+  // (app_id, app_secret) pair the community is actually using, which the Firehawk rows below need
+  // too: the health check requires all three, so a credential-less row can only ever be rejected.
   const shared = await fetchQbdlxShared().catch(() => null)
+  let dominant: { appId: string; appSecret: string } | null = null
   if (shared && shared.length > 0) {
     for (const a of shared) {
       candidates.push({
@@ -223,15 +215,27 @@ export async function ingestExternalSources(
         payload: { token: a.token, appId: a.appId, appSecret: a.appSecret, country: a.country, note: a.note },
       })
     }
+    dominant = dominantAppPair(shared.map((a): Record<string, unknown> => ({ app_id: a.appId, app_secret: a.appSecret })))
   } else {
     errors.push("citegptapi webhook unreachable or empty")
   }
 
-  // 2) firehawk52 rendered rentry (opportunistic — see comment on the fetcher).
+  // 2) firehawk52 rendered rentry (opportunistic — see comment on the fetcher). Its table lists
+  // tokens only, so the same dominant pair backfills them the way that feed backfills its own
+  // credential-less rows. With no pair known the rows are skipped rather than ingested as
+  // guaranteed rejects.
   const firehawk = await fetchFirehawkRendered().catch(() => null)
   if (firehawk) {
-    for (const t of firehawk.qobuz) {
-      candidates.push({ service: "qobuz", kind: "account", payload: { token: t.token } })
+    if (dominant) {
+      for (const t of firehawk.qobuz) {
+        candidates.push({
+          service: "qobuz",
+          kind: "account",
+          payload: { token: t.token, appId: dominant.appId, appSecret: dominant.appSecret },
+        })
+      }
+    } else if (firehawk.qobuz.length > 0) {
+      errors.push("firehawk qobuz tokens skipped: no app pair known")
     }
     for (const a of firehawk.deezer) {
       candidates.push({ service: "deezer", kind: "account", payload: { arl: a.arl } })

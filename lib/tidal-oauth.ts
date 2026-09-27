@@ -49,9 +49,14 @@ export async function startDeviceAuth(): Promise<DeviceStart> {
     },
     body,
     cache: "no-store",
+    // Match the Go device flow's 12s budget so a hung Tidal call cannot pin the route open.
+    signal: AbortSignal.timeout(12_000),
   })
   if (!res.ok) {
-    throw new Error(`device_authorization failed: HTTP ${res.status}`)
+    // Tidal explains a rejection in the body (`error`/`error_description`); include a short
+    // snippet so the route's `detail` says why rather than only the status code.
+    const snippet = (await res.text().catch(() => "")).trim().slice(0, 200)
+    throw new Error(`device_authorization failed: HTTP ${res.status}${snippet ? ` ${snippet}` : ""}`)
   }
   const json = (await res.json()) as {
     deviceCode: string
@@ -88,6 +93,8 @@ export async function pollDeviceToken(deviceCode: string): Promise<PollOutcome> 
     },
     body,
     cache: "no-store",
+    // Same 12s budget as the Go poll and the device_authorization call above.
+    signal: AbortSignal.timeout(12_000),
   })
 
   if (res.ok) {

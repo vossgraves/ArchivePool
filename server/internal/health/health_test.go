@@ -2,6 +2,7 @@ package health
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -198,5 +199,110 @@ func TestDescribeSaveError(t *testing.T) {
 				t.Fatalf("DescribeSaveError = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestAppleSubscriptionVerdict pins the entitlement rule the admission policy depends on: a
+// Media-User-Token that resolves a storefront is not on its own proof of a paid plan, so only
+// meta.subscription.active may report premium. An answer the pool cannot read must stay pending —
+// reporting dead there would wipe healthy entries on a shape change.
+func TestAppleSubscriptionVerdict(t *testing.T) {
+	cases := []struct {
+		name        string
+		body        string
+		wantKnown   bool
+		wantPremium bool
+		wantStatus  pool.Status
+		wantDetail  string
+	}{
+		{
+			"an active subscription is premium",
+			`{"meta":{"subscription":{"active":true,"storefront":"us"}}}`,
+			true, true, pool.StatusAlive, "storefront us",
+		},
+		{
+			"a free account that still resolves a storefront is not premium",
+			`{"meta":{"subscription":{"active":false,"storefront":"gb"}}}`,
+			true, false, pool.StatusPreview, "storefront gb (no active subscription)",
+		},
+		{
+			"an entitlement with no storefront still reports the plan",
+			`{"meta":{"subscription":{"active":true}}}`,
+			true, true, pool.StatusAlive, "storefront unknown",
+		},
+		{
+			"a storefront-only response has no entitlement to read",
+			`{"data":[{"id":"us","attributes":{"name":"United States"}}]}`,
+			false, false, pool.StatusPending, "no subscription info in response",
+		},
+		{
+			"an empty subscription object is not an inactive plan",
+			`{"meta":{"subscription":{}}}`,
+			false, false, pool.StatusPending, "no subscription info in response",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var meta appleAccountMeta
+			if err := json.Unmarshal([]byte(tc.body), &meta); err != nil {
+				t.Fatalf("decoding %s: %v", tc.body, err)
+			}
+			premium, detail, known := appleSubscriptionVerdict(meta)
+			if known != tc.wantKnown {
+				t.Fatalf("known = %v, want %v", known, tc.wantKnown)
+			}
+			if detail != tc.wantDetail {
+				t.Fatalf("detail = %q, want %q", detail, tc.wantDetail)
+			}
+			if !known {
+				return
+			}
+			if premium != tc.wantPremium {
+				t.Fatalf("premium = %v, want %v", premium, tc.wantPremium)
+			}
+			if got := classify(true, premium); got != tc.wantStatus {
+				t.Fatalf("status = %s, want %s", got, tc.wantStatus)
+			}
+		})
+	}
+}
+
+// TestCheckAppleMusicAccountRejectsNonToken guards the short-circuit that runs before any outbound
+// call: Media-User-Tokens always start with "0.", so anything else is a paste error.
+func TestCheckAppleMusicAccountRejectsNonToken(t *testing.T) {
+	result := checkAppleMusicAccount(context.Background(), map[string]any{"token": "not-a-media-user-token"})
+	if result.OK || result.Premium || result.Status != pool.StatusDead {
+		t.Fatalf("a malformed token must be dead without probing: %#v", result)
+	}
+}
+
+// TestDominantAppPair guards the fallback the external ingest depends on: the Firehawk rentry lists
+// Qobuz tokens with no credentials, so those rows are only ingestible with a pair borrowed from the
+// community feed, and the most-used pair is the one worth borrowing.
+func TestDominantAppPair(t *testing.T) {
+	appID, secret := dominantAppPair([]map[string]any{
+		{"app_id": "1", "app_secret": "aaa"},
+		{"app_id": "2", "app_secret": "bbb"},
+		{"app_id": "1", "app_secret": "aaa"},
+		{"token": "t"},
+		{"app_id": "  ", "app_secret": "aaa"},
+	})
+	if appID != "1" || secret != "aaa" {
+		t.Fatalf("dominantAppPair = (%q, %q), want (1, aaa)", appID, secret)
+	}
+	// No pair anywhere means the Firehawk rows must be skipped rather than ingested as rejects.
+	appID, secret = dominantAppPair([]map[string]any{{"token": "t"}})
+	if appID != "" || secret != "" {
+		t.Fatalf("a feed with no pair must report none, got (%q, %q)", appID, secret)
+	}
+}
+
+// TestParseFirehawkDeezerArls floors an ARL at the length the submit path requires, so a truncated
+// value scraped from the rentry is dropped before it can burn a health check and a lease slot.
+func TestParseFirehawkDeezerArls(t *testing.T) {
+	full := strings.Repeat("a", 180)
+	arls := ParseFirehawkDeezerArls("arl: `" + full + "` then `" + strings.Repeat("a", 179) + "`")
+	if len(arls) != 1 || arls[0].ARL != full {
+		t.Fatalf("ParseFirehawkDeezerArls returned %#v, want only the 180-char ARL", arls)
 	}
 }

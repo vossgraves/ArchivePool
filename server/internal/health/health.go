@@ -618,9 +618,12 @@ func checkDeezerAccount(ctx context.Context, payload map[string]any) CheckResult
 	return CheckResult{OK: true, Premium: premium, Status: classify(true, premium), LatencyMs: ms, Detail: detail}
 }
 
-// checkAppleMusicAccount resolves the account's storefront with a scraper-supplied dev JWT. A
-// resolving storefront is the strongest cheap signal available: anonymous or invalid Media-User-
-// Tokens are rejected outright with 401/403.
+// checkAppleMusicAccount reads the account's entitlement with a scraper-supplied dev JWT. A
+// Media-User-Token cannot be probed through the public catalog API, so the account endpoint is
+// asked directly: `meta.subscription.active` is the flag gamdl gates downloads on, and it is false
+// for a signed-in free account even though a storefront still resolves. gamdl carries the
+// Media-User-Token as a cookie on this endpoint, so the probe sends it as a header AND a cookie
+// rather than betting the entitlement on one carrier.
 func checkAppleMusicAccount(ctx context.Context, payload map[string]any) CheckResult {
 	token := strings.TrimSpace(str(payload["token"]))
 	// Media-User-Tokens always start with "0." — anything else is a paste error.
@@ -636,9 +639,10 @@ func checkAppleMusicAccount(ctx context.Context, payload map[string]any) CheckRe
 	}
 
 	started := time.Now()
-	res, err := httpx.Get(ctx, ampBase+"/v1/me/storefront", map[string]string{
+	res, err := httpx.Get(ctx, ampBase+"/v1/me/account?meta=subscription", map[string]string{
 		"authorization":    "Bearer " + devToken,
 		"media-user-token": token,
+		"cookie":           "media-user-token=" + token,
 		"origin":           "https://music.apple.com",
 		"referer":          "https://music.apple.com/",
 		"user-agent":       appleUA,
@@ -651,27 +655,53 @@ func checkAppleMusicAccount(ctx context.Context, payload map[string]any) CheckRe
 		_ = res.Body.Close()
 		return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: "HTTP " + strconv.Itoa(res.StatusCode)}
 	}
-	var body struct {
-		Data []struct {
-			ID         string `json:"id"`
-			Attributes struct {
-				Name string `json:"name"`
-			} `json:"attributes"`
-		} `json:"data"`
-	}
-	if err := httpx.ReadJSON(res, &body); err != nil {
+	var meta appleAccountMeta
+	if err := httpx.ReadJSON(res, &meta); err != nil {
 		return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: "invalid response"}
 	}
-	if len(body.Data) == 0 || body.Data[0].ID == "" {
-		return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: "no storefront in response"}
+	premium, detail, known := appleSubscriptionVerdict(meta)
+	if !known {
+		// Nothing to read an entitlement from: pending rather than dead, so an unrecognised
+		// response shape does not wipe healthy entries.
+		return CheckResult{Status: pool.StatusPending, LatencyMs: ms, Detail: detail}
 	}
 	return CheckResult{
 		OK:        true,
-		Premium:   true,
-		Status:    pool.StatusAlive,
+		Premium:   premium,
+		Status:    classify(true, premium),
 		LatencyMs: ms,
-		Detail:    "storefront " + body.Data[0].ID,
+		Detail:    detail,
 	}
+}
+
+// appleAccountMeta is the part of `GET /v1/me/account?meta=subscription` the pool reads: the
+// entitlement flag, and the storefront that subscription belongs to.
+type appleAccountMeta struct {
+	Meta struct {
+		Subscription struct {
+			Active     *bool  `json:"active"`
+			Storefront string `json:"storefront"`
+		} `json:"subscription"`
+	} `json:"meta"`
+}
+
+// appleSubscriptionVerdict turns that meta into the pool's verdict, mirroring the meta.subscription
+// read in lib/health.ts checkAppleMusicAccount. A signed-in free account still resolves a
+// storefront, so `active` — not the storefront — is what decides premium. `known` is false when
+// Apple answered with a shape the pool does not recognise.
+func appleSubscriptionVerdict(meta appleAccountMeta) (premium bool, detail string, known bool) {
+	active := meta.Meta.Subscription.Active
+	if active == nil {
+		return false, "no subscription info in response", false
+	}
+	detail = "storefront unknown"
+	if storefront := meta.Meta.Subscription.Storefront; storefront != "" {
+		detail = "storefront " + storefront
+	}
+	if !*active {
+		detail += " (no active subscription)"
+	}
+	return *active, detail, true
 }
 
 // ampDevToken mirrors the app-side scraper: home page → JS bundle → ES256 JWTs → `iss: AMPWebPlay`.
@@ -700,6 +730,7 @@ func ampDevToken(ctx context.Context) string {
 	}
 	bundle := ampBundleRe.FindString(html)
 	if bundle == "" {
+		logf("apple dev token: no web-player bundle script found on music.apple.com")
 		return fallback()
 	}
 	jsRes, err := httpx.Get(ctx, "https://music.apple.com/"+bundle, map[string]string{"user-agent": appleUA}, timeoutMs)
@@ -731,6 +762,7 @@ func ampDevToken(ctx context.Context) string {
 			return candidate
 		}
 	}
+	logf("apple dev token: no usable AMPWebPlay JWT in the web-player bundle")
 	return fallback()
 }
 
