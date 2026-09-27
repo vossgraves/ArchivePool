@@ -478,6 +478,11 @@ func auditLimit(raw []string) int {
 	if len(raw) == 0 {
 		return 200
 	}
+	// `Number("")` — like `Number("  ")` — is 0, not the default: a present-but-blank limit is
+	// a request for 0 rows (ListAudit clamps it up to 1), never for the 200-row default.
+	if strings.TrimSpace(raw[0]) == "" {
+		return 0
+	}
 	if n, err := strconv.ParseFloat(raw[0], 64); err == nil && !math.IsNaN(n) && !math.IsInf(n, 0) {
 		return int(n)
 	}
