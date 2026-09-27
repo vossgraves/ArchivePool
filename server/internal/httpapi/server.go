@@ -1,27 +1,12 @@
 package httpapi
 
 import (
-	"log"
-	"runtime/debug"
-)
-
-// safeGo runs fn in a goroutine with panic recovery.
-func safeGo(fn func()) {
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("goroutine panic: %v\n%s", r, debug.Stack())
-			}
-		}()
-		fn()
-	}()
-}
-package httpapi
-
-import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"log"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +17,29 @@ import (
 	"archivepool/server/internal/db"
 	"archivepool/server/internal/ratelimit"
 )
+
+// safeGo runs fire-and-forget work in a goroutine, logging a panic instead of crashing the
+// process. Only for work nobody waits on: a recovered panic sends nothing, so a caller blocked on
+// a result would hang. Use recoverAsError there.
+func safeGo(fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("goroutine panic: %v\n%s", r, debug.Stack())
+			}
+		}()
+		fn()
+	}()
+}
+
+// recoverAsError, deferred in a goroutine whose result a handler waits on, turns a panic into
+// *err (logged with its stack) so the result is still delivered and the request is answered.
+func recoverAsError(err *error, what string) {
+	if r := recover(); r != nil {
+		log.Printf("%s panic: %v\n%s", what, r, debug.Stack())
+		*err = fmt.Errorf("%s panicked: %v", what, r)
+	}
+}
 
 // Server holds the shared dependencies every handler needs.
 type Server struct {
