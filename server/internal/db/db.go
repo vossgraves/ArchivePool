@@ -87,76 +87,59 @@ func (d *DB) acquire(ctx context.Context) (*pgwire.Conn, error) {
 		return nil, ErrUnconfigured
 	}
 	for {
-		// Try to get an idle connection or create a new one
-		conn, shouldWait, err := d.tryAcquire()
-		if err != nil {
-			return nil, err
-		}
-		if conn != nil {
-			return conn, nil
-		}
-		if !shouldWait {
-			// Pool exhausted, need to wait
-			ch := make(chan struct{})
-			d.mu.Lock()
-			d.waiters = append(d.waiters, ch)
-			d.mu.Unlock()
-
-			select {
-			case <-ch:
-				// Woken up, try again
-				continue
-			case <-ctx.Done():
-				d.mu.Lock()
-				d.dropWaiterLocked(ch)
-				d.mu.Unlock()
-				return nil, ctx.Err()
-			}
-		}
-	}
-}
-
-// tryAcquire attempts to get a connection without blocking.
-// Returns (conn, shouldWait, error).
-func (d *DB) tryAcquire() (*pgwire.Conn, bool, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	if d.closed {
-		return nil, false, errors.New("db: pool is closed")
-	}
-
-	// Try idle connection
-	for len(d.idle) > 0 {
-		n := len(d.idle)
-		c := d.idle[n-1]
-		d.idle = d.idle[:n-1]
-
-		if c.Broken() {
-			_ = c.Close()
-			d.open--
-			continue // Try next idle connection
-		}
-		return c, false, nil
-	}
-
-	// Try to create new connection
-	if d.open < d.maxConns {
-		d.open++
-		d.mu.Unlock()
-		ctx := context.Background()
-		c, err := pgwire.Dial(ctx, &d.cfg)
 		d.mu.Lock()
-		if err != nil {
-			d.open--
-			d.wakeLocked()
-			return nil, false, err
+		if d.closed {
+			d.mu.Unlock()
+			return nil, errors.New("db: pool is closed")
 		}
-		return c, false, nil
-	}
+		if n := len(d.idle); n > 0 {
+			c := d.idle[n-1]
+			d.idle = d.idle[:n-1]
+			d.mu.Unlock()
+			if c.Broken() {
+				_ = c.Close()
+				d.mu.Lock()
+				d.open--
+				d.mu.Unlock()
+				continue
+			}
+			return c, nil
+		}
+		if d.open < d.maxConns {
+			d.open++
+			d.mu.Unlock()
+			// Dialled outside the lock, with the caller's ctx: a hung database must not hold the
+			// reserved slot past the request's deadline.
+			c, err := pgwire.Dial(ctx, &d.cfg)
+			if err != nil {
+				d.mu.Lock()
+				d.open--
+				d.wakeLocked()
+				d.mu.Unlock()
+				return nil, err
+			}
+			return c, nil
+		}
+		// Queued under the same lock hold that saw the pool exhausted: a release() in between
+		// would otherwise wake nobody, and this caller would sleep beside an idle connection
+		// until its deadline.
+		ch := make(chan struct{})
+		d.waiters = append(d.waiters, ch)
+		d.mu.Unlock()
 
-	// Pool exhausted, caller should wait
-	return nil, false, nil
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			d.mu.Lock()
+			if !d.dropWaiterLocked(ch) {
+				// Woken in the same instant ctx ended: pass the wake-up on, or the slot it
+				// announced leaves with this caller and the next waiter sleeps on.
+				d.wakeLocked()
+			}
+			d.mu.Unlock()
+			return nil, ctx.Err()
+		}
+	}
 }
 
 func (d *DB) release(c *pgwire.Conn) {
@@ -168,10 +151,10 @@ func (d *DB) release(c *pgwire.Conn) {
 		d.wakeLocked()
 		return
 	}
-	
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	
+
 	if d.closed {
 		_ = c.Close()
 		return
@@ -190,13 +173,16 @@ func (d *DB) wakeLocked() {
 	close(ch)
 }
 
-func (d *DB) dropWaiterLocked(ch chan struct{}) {
+// dropWaiterLocked removes ch from the queue (caller holds d.mu). It reports false when ch was
+// no longer queued, i.e. wakeLocked had already popped and closed it.
+func (d *DB) dropWaiterLocked(ch chan struct{}) bool {
 	for i, w := range d.waiters {
 		if w == ch {
 			d.waiters = append(d.waiters[:i], d.waiters[i+1:]...)
-			return
+			return true
 		}
 	}
+	return false
 }
 
 // Close drains the idle connections. In-flight connections are closed on release.

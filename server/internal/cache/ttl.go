@@ -9,9 +9,14 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 )
+
+// errLoadPanicked is what callers sharing a flight receive when its load panicked: without it
+// they would read the flight's zero value, which Cached reports as a successful empty result.
+var errLoadPanicked = errors.New("cache: load panicked")
 
 // DISCOVERY_TTL_MS and STATUS_TTL_MS from lib/ttl-cache.ts: sweeps run hours apart, so minutes of
 // staleness are free.
@@ -114,9 +119,14 @@ func (c *Cache) load(ctx context.Context, key string, ttl time.Duration, load fu
 	c.inflight[key] = f
 	c.mu.Unlock()
 
-	// Ensure cleanup even if load() panics
+	// Cleanup runs even if load panics, so waiters are released instead of blocking forever, and
+	// they are released with an error; the panic itself continues in this caller.
+	completed := false
 	defer func() {
 		c.mu.Lock()
+		if !completed {
+			f.err = errLoadPanicked
+		}
 		delete(c.inflight, key)
 		close(f.done)
 		c.mu.Unlock()
@@ -129,6 +139,7 @@ func (c *Cache) load(ctx context.Context, key string, ttl time.Duration, load fu
 		c.store[key] = entry{value: value, expiresAt: c.now().Add(ttl)}
 	}
 	f.value, f.err = value, err
+	completed = true
 	c.mu.Unlock()
 	return value, err
 }

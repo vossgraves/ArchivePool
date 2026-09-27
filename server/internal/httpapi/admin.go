@@ -689,14 +689,20 @@ func (s *Server) handleAdminForceCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	sweepCh := make(chan sweepOutcome, 1)
 	monoCh := make(chan monoOutcome, 1)
-	safeGo(func() {
-		summary, err := health.RunHealthSweep(ctx, s.DB, true)
-		sweepCh <- sweepOutcome{summary, err}
-	})
-	safeGo(func() {
-		result, err := health.SyncMonochromeInstances(ctx, s.DB)
-		monoCh <- monoOutcome{result, err}
-	})
+	// A panicking worker still sends its outcome, as an error: this handler blocks on both
+	// channels, and safeGo would swallow the panic and leave the request hanging.
+	go func() {
+		var out sweepOutcome
+		defer func() { sweepCh <- out }()
+		defer recoverAsError(&out.err, "health sweep")
+		out.summary, out.err = health.RunHealthSweep(ctx, s.DB, true)
+	}()
+	go func() {
+		var out monoOutcome
+		defer func() { monoCh <- out }()
+		defer recoverAsError(&out.err, "monochrome sync")
+		out.result, out.err = health.SyncMonochromeInstances(ctx, s.DB)
+	}()
 	sweep := <-sweepCh
 	mono := <-monoCh
 
