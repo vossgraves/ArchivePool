@@ -1,6 +1,7 @@
 "use client"
 
-import { useCallback, useState } from "react"
+import { useCallback, useState, type KeyboardEvent } from "react"
+import { submitSource } from "@/app/actions/submit"
 
 type Phase = "idle" | "submitting" | "needs_secret" | "success" | "error"
 
@@ -9,6 +10,17 @@ interface NeedsSecretData {
   appId: string
   userId: string
   countryCode?: string
+}
+
+// This component renders inside SubmitForm's <form>, where a nested <form> is invalid and dropped
+// by the browser. Enter is handled here instead: left alone it would implicitly submit that outer
+// form, half-filled. IME composition keeps its own Enter.
+function onEnter(run: () => void) {
+  return (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== "Enter" || e.nativeEvent.isComposing) return
+    e.preventDefault()
+    run()
+  }
 }
 
 export function QobuzConnect() {
@@ -23,13 +35,20 @@ export function QobuzConnect() {
   const [manualSubmitting, setManualSubmitting] = useState(false)
 
   const submit = useCallback(async () => {
+    if (phase === "submitting") return
+    // `required` is inert outside a <form>, so the check lives here.
+    if (!email.trim() || !password) {
+      setPhase("error")
+      setMessage("Enter your Qobuz email and password.")
+      return
+    }
     setPhase("submitting")
     setMessage("")
     try {
       const res = await fetch("/api/qobuz/login", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ username: email, password }),
+        body: JSON.stringify({ username: email.trim(), password }),
       })
       const data = await res.json()
 
@@ -60,10 +79,10 @@ export function QobuzConnect() {
       setPhase("error")
       setMessage("Could not reach the server. Try again.")
     }
-  }, [email, password])
+  }, [phase, email, password])
 
   const submitWithSecret = useCallback(async () => {
-    if (!secretData || !manualSecret.trim()) return
+    if (!secretData || !manualSecret.trim() || manualSubmitting) return
     setManualSubmitting(true)
     try {
       const formData = new FormData()
@@ -71,16 +90,14 @@ export function QobuzConnect() {
       formData.set("kind", "account")
       formData.set("token", secretData.userAuthToken)
       formData.set("appId", secretData.appId)
-      formData.set("appSecret", manualSecret)
+      formData.set("appSecret", manualSecret.trim())
       formData.set("username", secretData.userId)
       if (secretData.countryCode) formData.set("countryCode", secretData.countryCode)
       formData.set("note", "Added via Qobuz sign-in (manual secret)")
 
-      const res = await fetch("/api/submit", {
-        method: "POST",
-        body: formData,
-      })
-      const data = await res.json()
+      // The contribution form's own server action: the one submit path the Next deployment
+      // serves (/api/submit exists only on the Go port).
+      const data = await submitSource({ ok: false, message: "" }, formData)
       if (data.ok) {
         setPhase("success")
         setMessage(data.message || "Added to the pool.")
@@ -92,7 +109,7 @@ export function QobuzConnect() {
     } finally {
       setManualSubmitting(false)
     }
-  }, [secretData, manualSecret])
+  }, [secretData, manualSecret, manualSubmitting])
 
   const reset = useCallback(() => {
     setPhase("idle")
@@ -122,6 +139,7 @@ export function QobuzConnect() {
               required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
+              onKeyDown={onEnter(submit)}
               placeholder="you@example.com"
               className="rounded-md border border-input bg-background px-3 py-2 text-sm outline-none ring-ring focus:ring-2"
             />
@@ -134,6 +152,7 @@ export function QobuzConnect() {
               required
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              onKeyDown={onEnter(submit)}
               placeholder="Your Qobuz password"
               className="rounded-md border border-input bg-background px-3 py-2 text-sm outline-none ring-ring focus:ring-2"
             />
@@ -159,6 +178,7 @@ export function QobuzConnect() {
               type="text"
               value={manualSecret}
               onChange={(e) => setManualSecret(e.target.value)}
+              onKeyDown={onEnter(submitWithSecret)}
               placeholder="32-char hex string"
               className="rounded-md border border-input bg-background px-3 py-2 font-mono text-sm outline-none ring-ring focus:ring-2"
             />
