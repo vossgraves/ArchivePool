@@ -113,17 +113,25 @@ func (s *Server) handleKeysCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	existing, err := auth.ListUserApiKeys(ctx, s.DB, *userID)
-	if err == nil {
-		active := 0
-		for _, k := range existing {
-			if !k.Revoked {
-				active++
-			}
+	if err != nil {
+		// The TS leaves this call outside its try/catch, so a database error there is an unhandled
+		// rejection: a 500 with no body — and, since the cap check never runs, a request that would
+		// otherwise be refused. Fail closed with the same wording the list route uses.
+		logf("[keys] cap check failed to read keys: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "internal_error", "detail": "Could not load your keys. Please try again shortly.",
+		}, nil)
+		return
+	}
+	active := 0
+	for _, k := range existing {
+		if !k.Revoked {
+			active++
 		}
-		if active >= auth.MaxKeysPerUser {
-			writeJSON(w, http.StatusConflict, errJSON("key_limit", "At most "+strconv.Itoa(auth.MaxKeysPerUser)+" active keys per account."), nil)
-			return
-		}
+	}
+	if active >= auth.MaxKeysPerUser {
+		writeJSON(w, http.StatusConflict, errJSON("key_limit", "At most "+strconv.Itoa(auth.MaxKeysPerUser)+" active keys per account."), nil)
+		return
 	}
 
 	details := auth.KeyRequestDetails{RequestedService: requestedService}

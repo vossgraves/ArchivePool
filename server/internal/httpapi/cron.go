@@ -49,6 +49,9 @@ func (s *Server) handleCronHealth(w http.ResponseWriter, r *http.Request) {
 	// handing out a base URL this sweep just marked dead for up to 12 hours.
 	blob.WriteInstanceSnapshot(ctx, s.DB, s.Blob)
 	cache.Invalidate("snapshot:")
+	// The database fallback the discovery routes use when Blob is unconfigured is cached too, so it
+	// would otherwise keep serving an instance this sweep just disabled for the rest of its TTL.
+	cache.Invalidate("discovery:")
 
 	writeJSON(w, http.StatusOK, struct {
 		OK        bool                         `json:"ok"`
@@ -57,6 +60,7 @@ func (s *Server) handleCronHealth(w http.ResponseWriter, r *http.Request) {
 		Skipped   int                          `json:"skipped"`
 		Disabled  int                          `json:"disabled"`
 		Reenabled int                          `json:"reenabled"`
+		Locked    bool                         `json:"locked,omitempty"`
 		RanAt     string                       `json:"ranAt"`
 	}{
 		OK:        true,
@@ -65,6 +69,7 @@ func (s *Server) handleCronHealth(w http.ResponseWriter, r *http.Request) {
 		Skipped:   summary.Skipped,
 		Disabled:  summary.Disabled,
 		Reenabled: summary.Reenabled,
+		Locked:    summary.Locked,
 		RanAt:     nowISO(),
 	}, nil)
 }

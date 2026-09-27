@@ -2,12 +2,15 @@ package httpapi
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 
 	"archivepool/server/internal/auth"
+	"archivepool/server/internal/blob"
+	"archivepool/server/internal/cache"
 	"archivepool/server/internal/health"
 )
 
@@ -43,6 +46,17 @@ func (s *Server) adminActor(r *http.Request) *auth.AdminActor {
 
 func unauthorized(w http.ResponseWriter) {
 	writeJSON(w, http.StatusUnauthorized, errBody{Error: "unauthorized"}, nil)
+}
+
+// invalidateFeedCaches drops this process's cached view of anything a sweep, a removal or a
+// re-check can change: the board's figures, the discovery feeds, and the instance snapshot the
+// feeds are served from. Without it an admin action would not be visible until the entry's TTL
+// expired — and the snapshot copy is what the routes answer with first, so it has to be dropped
+// together with the database read behind it.
+func invalidateFeedCaches() {
+	cache.Invalidate("status")
+	cache.Invalidate("discovery:")
+	cache.Invalidate("snapshot:")
 }
 
 // handleAdminKeysList is GET /api/admin/keys: every key, soft-deleted ones included.
@@ -445,14 +459,7 @@ func (s *Server) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
 		unauthorized(w)
 		return
 	}
-	limit := 200
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		// `Number(value ?? 200)` then `Number.isFinite(limit) ? limit : 200`: an empty string is 0
-		// (clamped to 1 by ListAudit), non-numeric is NaN (200).
-		if n, err := strconv.ParseFloat(raw, 64); err == nil {
-			limit = int(n)
-		}
-	}
+	limit := auditLimit(r.URL.Query()["limit"])
 	entries, err := auth.ListAudit(r.Context(), s.DB, limit)
 	if err != nil {
 		writeEmpty(w, http.StatusInternalServerError)
@@ -461,6 +468,20 @@ func (s *Server) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, struct {
 		Entries []auth.AuditEntry `json:"entries"`
 	}{entries}, nil)
+}
+
+// auditLimit mirrors `Number(searchParams.get("limit") ?? 200)` with the `Number.isFinite` guard:
+// the default when the parameter is absent or not a number, and the coerced number otherwise. An
+// empty value is PRESENT — `Number("")` is 0, which ListAudit clamps up to 1 — so it must not be
+// confused with an absent one, which is why this reads the raw values rather than URL.Query().Get.
+func auditLimit(raw []string) int {
+	if len(raw) == 0 {
+		return 200
+	}
+	if n, err := strconv.ParseFloat(raw[0], 64); err == nil && !math.IsNaN(n) && !math.IsInf(n, 0) {
+		return int(n)
+	}
+	return 200
 }
 
 // handleAdminRemove is POST /api/admin/remove: hard removal / re-institute of a contributed entry.
@@ -497,6 +518,9 @@ func (s *Server) handleAdminRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	auth.RecordAudit(ctx, s.DB, r, actor, auth.AuditEntryRemove,
 		"entry:"+strconv.Itoa(body.ID), map[string]any{"removed": removed})
+	// The entry has to leave (or rejoin) the feeds now, not after the TTLs expire. Other instances
+	// still serve their own cached copy until theirs runs out; see README "Cache staleness bounds".
+	invalidateFeedCaches()
 	writeJSON(w, http.StatusOK, okIDRemoved{true, body.ID, removed}, nil)
 }
 
@@ -631,6 +655,8 @@ func (s *Server) handleAdminPurgeDead(w http.ResponseWriter, r *http.Request) {
 		"accountIds":  accountIDs,
 		"instanceIds": instanceIDs,
 	})
+	// Every purged entry is gone from the feeds as of this write, not when the TTLs expire.
+	invalidateFeedCaches()
 	writeJSON(w, http.StatusOK, okRemoved{true, removed}, nil)
 }
 
@@ -663,6 +689,8 @@ func (s *Server) handleAdminCheckEntry(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, errBody{Error: "not found"}, nil)
 		return
 	}
+	// The re-check may just have disabled or revived the entry: the feeds must reflect it now.
+	invalidateFeedCaches()
 	writeJSON(w, http.StatusOK, struct {
 		OK     bool                     `json:"ok"`
 		Result *health.CheckEntryResult `json:"result"`
@@ -707,6 +735,13 @@ func (s *Server) handleAdminForceCheck(w http.ResponseWriter, r *http.Request) {
 	mono := <-monoCh
 
 	auth.RecordAudit(ctx, s.DB, r, actor, auth.AuditEntryForceCheck, "entries", nil)
+
+	// The sweep just flipped statuses and the sync just changed instances, so republish the snapshot
+	// the discovery routes answer from — otherwise a URL this force-check killed keeps being served
+	// from the copy until the next scheduled instance sync (up to 12 hours). Same treatment as
+	// /api/cron/health.
+	blob.WriteInstanceSnapshot(ctx, s.DB, s.Blob)
+	invalidateFeedCaches()
 
 	var monochrome any = mono.result
 	if mono.err != nil {

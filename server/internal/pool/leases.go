@@ -259,22 +259,28 @@ type leaseRef struct {
 // across all of them writes an identical value, and the next request's ORDER BY then breaks the tie
 // arbitrarily — entries recur instead of rotating. Errors are swallowed: a bookkeeping failure must
 // never deny a client credentials it already holds.
+//
+// One statement, not one UPDATE per id: this runs on every credential fetch (up to 15 ids across the
+// services), and a per-row loop would cost a round trip each time a client asks for credentials.
+// Values are bound parameters, so the SQL text is static.
 func stampLeases(ctx context.Context, database *db.DB, table string, ids []int) {
 	if len(ids) == 0 {
 		return
 	}
 	base := time.Now()
-	err := database.Tx(ctx, func(tx *db.Tx) error {
-		for i, id := range ids {
-			if _, err := tx.Exec(ctx,
-				`update `+table+` set last_leased_at = $1 where id = $2`,
-				base.Add(time.Duration(i)*time.Millisecond), id); err != nil {
-				return err
-			}
+	var sb strings.Builder
+	sb.WriteString(`update ` + table + ` as t set last_leased_at = v.stamp from (values `)
+	args := make([]any, 0, len(ids)*2)
+	for i, id := range ids {
+		if i > 0 {
+			sb.WriteString(", ")
 		}
-		return nil
-	})
-	if err != nil {
+		args = append(args, id, base.Add(time.Duration(i)*time.Millisecond))
+		first := len(args) - 1
+		sb.WriteString(fmt.Sprintf("($%d::int, $%d::timestamptz)", first, first+1))
+	}
+	sb.WriteString(`) as v(id, stamp) where t.id = v.id`)
+	if _, err := database.Exec(ctx, sb.String(), args...); err != nil {
 		logf("[pool] failed to stamp lease timestamps %v", err)
 	}
 }

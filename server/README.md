@@ -51,7 +51,16 @@ Environment variables are identical to the TypeScript app (`.env.example`):
 On boot the process starts listening immediately and applies the idempotent migration in the
 background (the TS equivalent, `lib/db/ensure.ts`, is memoised and triggered by the first request).
 `server/migrations/001_schema.sql` is `scripts/schema.sql` verbatim; `internal/schema` also applies the
-`ensure.ts` statement list so a database created from an older `schema.sql` self-heals.
+`ensure.ts` statement list so a database created from an older `schema.sql` self-heals. `job_locks`
+(see "Scheduled-job exclusivity") is a Go-only table applied by the same migration.
+
+The connection pool (`internal/db`) probes a connection with `select 1` before handing it out if it
+has been idle for more than 30 s. A managed Postgres suspends the compute and drops its connections
+after a few idle minutes — the normal state here, since the caches exist to let the compute sleep —
+and the dead socket is otherwise invisible until the next statement fails, which cost the first
+request after every idle period. (The TS reference never hit this because node-postgres reaps idle
+clients after 10 s by default. Keeping connections warm is worth more to a long-lived Railway
+process than that reap, as long as a reused one is proved alive first.)
 
 ## TypeScript → Go map
 
@@ -95,8 +104,8 @@ available, exercised against a real deployment.
 | 5 | `GET /api/discovery/qobuz` | ✅ | alias of #3 for `qobuz` |
 | 6 | `GET /api/status` | ✅ | public, TTL-cached, 503 `database_unavailable` + message when the DB is down, `history:{days,overall,categories}` |
 | 7 | `POST /api/report` | ✅ | `dead`/`not_premium`, 3-report auto-disable, lease-proofed replacement (registered key + proven lease + 3/hour), `replacement` envelope identical to `/api/accounts` |
-| 8 | `GET /api/cron/health` | ✅ | `CRON_SECRET` or admin token; external ingestion (isolated), sweep, snapshot rewrite, cache invalidation |
-| 9 | `GET /api/cron/monochrome` | ✅ | monochrome + SpotiFLAC sync, snapshot rewrite, `ok` true if either feed succeeded, 500 when both failed |
+| 8 | `GET /api/cron/health` | ✅ | `CRON_SECRET` or admin token; external ingestion (isolated), sweep, snapshot rewrite, cache invalidation; a run that cannot take the sweep lease reports `locked:true` and does nothing (see "Scheduled-job exclusivity") |
+| 9 | `GET /api/cron/monochrome` | ✅ | monochrome + SpotiFLAC sync, snapshot rewrite, `ok` true if either feed succeeded, 500 when both failed; either sync reporting `locked:true` means another instance held the lease |
 | 10 | `POST /api/auth/signup` | ✅ | username/password rules, 5 accounts per IP+UA per 24h, session cookie |
 | 11 | `POST /api/auth/login` | ✅ | 10 attempts per IP+username and 30 per IP per 10 min, uniform `invalid_credentials` |
 | 12 | `POST /api/auth/logout` | ✅ | clears the cookie (`Max-Age=0`) |
@@ -119,7 +128,7 @@ available, exercised against a real deployment.
 | 29 | `POST /api/admin/remove` | ✅ | hard remove/restore across both tables by id, audit `entry.remove` |
 | 30 | `POST /api/admin/purge-dead` | ✅ | bulk-removes `status='dead'`, audit with ids |
 | 31 | `POST /api/admin/check-entry` | ✅ | single entry re-check, error message surfaced (e.g. missing `POOL_ENCRYPTION_KEY`) |
-| 32 | `POST /api/admin/force-check` | ✅ | forced sweep + monochrome sync in parallel, audit `entry.force_check` |
+| 32 | `POST /api/admin/force-check` | ✅ | forced sweep + monochrome sync in parallel, audit `entry.force_check`; also republishes the instance snapshot (the TS leaves the stale Blob copy in place until the next sync) |
 | 33 | `POST /api/tidal/device/start` | ✅ | 502 `start_failed` + detail on failure |
 | 34 | `POST /api/tidal/device/poll` | ✅ | `pending`/`slow_down`/`expired`/`error`, then the same ingest path as a manual submission |
 | 35 | `POST /api/qobuz/login` | ✅ | 401 `login_failed`, `needs_secret` passthrough, then ingest |
@@ -179,6 +188,53 @@ material); `turnstileJwtExpiresAt` is deliberately not on it. Before that, an Am
 `session` was the one pooled credential stored in plaintext, which the `internal/crypto` allowlist
 test now pins.
 
+## Scheduled-job exclusivity
+
+Several instances can run the same job against one database — Railway replicas, or Next and this
+server together during a cutover. Both cron jobs therefore take a row lease first
+(`internal/db/joblock.go`, table `job_locks`, created by the runtime migration):
+
+| Job | Lease | Held by |
+| --- | --- | --- |
+| `/api/cron/health` sweep (and `POST /api/admin/force-check`) | 20 min | `internal/health.RunHealthSweep` |
+| Instance sync (monochrome, SpotiFLAC, `force-check`) | 15 min | `internal/health.SyncInstanceURLs` |
+
+A run that cannot take the lease does nothing, logs `another instance holds …`, and reports
+`"locked": true` (an omitempty field, so a normal response is unchanged) / `checked: 0`. The lease is
+released when the run ends; if the process dies mid-run it expires instead, which is why the TTL is
+longer than any real run and shorter than the cron interval.
+
+What it prevents: two sweeps of the same row read-modify-write its `consecutive_failures` (so an
+entry that should have been disabled is not), both append `health_log` rows for one check, and — for
+a Tidal account — both race the refresh-token rotation that writes a new credential back, where the
+loser's write leaves a token Tidal has already invalidated. Two instance syncs derive the next state
+of the same fingerprint from a stale read of its check history.
+
+Why not `pg_try_advisory_lock`: serverless deployments use the pooler endpoint (docs/API.md), and a
+transaction-mode pooler can serve two consecutive statements from one client on different backends,
+so a session-scoped lock can be taken on a backend that then serves somebody else while the unlock
+lands elsewhere. A single-statement row lease is backend-independent. The TypeScript cron routes do
+not consult this table yet, so during a mixed cutover only the Go runs are exclusive; mirroring the
+statement into `lib/db/ensure.ts` and the claim into `lib/health-sweep.ts` would close that.
+
+## Cache staleness bounds
+
+`internal/cache` is process-local (the TS's `lib/ttl-cache.ts` is too), so an invalidation cannot
+reach another instance. Within one instance a write invalidates what it changed:
+
+| Write | Invalidates | Worst-case staleness |
+| --- | --- | --- |
+| Health sweep / force-check | `status`, `discovery:`, `snapshot:` (+ Blob snapshot rewrite) | none in-process |
+| `POST /api/admin/remove`, `purge-dead` | `status`, `discovery:`, `snapshot:` | none in-process |
+| `POST /api/admin/check-entry` | `status`, `discovery:`, `snapshot:` | none in-process |
+| Report (`/api/report`) | nothing | `status` ≤ 5 min; discovery ≤ 5 min from the database read, and ≤ 12 h from the Blob copy (it is rewritten only by the instance sync) |
+| Read-key revoke / restore (admin or dashboard) | nothing — `IdentifyReadKey` reads `api_keys` on every request | none, in any instance |
+
+Across instances the bounds are the TTLs (5 min for `status`/`discovery:`/`snapshot:`) and the Blob
+snapshot's own freshness window (24 h, rewritten by the 12-hourly sync). A key revocation or an
+admin removal therefore reaches another instance's cached discovery answer within 5 minutes, and a
+Blob-served one within a sync interval if that instance never rewrites the snapshot.
+
 ## Intentional deviations
 
 1. **Key order inside payload-derived objects.** Client-facing credential objects
@@ -190,7 +246,8 @@ test now pins.
 2. **`lastCheckedAt` on `/api/status`.** The TS builds `items.map(r => r.lastCheckedAt).filter(Boolean).sort().pop()`
    — sorting `Date` objects with the default comparator sorts their `toString()` (weekday name first),
    so the value it reports is not necessarily the latest check. The port returns the true maximum.
-   This is the only behavioural improvement in the port; nothing else consumes that field.
+   Until the changes in this section, it was the only behavioural improvement in the port; nothing
+   else consumes that field.
 3. **`POST /api/submit` is additive.** The manual-submission form is a Next *server action*, not an
    HTTP route, so it has no path to be a drop-in for. The Go equivalent of its logic is implemented
    and exposed there for a cutover where the Go server also serves the form; while Next serves the
@@ -206,6 +263,21 @@ test now pins.
    refused`, and a failing health probe reports `Get "https://…": dial tcp …` where Node said
    `fetch failed`. Codes, statuses and shapes are unchanged; only the human-readable detail differs.
    (Timeouts are still reported as `timeout`, matching `lib/health.ts`'s `reason()`.)
+7. **Scheduled jobs are exclusive.** A second instance's run reports `locked` and does nothing
+   instead of sweeping the same rows twice; see "Scheduled-job exclusivity". The TS has no such
+   guard, so during a mixed cutover the protection covers the Go runs only.
+8. **Admin writes drop the cached feeds, and `force-check` republishes the snapshot.** The TS leaves
+   the process cache and the Blob copy in place, so an entry removed with `/api/admin/remove` (or an
+   instance a re-check just disabled) keeps being served from the snapshot until the next 12-hourly
+   sync. See "Cache staleness bounds".
+9. **`POST /api/keys` fails closed when the key list cannot be read.** The TS calls `listUserApiKeys`
+   outside its try/catch: a database error there is an unhandled rejection (500, empty body) and the
+   active-key cap silently never runs. The port answers the same 500 with the `internal_error`
+   envelope and does not create the request.
+10. **One entry's panic does not fail the whole sweep.** A panic inside a worker is logged and that
+    entry is skipped (`internal/health.mapLimit`), where the TS's `Promise.all` rejects the run. A
+    panic in a spawned goroutine has no `net/http` recover behind it, so without this a single bad
+    payload would exit the process rather than fail one check.
 
 ## Verification
 
@@ -244,12 +316,17 @@ Tests and what they pin:
   clock.
 * `internal/httpapi` — routing fallbacks (404/405 empty bodies, trailing-slash redirect, HEAD→GET),
   path-parameter capture, JSON key order for every documented body (including the embedded one-time
-  key response), no HTML escaping, the 429 shape, JavaScript `Number()` coercion, the credential
-  feed's fail-closed 503, cron authorization, and a registry test asserting all 36 registered
-  routes.
+  key response), no HTML escaping, the 429 shape, JavaScript `Number()` coercion (including the
+  `?limit=` handling `/api/admin/audit` inherits from `Number(searchParams.get("limit") ?? 200)`),
+  the credential feed's fail-closed 503, cron authorization, and a registry test asserting all 36
+  registered routes.
 * `internal/schema` — a live test (`DATABASE_URL`) asserting the migration is idempotent and leaves
   every relation the app reads in place. It applies the same idempotent statements the server applies
   at boot.
+* `internal/db` — a live test (`DATABASE_URL`) for the scheduled-job lease: a second `*DB` cannot take
+  a lease the first holds, a release frees it, an expired lease becomes claimable again, and a stale
+  holder's late release does not free its replacement. It touches only `job_locks`, under a name no
+  real job uses, and deletes its row afterwards.
 
 Live verification performed against the deployment in `.env.local`:
 

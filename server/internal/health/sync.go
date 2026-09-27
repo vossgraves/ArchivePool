@@ -19,6 +19,9 @@ type InstanceSyncResult struct {
 	Updated  int `json:"updated"`  // already existed, status updated
 	Failed   int `json:"failed"`   // health check did not pass
 	Rejected int `json:"rejected"` // reachable but not premium/hi-res — not added (new) per pool policy
+	// Locked reports that another run held the job lease and this one did nothing. Absent from a
+	// normal run, so the monochrome/SpotiFLAC response body is unchanged.
+	Locked bool `json:"locked,omitempty"`
 }
 
 // Instances checked more recently than this are skipped, so a sweep never hammers live hosts.
@@ -29,14 +32,34 @@ const defaultRecheckWindow = 6 * time.Hour
 // so the added/updated/failed accounting stays exact.
 const defaultSyncConcurrency = 5
 
+// syncLeaseTTL bounds the instance sync's job lease. Five workers over a community list are done in
+// a couple of minutes; the lease only has to outlive one run so a crashed one cannot block the next.
+const syncLeaseTTL = 15 * time.Minute
+
 // SyncInstanceURLs health-checks a list of instance base URLs for one service and upserts the
 // passing (premium) ones, updating rather than recreating any that already exist. This is the shared
 // core behind every instance feed: a feed module only has to produce the URLs.
 //
 // Expect most of a community list to land in `rejected` rather than `added`: public HiFi instances
 // are frequently unsubscribed and therefore preview-only, which is the gate doing its job.
+//
+// The run is exclusive (see internal/db.ClaimJob): the monochrome and SpotiFLAC feeds overlap on
+// shared community lists, and two instances syncing the same fingerprint each derive the row's next
+// state from a stale read of its check history, so an entry can end up with the loser's older status
+// and last_checked_at while its counters claim both runs were recorded.
 func SyncInstanceURLs(ctx context.Context, database *db.DB, service pool.Service, urls []string, note string, recheckWindow time.Duration, concurrency int) (InstanceSyncResult, error) {
 	database.EnsureSchema(ctx)
+
+	if lease, ok, err := database.ClaimJob(ctx, "instance-sync", syncLeaseTTL); err != nil {
+		// An unavailable guard must not stop the feeds being refreshed; it only means this run is
+		// unguarded.
+		logf("[health] could not claim the instance-sync lease, running unguarded: %v", err)
+	} else if !ok {
+		logf("[health] another instance holds the instance-sync lease; skipping this run")
+		return InstanceSyncResult{Locked: true}, nil
+	} else {
+		defer lease.Release(ctx)
+	}
 
 	if recheckWindow <= 0 {
 		recheckWindow = defaultRecheckWindow

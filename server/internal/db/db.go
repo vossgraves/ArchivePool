@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 
 	"archivepool/server/internal/pgwire"
 )
@@ -18,13 +19,34 @@ import (
 // allowing the concurrent health sweeps (6 workers) to run without serialising on one connection.
 const defaultMaxConns = 8
 
+// idleProbeAfter is how long a connection may sit idle before the pool proves it is still alive
+// before handing it to a request by reusing it.
+//
+// A managed Postgres suspends the compute after a few idle minutes and drops its connections —
+// which is the normal state of this pool, since the whole point of the caches is to let the compute
+// sleep. The dropped socket looks fine from here until a statement is written to it, so without this
+// check the first request after every idle period fails with a transport error even though the
+// database is healthy. Probing costs one round trip on a connection that has been idle, and nothing
+// on a busy pool.
+const idleProbeAfter = 30 * time.Second
+
+// idleProbeTimeout bounds the liveness probe itself, so a black-holed connection cannot hold a
+// request past its own deadline.
+const idleProbeTimeout = 5 * time.Second
+
+// idleConn is a pooled connection plus the moment it went idle.
+type idleConn struct {
+	conn  *pgwire.Conn
+	since time.Time
+}
+
 // DB is a connection pool plus the one-time schema migration hook.
 type DB struct {
 	cfg      pgwire.Config
 	maxConns int
 
 	mu      sync.Mutex
-	idle    []*pgwire.Conn
+	idle    []idleConn
 	open    int
 	waiters []chan struct{}
 	closed  bool
@@ -93,17 +115,18 @@ func (d *DB) acquire(ctx context.Context) (*pgwire.Conn, error) {
 			return nil, errors.New("db: pool is closed")
 		}
 		if n := len(d.idle); n > 0 {
-			c := d.idle[n-1]
+			ic := d.idle[n-1]
 			d.idle = d.idle[:n-1]
 			d.mu.Unlock()
-			if c.Broken() {
-				_ = c.Close()
+			if ic.conn.Broken() || !d.stillAlive(ctx, ic) {
+				_ = ic.conn.Close()
 				d.mu.Lock()
 				d.open--
+				d.wakeLocked()
 				d.mu.Unlock()
 				continue
 			}
-			return c, nil
+			return ic.conn, nil
 		}
 		if d.open < d.maxConns {
 			d.open++
@@ -159,8 +182,29 @@ func (d *DB) release(c *pgwire.Conn) {
 		_ = c.Close()
 		return
 	}
-	d.idle = append(d.idle, c)
+	d.idle = append(d.idle, idleConn{conn: c, since: time.Now()})
 	d.wakeLocked()
+}
+
+// stillAlive reports whether a connection that has been idle can still be handed to a request.
+// A recently used connection is taken as-is; one that has been idle past idleProbeAfter is probed
+// with a trivial statement, because its socket may have been closed by a suspended server without
+// any error being visible on this side yet.
+func (d *DB) stillAlive(ctx context.Context, ic idleConn) bool {
+	if time.Since(ic.since) < idleProbeAfter {
+		return true
+	}
+	if ctx.Err() != nil {
+		// The caller's deadline has already passed: its query will fail on its own account, and
+		// discarding a healthy connection here would only cost the next caller a reconnect.
+		return true
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, idleProbeTimeout)
+	defer cancel()
+	if _, err := ic.conn.SimpleQuery(probeCtx, "select 1"); err != nil {
+		return false
+	}
+	return true
 }
 
 // wakeLocked hands one waiter its slot (caller holds d.mu).
@@ -192,8 +236,8 @@ func (d *DB) Close() error {
 	idle := d.idle
 	d.idle = nil
 	d.mu.Unlock()
-	for _, c := range idle {
-		_ = c.Close()
+	for _, ic := range idle {
+		_ = ic.conn.Close()
 	}
 	return nil
 }

@@ -52,10 +52,6 @@ func Do(ctx context.Context, spec Request) (*http.Response, error) {
 		timeout = 12 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
-	// The cancel is deliberately not deferred: the response body is read by the caller, and
-	// cancelling on return would abort that read. Callers close the body, which releases the
-	// context through the request's own lifetime.
-	_ = cancel
 
 	var body io.Reader
 	if spec.Body != nil {
@@ -63,6 +59,7 @@ func Do(ctx context.Context, spec Request) (*http.Response, error) {
 	}
 	req, err := http.NewRequestWithContext(ctx, method, spec.URL, body)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	req.Header.Set("user-agent", DefaultUA)
@@ -71,9 +68,27 @@ func Do(ctx context.Context, spec Request) (*http.Response, error) {
 	}
 	res, err := Client.Do(req)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
+	// The cancel cannot run here — the caller still has to read the body — but it must not simply be
+	// dropped either: until it runs, the deadline timer and the request's context tree stay alive for
+	// the whole timeout on every single call a sweep makes. Attaching it to the body releases both as
+	// soon as the caller closes, and every caller closes.
+	res.Body = &cancelBody{ReadCloser: res.Body, cancel: cancel}
 	return res, nil
+}
+
+// cancelBody cancels the request's context when the body is closed.
+type cancelBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
 }
 
 // Get issues a GET and returns the response.

@@ -94,15 +94,41 @@ type SweepSummary struct {
 	Skipped   int `json:"skipped"`
 	Disabled  int `json:"disabled"`
 	Reenabled int `json:"reenabled"`
+	// Locked reports that another run held the job lease and this one did nothing. It is absent
+	// from a normal run, so the documented cron body is unchanged.
+	Locked bool `json:"locked,omitempty"`
 }
+
+// sweepLeaseTTL bounds the sweep's job lease. It only has to outlive one run (a few minutes at
+// sweepConcurrency against the pool's size): an expired lease is how a crashed run releases the job
+// for the next scheduled one instead of blocking it forever.
+const sweepLeaseTTL = 20 * time.Minute
 
 // ErrEncryptionRequired is returned when account credentials cannot be processed.
 var ErrEncryptionRequired = errors.New("POOL_ENCRYPTION_KEY is required to process account credentials")
 
 // RunHealthSweep re-checks every non-removed entry (or only the stale ones), persisting the verdict
 // and the health_log row.
+//
+// The run is exclusive: several instances can be scheduled at once (Railway replicas, or Vercel and
+// Railway during a cutover, all against one database) and two sweeps of the same row would
+// read-modify-write its failure counters — under-counting the failures that disable an entry — and,
+// for a Tidal account, race the refresh-token rotation that persists a new credential, where the
+// loser's write leaves a token Tidal has already invalidated.
 func RunHealthSweep(ctx context.Context, database *db.DB, force bool) (SweepSummary, error) {
 	database.EnsureSchema(ctx)
+
+	if lease, ok, err := database.ClaimJob(ctx, "health-sweep", sweepLeaseTTL); err != nil {
+		// An unavailable guard (an older database without the lease table) must not stop the pool
+		// being health-checked; it only means this run is unguarded.
+		logf("[health] could not claim the sweep lease, running unguarded: %v", err)
+	} else if !ok {
+		logf("[health] another instance holds the sweep lease; skipping this run")
+		return SweepSummary{Locked: true}, nil
+	} else {
+		defer lease.Release(ctx)
+	}
+
 	allEntries, err := AllPoolEntries(ctx, database)
 	if err != nil {
 		return SweepSummary{}, err
@@ -314,6 +340,11 @@ func boolInt(v bool) int {
 
 // mapLimit runs fn over items with a bounded number of workers, keeping the per-item accounting
 // exact (each worker awaits its own item before taking the next).
+//
+// A panic inside fn is confined to its item and logged. The TS equivalent (an exception in one
+// worker of Promise.all) fails that run but cannot take the process down, whereas an unrecovered
+// panic in any goroutine here would exit the whole server — every route, for every client — because
+// one contributor's payload tripped a probe.
 func mapLimit[T any](items []T, limit int, fn func(T)) {
 	if len(items) == 0 {
 		return
@@ -325,7 +356,7 @@ func mapLimit[T any](items []T, limit int, fn func(T)) {
 	var next int
 	var mu sync.Mutex
 	wg.Add(limit)
-	for i := 0; i < limit; i++ {
+	for range limit {
 		go func() {
 			defer wg.Done()
 			for {
@@ -336,9 +367,19 @@ func mapLimit[T any](items []T, limit int, fn func(T)) {
 				if idx >= len(items) {
 					return
 				}
-				fn(items[idx])
+				runItem(items[idx], fn)
 			}
 		}()
 	}
 	wg.Wait()
+}
+
+// runItem calls fn under a recover, so one bad item is one failed item rather than a process exit.
+func runItem[T any](item T, fn func(T)) {
+	defer func() {
+		if r := recover(); r != nil {
+			logf("[health] check panicked for %v: %v", item, r)
+		}
+	}()
+	fn(item)
 }

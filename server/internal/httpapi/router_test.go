@@ -294,6 +294,30 @@ func TestJSNumbersMatchJavaScript(t *testing.T) {
 	}
 }
 
+// TestAuditLimitMatchesJavaScript pins `Number(searchParams.get("limit") ?? 200)` for /api/admin/audit.
+// The default applies only when the parameter is ABSENT: `?limit=` is present and coerces to 0,
+// which ListAudit then clamps up to 1 — treating it as absent would hand back 200 rows instead.
+func TestAuditLimitMatchesJavaScript(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  []string
+		want int
+	}{
+		{"absent", nil, 200},
+		{"empty", []string{""}, 0},
+		{"numeric", []string{"50"}, 50},
+		{"zero", []string{"0"}, 0},
+		{"negative", []string{"-5"}, -5},
+		{"non-numeric", []string{"abc"}, 200},
+		{"fraction", []string{"12.7"}, 12},
+	}
+	for _, tc := range cases {
+		if got := auditLimit(tc.raw); got != tc.want {
+			t.Errorf("auditLimit(%s) = %d; want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
 // TestCredentialFeedWithoutDatabase: the credential feed fails closed with 503 when no client key is
 // configured and the caller is not a v2 client — the same response the TS returns.
 func TestCredentialFeedWithoutDatabase(t *testing.T) {

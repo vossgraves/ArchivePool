@@ -11,6 +11,7 @@ import (
 	"log"
 	"strings"
 
+	"archivepool/server/internal/db"
 	"archivepool/server/migrations"
 )
 
@@ -164,10 +165,15 @@ var ensureStatements = []string{
 }
 
 // Statements returns every migration statement: the ensure.ts list first (so a drifted database is
-// healed before the DDL runs) followed by the verbatim 001_schema.sql statements.
+// healed before the DDL runs), then the Go-only statements, followed by the verbatim
+// 001_schema.sql statements.
 func Statements() []string {
 	out := make([]string, 0, len(ensureStatements)+64)
 	out = append(out, ensureStatements...)
+	// Go-only: the lease table that keeps the scheduled jobs from running twice at once. The
+	// TypeScript cron routes do not consult it, so a cutover should mirror the statement (and the
+	// claim in internal/db/joblock.go) into lib/db/ensure.ts.
+	out = append(out, db.JobLocksDDL)
 	out = append(out, SplitStatements(migrations.SchemaSQL)...)
 	return out
 }

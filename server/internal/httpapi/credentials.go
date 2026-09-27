@@ -35,8 +35,10 @@ type needsSecret struct {
 	UserAuthToken string `json:"userAuthToken"`
 	AppID         string `json:"appId"`
 	UserID        string `json:"userId"`
-	CountryCode   string `json:"countryCode"`
-	Detail        string `json:"detail"`
+	// Absent when Qobuz's login response carried no country_code, exactly as the TS object literal
+	// serializes (`countryCode: loginResult.countryCode`, undefined keys are dropped).
+	CountryCode string `json:"countryCode,omitempty"`
+	Detail      string `json:"detail"`
 }
 
 // handleTidalDeviceStart is POST /api/tidal/device/start.
