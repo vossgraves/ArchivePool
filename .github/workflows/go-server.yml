@@ -1,0 +1,30 @@
+name: Go server
+
+# The Go port under server/ had no build check, and a broken package clause reached main unnoticed.
+on:
+  push:
+    branches: [main]
+    paths: ["server/**", ".github/workflows/go-server.yml"]
+  pull_request:
+    paths: ["server/**", ".github/workflows/go-server.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: server/go.mod
+          # Standard library only: there is no go.sum to key a cache on.
+          cache: false
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
