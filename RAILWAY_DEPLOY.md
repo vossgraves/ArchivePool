@@ -22,17 +22,9 @@
 ### 1. Generate Encryption Keys
 
 ```bash
-# Install dependencies
-npm install
-
-# Generate keys (DO NOT lose these!)
-npm run keygen
-```
-
-This outputs:
-```
-POOL_ENCRYPTION_KEY=<base64-string>
-POOL_CLIENT_KEY=<base64-string>
+# Run once per key; each prints a base64 32-byte key (DO NOT lose these!)
+openssl rand -base64 32   # -> POOL_ENCRYPTION_KEY
+openssl rand -base64 32   # -> POOL_CLIENT_KEY
 ```
 
 **⚠️ CRITICAL**: Store these safely. Losing them = all pooled accounts become permanently unusable.
@@ -43,19 +35,22 @@ POOL_CLIENT_KEY=<base64-string>
 2. Connect your GitHub repo: `vossgraves/ArchivePool`
 3. Add a Postgres database (Railway provisions automatically)
 4. Set environment variables:
-   - `POOL_ENCRYPTION_KEY` - from keygen
-   - `POOL_CLIENT_KEY` - from keygen
+   - `POOL_ENCRYPTION_KEY` - from step 1
+   - `POOL_CLIENT_KEY` - from step 1
    - `ADMIN_TOKEN` - create strong random token
    - `CRON_SECRET` - create strong random token
 
 ### 3. Configure ArchiveTune App
 
-In ArchiveTune's `local.properties` or build config:
+ArchiveTune reads these from `local.properties`, the build environment, or the repo's GitHub
+Actions variables/secrets of the same names:
 ```properties
-POOL_DISCOVERY_URL=https://<your-railway-app>.up.railway.app/api/discovery
-POOL_CLIENT_KEY=<same-as-server-POOL_CLIENT_KEY>
+# Base URL only: the app requests /api/accounts (falling back to /api/sources) itself.
+SOURCE_PROVIDER_URL=https://<your-railway-app>.up.railway.app
 SOURCE_PROVIDER_KEY=<API-key-from-dashboard>
 ```
+`POOL_CLIENT_KEY` is optional on the app side: current builds use the v2 feed, whose key is
+derived from `SOURCE_PROVIDER_KEY`; it is only a fallback for pool deployments older than v2.
 
 ### 4. Create API Keys
 
@@ -79,15 +74,14 @@ go build -o archivepool ./cmd/archivepool
 Same variables as Next.js, reads from `.env` or environment.
 
 ### Railway Go Deploy
-Create `railway.toml`:
-```toml
-[build]
-builder = "NIXPACKS"
-buildCommand = "cd server && go build -o archivepool ./cmd/archivepool"
+Add a second service from the same repo and configure it in the service's Settings. Do not add
+a root `railway.toml`: the repo's `railway.json` already deploys the Next.js app, and Railway
+applies one config file per service.
+- Root Directory: `server`
+- Build Command: `go build -o archivepool ./cmd/archivepool`
+- Start Command: `./archivepool`
 
-[deploy]
-startCommand = "./server/archivepool"
-```
+The server listens on `PORT` (default 8080), which Railway sets.
 
 ## Health Checks
 
@@ -99,13 +93,13 @@ Set up Railway Cron Plugin or external cron service:
 
 **Health Sweep** (every 6 hours):
 ```
-POST /api/cron/health
+GET /api/cron/health
 Authorization: Bearer <CRON_SECRET>
 ```
 
 **Instance Sync** (every 6 hours):
 ```
-POST /api/cron/monochrome
+GET /api/cron/monochrome
 Authorization: Bearer <CRON_SECRET>
 ```
 
