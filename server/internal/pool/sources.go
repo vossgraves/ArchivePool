@@ -52,15 +52,18 @@ type Category struct {
 	Label   string
 }
 
-// Categories are the public status categories. Deezer and Apple Music are account-only: there is
-// no self-hosted instance tier to pool beside them. Amazon Music has both — an instance answering
-// `GET {baseUrl}/health`, whose pooled material is auth (a bypass token or a Turnstile JWT) rather
-// than an account — and the two categories are independent.
+// Categories are the public status categories. Apple Music is account-only: there is no
+// self-hosted instance tier to pool beside it. Deezer and Amazon Music have both — a Deezer
+// instance answers `GET {baseUrl}/health` with an `{ok,user}` or `{ok,accounts}` document
+// (health.checkDeezerInstance), an Amazon one with its own `status` document
+// (health.checkAmazonMusicInstance) — and for each of those services the two categories are
+// independent.
 var Categories = []Category{
 	{ServiceTidal, KindAPI, "Tidal API"},
 	{ServiceTidal, KindAccount, "Tidal Account"},
 	{ServiceQobuz, KindAPI, "Qobuz API"},
 	{ServiceQobuz, KindAccount, "Qobuz Account"},
+	{ServiceDeezer, KindAPI, "Deezer API"},
 	{ServiceDeezer, KindAccount, "Deezer Account"},
 	{ServiceAppleMusic, KindAccount, "Apple Music Account"},
 	{ServiceAmazonMusic, KindAPI, "Amazon Music API"},

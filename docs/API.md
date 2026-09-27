@@ -42,7 +42,7 @@ Read-key enforcement is controlled by the `READ_KEYS_ENFORCED` env var:
 Aggregate, credential-free health for the public status page. Never contains secrets.
 
 Response — one object per category (Tidal API, Tidal Account, Qobuz API, Qobuz Account,
-Deezer Account):
+Deezer API, Deezer Account, Apple Music Account, Amazon Music API, Amazon Music Account):
 
 ```json
 {
@@ -105,8 +105,10 @@ curl https://archivepool.vercel.app/api/status
 The full pool as the app consumes it. Leases **up to 3 entries per category**
 (`LEASE_PER_CATEGORY`) rather than the whole pool: selection is premium-first, then
 least-recently-leased, and the server stamps `last_leased_at` so rotation advances across
-requests. `apis` is always an empty list for Deezer and Apple Music (neither has a self-hosted
-instance tier); Amazon Music has both an instance tier (`apis`) and an account tier.
+requests. `apis` carries instance URLs for every service that has an instance tier: Tidal, Qobuz,
+Deezer and Amazon Music (its instances answer `GET {baseUrl}/health`; Deezer ones answer
+`GET {baseUrl}/health` too, with either an `{ok,user}` or an `{ok,accounts}` document). Apple Music
+is the only `apis` list that is always empty — it has no self-hosted instance tier.
 
 For **account** entries, this is also a sticky per-key lease: a resolved read key (its `api_keys`
 row id) keeps the same entries across repeated fetches for 72h (`LEASE_TTL_HOURS`) rather than
@@ -182,6 +184,21 @@ otherwise from the health body.
 Auth material for those instances (`bypassToken`, or a pre-minted `turnstileJwt` with
 `turnstileJwtExpiresAt`) never appears in this feed: it travels on the entry and is delivered only
 through the credential feed, encrypted like every other credential.
+
+### `GET /api/instances/deezer`
+
+Same route and shape, for Deezer instances (`GET {baseUrl}/health` unless the contributor set a
+`healthPath`). A Deezer instance also publishes its own liveness document, but in one of two
+community shapes: Ultra MAX (`github.com/PaRaN01a-hash/ultramax-music`) answers
+`{"ok":true,"user":{…}}` and fails with `{"ok":false,"error":…}`; the Monochrome Deezer fallback
+host answers `{"ok":bool,"accounts":{"total","available","dead","cooling",…},…}`. The pool reads
+the verdict from the document: an explicit `ok:false` is dead, and so is an `accounts` block with
+nothing available or cooling. Premium is read from the same hi-res markers as everywhere else —
+from `probeUrl` when the contributor gave one, otherwise from the health body.
+
+Deezer instances are per-user in the wild (Ultra MAX authenticates with the caller's own ARL), so
+the pool ships no seed list for this tier beyond the host shape it verifies: instances arrive as
+contributed submissions, and are served only after that liveness check.
 
 ---
 
@@ -334,7 +351,8 @@ validation server-side. The `/submit` page supports:
   (credentials never stored server-side beyond the encrypted pool record), or pasting
   an appId/token pair.
 - **Deezer accounts** — pasting an `arl` cookie.
-- **API instances** — a `baseUrl` for Tidal/Qobuz restream instances.
+- **API instances** — a `baseUrl` for Tidal/Qobuz restream instances, and for Deezer instances,
+  which are verified against their own `/health` document (see `/api/instances/deezer`).
 - **Amazon Music instances** — a `baseUrl` verified against that instance's own `/health`
   document, with optional instance auth material: the operator's `bypassToken`, or a pre-minted
   `turnstileJwt` plus its `turnstileJwtExpiresAt`.

@@ -242,6 +242,94 @@ async function checkAmazonMusicInstance(payload: Record<string, unknown>): Promi
   }
 }
 
+/**
+ * Deezer instances.
+ *
+ * A self-hosted Deezer instance publishes its own liveness document, so like the Amazon tier this
+ * one asks the instance directly: `GET {baseUrl}{healthPath || "/health"}` must answer HTTP 2xx
+ * with a JSON object that says it is serving. The generic checkApi cannot express that — it treats
+ * anything below 500 as reachable, so an instance answering `{"ok":false,…}` with a 200 would be
+ * handed to every app as working.
+ *
+ * Two community shapes are in the wild, both verified 2026-09:
+ *  - Ultra MAX (github.com/PaRaN01a-hash/ultramax-music, helper/app.py `GET /health`): the helper
+ *    authenticates against Deezer with the caller's ARL and answers `{"ok":true,"user":{…}}`, or
+ *    HTTP 500 `{"ok":false,"error":…}` when the ARL is refused.
+ *  - The Monochrome Deezer fallback (dzr.tabs-vs-spaces.wtf, `deezer-fallback-api-base-url` in its
+ *    web bundle): `/` and `/health` serve the same account-pool document
+ *    `{"ok":bool,"accounts":{"total","available","dead","cooling",…},"defaultFormat":"FLAC",…}`.
+ *
+ * The verdict is therefore: an explicit `ok:false` is dead; otherwise a present `accounts` block
+ * with nothing available or cooling is dead; otherwise the newest `ok:true`/`user` document is
+ * alive. Premium comes from the same hi-res markers every other instance uses (`defaultFormat:
+ * "FLAC"` matches the literal `flac` arm), read from `probeUrl` when one is given.
+ */
+async function checkDeezerInstance(payload: Record<string, unknown>): Promise<CheckResult> {
+  const baseUrl = String(payload.baseUrl ?? "").trim().replace(/\/+$/, "")
+  if (!baseUrl) return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: "missing baseUrl" }
+
+  const healthPath = String(payload.healthPath ?? "").trim() || "/health"
+  const target = `${baseUrl}${healthPath.startsWith("/") ? "" : "/"}${healthPath}`
+
+  try {
+    const { res, ms } = await timedFetch(target)
+    if (res.status < 200 || res.status >= 300) {
+      return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: `HTTP ${res.status}` }
+    }
+
+    const body = (await res.text()).slice(0, 20_000)
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(body)
+    } catch {
+      return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: "health response is not JSON" }
+    }
+    const record = typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : null
+    if (!record) {
+      return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: "health response is not an object" }
+    }
+
+    const accounts = typeof record.accounts === "object" && record.accounts !== null
+      ? (record.accounts as Record<string, unknown>)
+      : null
+    const hasUser = typeof record.user === "object" && record.user !== null
+
+    if (record.ok === false) {
+      return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: "status: not ok" }
+    }
+    if (accounts) {
+      // An instance whose whole pool is exhausted still answers its document, so the counts —
+      // not the HTTP status — are what say it can serve right now.
+      const total = Number(accounts.total ?? 0)
+      const available = Number(accounts.available ?? 0)
+      const cooling = Number(accounts.cooling ?? 0)
+      if (total > 0 && available === 0 && cooling === 0) {
+        return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: "no accounts available" }
+      }
+    } else if (!hasUser && record.ok !== true) {
+      return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: "health response has no status" }
+    }
+
+    let premium = HI_RES_RE.test(body.toLowerCase())
+    const probeUrl = String(payload.probeUrl ?? "").trim()
+    if (probeUrl) {
+      premium = false
+      try {
+        const probeTarget = probeUrl.startsWith("http") ? probeUrl : `${baseUrl}${probeUrl.startsWith("/") ? "" : "/"}${probeUrl}`
+        const { res: probeRes } = await timedFetch(probeTarget)
+        const probeText = (await probeRes.text()).slice(0, 20_000).toLowerCase()
+        premium = HI_RES_RE.test(probeText)
+      } catch {
+        premium = false
+      }
+    }
+
+    return { ok: true, premium, status: classify(true, premium), latencyMs: ms, detail: `HTTP ${res.status}` }
+  } catch (e) {
+    return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: reason(e) }
+  }
+}
+
 /** Refreshes a Tidal access token and writes it back, so later checks use the new one. */
 /**
  * True when a Tidal JWT is a refresh token rather than an access token. The payload is read
@@ -638,8 +726,9 @@ export async function runCheck(
   payload: Record<string, unknown>,
   entryFingerprint?: string,
 ): Promise<CheckResult> {
-  // Amazon instances publish their own liveness document, so they are checked against it rather
-  // than through the generic reachability rule (see checkAmazonMusicInstance).
+  // Amazon and Deezer instances publish their own liveness documents, so they are checked
+  // against those rather than through the generic reachability rule.
+  if (kind === "api" && service === "deezer") return checkDeezerInstance(payload)
   if (kind === "api" && service === "amazon-music") return checkAmazonMusicInstance(payload)
   if (kind === "api") return checkApi(service, payload)
   if (service === "tidal") return checkTidalAccount(payload, entryFingerprint)

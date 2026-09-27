@@ -453,7 +453,7 @@ export function StatusBoard({ fallback }: { fallback?: StatusPayload }) {
                     </TableHead>
                     {cat.total === 0 ? (
                       // An empty category keeps its row, with the reason in words rather than
-                      // a line of zeroes. Deezer and Apple Music are account-only.
+                      // a line of zeroes. Apple Music is account-only.
                       <TableCell colSpan={COLUMN_COUNT - 1} className="px-3 py-2">
                         <Empty
                           className="gap-2 px-3 py-3 sm:flex-row sm:justify-center"

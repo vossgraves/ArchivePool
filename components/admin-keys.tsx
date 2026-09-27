@@ -237,7 +237,7 @@ export function AdminKeys() {
     }
   }
 
-  /** Re-runs the health sweep and the monochrome.tf sync immediately, ignoring the 6h cooldown. */
+  /** Re-runs the health sweep and the monochrome instance sync immediately, ignoring the 6h cooldown. */
   async function forceCheck() {
     setForceChecking(true)
     setForceResult(null)
@@ -459,7 +459,7 @@ export function AdminKeys() {
             <p className="min-w-0 max-w-[62ch] text-xs leading-relaxed text-muted-foreground">
               <span className="font-medium text-foreground">Force check everything.</span> Re-checks
               every account and instance now, bypassing the 6-hour cooldown, and pulls a fresh
-              monochrome.tf sync.
+              monochrome instance sync.
             </p>
             <Button
               variant="outline"

@@ -20,14 +20,16 @@ export const KIND_LABELS: Record<Kind, string> = {
   account: "Account",
 }
 
-/** The four public status categories. */
+/** The public status categories. */
 export const CATEGORIES: { service: Service; kind: Kind; label: string }[] = [
   { service: "tidal", kind: "api", label: "Tidal API" },
   { service: "tidal", kind: "account", label: "Tidal Account" },
   { service: "qobuz", kind: "api", label: "Qobuz API" },
   { service: "qobuz", kind: "account", label: "Qobuz Account" },
-  // Deezer is account-only: there is no self-hosted instance/restream tier for it, so no
-  // "Deezer API" category exists.
+  // Deezer has both tiers. A self-hosted instance serves a liveness document at
+  // `GET {baseUrl}/health` (Ultra MAX: `{ok,user}`; the Monochrome fallback host:
+  // `{ok,accounts,…}`) and streams from its own paths — see checkDeezerInstance in lib/health.ts.
+  { service: "deezer", kind: "api", label: "Deezer API" },
   { service: "deezer", kind: "account", label: "Deezer Account" },
   // Apple Music is account-only too: the credential is the personal Media-User-Token
   // (0.Ap…) from a contributor's Apple Music web session.

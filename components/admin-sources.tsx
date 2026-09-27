@@ -21,6 +21,7 @@ const CATEGORIES: { service: string; kind: string; label: string }[] = [
   { service: "tidal", kind: "account", label: "Tidal Account" },
   { service: "qobuz", kind: "api", label: "Qobuz API" },
   { service: "qobuz", kind: "account", label: "Qobuz Account" },
+  { service: "deezer", kind: "api", label: "Deezer API" },
   { service: "deezer", kind: "account", label: "Deezer Account" },
   { service: "apple-music", kind: "account", label: "Apple Music Account" },
   { service: "amazon-music", kind: "api", label: "Amazon Music API" },

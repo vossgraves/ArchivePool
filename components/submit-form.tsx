@@ -242,16 +242,17 @@ export function SubmitForm({ username = null }: { username?: string | null }) {
           value={service}
           onChange={(next) => {
             setService(next)
-            // Deezer and Apple Music have no self-hosted instance tier, so an "api" submission is
-            // meaningless for them. Amazon Music does have one — its instance answers
-            // GET {baseUrl}/health — so both kinds stay selectable there.
-            if (next === "deezer" || next === "apple-music") setKind("account")
+            // Apple Music has no self-hosted instance tier, so an "api" submission is meaningless
+            // for it. Deezer and Amazon both have one — a Deezer instance answers
+            // GET {baseUrl}/ with an accounts document, an Amazon one GET {baseUrl}/health — so
+            // both kinds stay selectable there.
+            if (next === "apple-music") setKind("account")
           }}
           labels={SERVICE_LABELS}
         />
       </div>
 
-      {service !== "deezer" && service !== "apple-music" && (
+      {service !== "apple-music" && (
         <div className="flex flex-col gap-3">
           <span className="text-sm font-medium">Type</span>
           <Segmented options={["api", "account"] as Kind[]} value={kind} onChange={setKind} labels={KIND_LABELS} />
@@ -270,7 +271,9 @@ export function SubmitForm({ username = null }: { username?: string | null }) {
             hint={
               service === "amazon-music"
                 ? "The Amazon instance base URL the app should call."
-                : "The restream / instance endpoint that resolves stream URLs."
+                : service === "deezer"
+                  ? "The Deezer instance base URL — it answers `GET /` with an accounts document and streams from `/stream/?isrc=…`."
+                  : "The restream / instance endpoint that resolves stream URLs."
             }
           />
           <Field label="Health path" name="healthPath" placeholder="/health" hint="Optional path used to verify the instance is up." />

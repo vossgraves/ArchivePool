@@ -96,6 +96,13 @@ export async function fetchFirehawkTokens(): Promise<{ qobuz: FirehawkQobuzToken
  * (qbdlxui.alwaysdata.net) reads its "Free Accounts / Browse shared tokens" page from the
  * webhook below, so hitting the same webhook gives us the community's live shared Qobuz
  * accounts: `[{ token, country?, app_id?, app_secret?, createdAt? }, …]` (~150 entries).
+ *
+ * The path list is exhaustive: the deployed UI bundle greps to exactly two webhook URLs — this
+ * one and an unrelated song.link resolver on another n8n host. There is no Deezer/Tidal/SpotiFLAC
+ * sibling path to fetch, so this remains the only community webhook the pool reads.
+ *
+ * The UI unwraps a bare array *or* an `{ items: [...] }` envelope, and n8n's response mode can
+ * flip between the two without notice, so both are accepted here.
  */
 const CITEGPT_SHARED_URL = "https://citegptapi.f5.si/webhook/qbdlx/shared"
 
@@ -121,6 +128,23 @@ function dominantAppPair(entries: Record<string, unknown>[]): { appId: string; a
   return { appId, appSecret }
 }
 
+/** Entry-shaped record from either envelope; the read loop below dereferences every field. */
+function isEntryObject(e: unknown): e is Record<string, unknown> {
+  return typeof e === "object" && e !== null
+}
+
+/**
+ * The webhook answers with a bare array or an `{ items: [...] }` envelope. Scalar entries are
+ * dropped rather than trusted — the loop below reads fields off each one.
+ */
+function qbdlxEntries(parsed: unknown): Record<string, unknown>[] | null {
+  if (Array.isArray(parsed)) return parsed.filter(isEntryObject)
+  if (parsed !== null && typeof parsed === "object" && "items" in parsed && Array.isArray(parsed.items)) {
+    return parsed.items.filter(isEntryObject)
+  }
+  return null
+}
+
 export async function fetchQbdlxShared(): Promise<QobuzSharedAccount[] | null> {
   try {
     const res = await fetch(CITEGPT_SHARED_URL, {
@@ -129,8 +153,9 @@ export async function fetchQbdlxShared(): Promise<QobuzSharedAccount[] | null> {
       signal: AbortSignal.timeout(20_000),
     })
     if (!res.ok) return null
-    const raw = (await res.json()) as Record<string, unknown>[]
-    if (!Array.isArray(raw)) return null
+    const parsed = (await res.json()) as unknown
+    const raw = qbdlxEntries(parsed)
+    if (!raw) return null
 
     const fallback = dominantAppPair(raw) ?? { appId: QOBUZ_PROBE_APP_ID, appSecret: QOBUZ_PROBE_APP_SECRET }
     const out: QobuzSharedAccount[] = []

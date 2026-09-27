@@ -88,7 +88,7 @@ export default function DocsPage() {
     "accounts": [ ... ]
   },
   "qobuz":   { "apis": [...], "accounts": [...] },
-  "deezer":  { "apis": [],   "accounts": [...] }
+  "deezer":  { "apis": [...], "accounts": [...] }
 }`}</Code>
             </div>
           </div>

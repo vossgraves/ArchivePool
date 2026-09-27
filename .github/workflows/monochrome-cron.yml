@@ -1,7 +1,7 @@
 name: Monochrome instance sync cron
 
 # Pings the deployed site's /api/cron/monochrome endpoint every 12 hours. The endpoint fetches
-# monochrome.tf/instances.json, health-checks any new Tidal instances, and adds passing ones to
+# monochrome.st/instances.json, health-checks any new Tidal instances, and adds passing ones to
 # the pool. Host-agnostic: it just curls a URL, so it works on Vercel, Fly, a VPS, or anywhere.
 #
 # This is the scheduler even on Vercel. vercel.json crons are capped at once per DAY on the
@@ -23,7 +23,7 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Sync monochrome.tf instances
+      - name: Sync monochrome instances
         env:
           HEALTH_URL: ${{ secrets.HEALTH_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}

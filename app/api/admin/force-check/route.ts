@@ -10,7 +10,7 @@ export const maxDuration = 60
 /**
  * POST /api/admin/force-check
  * Immediately re-checks every non-removed entry (bypassing the 6h stale threshold)
- * and also triggers a fresh monochrome.tf instance sync. Admin token required.
+ * and also triggers a fresh monochrome instance sync. Admin token required.
  */
 export async function POST(req: NextRequest) {
   const actor = await resolveAdmin(req)

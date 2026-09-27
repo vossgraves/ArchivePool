@@ -2,6 +2,7 @@ package health
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -155,7 +156,11 @@ func dominantAppPair(entries []map[string]any) (string, string) {
 	return appID, appSecret
 }
 
-// FetchQbdlxShared reads the community shared-account webhook.
+// FetchQbdlxShared reads the community shared-account webhook. The path list is exhaustive: the
+// deployed QobuzDownloaderX UI bundle greps to exactly two webhook URLs — this one and an
+// unrelated song.link resolver on another n8n host — so there is no Deezer/Tidal sibling to fetch.
+// The UI unwraps a bare array *or* an `{ items: [...] }` envelope, and n8n's response mode can
+// flip between the two without notice, so both are accepted here.
 func FetchQbdlxShared(ctx context.Context) ([]QobuzSharedAccount, bool) {
 	res, err := httpx.Get(ctx, citegptSharedURL, map[string]string{"user-agent": jinaUA}, 20*time.Second)
 	if err != nil {
@@ -165,9 +170,20 @@ func FetchQbdlxShared(ctx context.Context) ([]QobuzSharedAccount, bool) {
 		_ = res.Body.Close()
 		return nil, false
 	}
-	var raw []map[string]any
-	if err := httpx.ReadJSON(res, &raw); err != nil {
+	var envelope json.RawMessage
+	if err := httpx.ReadJSON(res, &envelope); err != nil {
 		return nil, false
+	}
+	var raw []map[string]any
+	if err := json.Unmarshal(envelope, &raw); err != nil {
+		// n8n answered with an `{ "items": [...] }` envelope instead of a bare array.
+		var wrapped struct {
+			Items []map[string]any `json:"items"`
+		}
+		if err := json.Unmarshal(envelope, &wrapped); err != nil || wrapped.Items == nil {
+			return nil, false
+		}
+		raw = wrapped.Items
 	}
 
 	fallbackID, fallbackSecret := dominantAppPair(raw)

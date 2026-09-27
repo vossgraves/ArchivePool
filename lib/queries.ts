@@ -223,9 +223,9 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
   const accounts = {
     tidal: group("tidal"),
     qobuz: group("qobuz"),
-    // Deezer and Apple Music are account-only; empty instance lists keep the shape symmetric.
-    // Apple's dev JWT is deliberately not pooled — apps self-scrape a fresh one, so pooling a
-    // long-lived token would only widen the blast radius.
+    // Apple Music is account-only, so its instance list stays empty and the shape stays
+    // symmetric. Apple's dev JWT is deliberately not pooled — apps self-scrape a fresh one, so
+    // pooling a long-lived token would only widen the blast radius.
     deezer: group("deezer"),
     "apple-music": group("apple-music"),
     "amazon-music": group("amazon-music"),
@@ -261,8 +261,9 @@ export async function leaseInstances(clientKey?: Buffer | null, scope?: KeyScope
     qobuz: group("qobuz"),
     deezer: group("deezer"),
     "apple-music": group("apple-music"),
-    // Amazon instances are pooled like any other: this group fills from `instance_entries` rows
-    // whose service is amazon-music (see CATEGORIES in lib/sources.ts).
+    // Deezer and Amazon instances are pooled like any other: this group fills from
+    // `instance_entries` rows for that service (see CATEGORIES in lib/sources.ts). Apple Music
+    // has no instance tier, so its group is always empty.
     "amazon-music": group("amazon-music"),
   }
 

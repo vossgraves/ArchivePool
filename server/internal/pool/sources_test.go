@@ -149,7 +149,7 @@ func TestCategoriesCoverEveryPublicCategory(t *testing.T) {
 	}{
 		{ServiceTidal, KindAPI}, {ServiceTidal, KindAccount},
 		{ServiceQobuz, KindAPI}, {ServiceQobuz, KindAccount},
-		{ServiceDeezer, KindAccount}, {ServiceAppleMusic, KindAccount},
+		{ServiceDeezer, KindAPI}, {ServiceDeezer, KindAccount}, {ServiceAppleMusic, KindAccount},
 		{ServiceAmazonMusic, KindAPI}, {ServiceAmazonMusic, KindAccount},
 	}
 	if len(Categories) != len(want) {

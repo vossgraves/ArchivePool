@@ -25,6 +25,11 @@ var spotiflacTidalInstances = []string{
 	"https://hund.qqdl.site",
 	"https://tidal.kinoplus.online",
 	"https://tidal-api.binimum.org",
+	// Recovered from the SpotiFLAC-Next wiki's git history (commit b97d862 deleted the page this
+	// list came from); spotiflac.com/partners still credits 'SpotiSaver — extra Tidal delivery
+	// instances'. The TS list in lib/spotiflac.ts mirrors this.
+	"https://hifi-one.spotisaver.net",
+	"https://hifi-two.spotisaver.net",
 }
 
 // Qobuz restream instances SpotiFLAC reaches, with the same caveat: the premium gate rejects any

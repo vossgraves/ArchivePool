@@ -10,21 +10,24 @@ import (
 	"archivepool/server/internal/pool"
 )
 
-// MonochromeInstances is the shape https://monochrome.tf/instances.json returns.
+// MonochromeInstances is the shape https://monochrome.st/instances.json returns.
 type MonochromeInstances struct {
 	API       []string `json:"api"`
 	Streaming []string `json:"streaming"`
 }
 
 const (
-	monochromeURL      = "https://monochrome.tf/instances.json"
+	// monochrome.tf now 503s with a `<meta http-equiv='refresh' content='0; url=https://monochrome.st'>`
+	// stub, so the feed moved to monochrome.st — the same domain its bundle calls (auth./data./tracks.).
+	monochromeURL      = "https://monochrome.st/instances.json"
 	monochromeTimeout  = 15 * time.Second
 	monochromeFeedNote = "monochrome"
 )
 
-// SyncMonochromeInstances fetches the monochrome.tf instance list and pools the passing Tidal
+// SyncMonochromeInstances fetches the monochrome instance list and pools the passing Tidal
 // instances. The feed is the only monochrome-specific part; dedupe, health-checking, the premium
-// gate and upserts are the shared instance-sync core.
+// gate and upserts are the shared instance-sync core. The feed carries Tidal restream hosts only,
+// so no other service is synced from it.
 func SyncMonochromeInstances(ctx context.Context, database *db.DB) (InstanceSyncResult, error) {
 	res, err := httpx.Get(ctx, monochromeURL, nil, monochromeTimeout)
 	if err != nil {

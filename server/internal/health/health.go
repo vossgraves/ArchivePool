@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"math"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -82,8 +83,11 @@ var (
 // persist a rotated refresh token back onto the row it came from.
 func RunCheck(ctx context.Context, database *db.DB, service pool.Service, kind pool.Kind, payload map[string]any, entryFingerprint string) CheckResult {
 	if kind == pool.KindAPI {
-		// Amazon instances publish their own liveness document, so they are checked against it
-		// rather than through the generic reachability rule (see checkAmazonMusicInstance).
+		// Amazon and Deezer instances publish their own liveness documents, so they are checked
+		// against those rather than through the generic reachability rule.
+		if service == pool.ServiceDeezer {
+			return checkDeezerInstance(ctx, payload)
+		}
 		if service == pool.ServiceAmazonMusic {
 			return checkAmazonMusicInstance(ctx, payload)
 		}
@@ -179,6 +183,10 @@ var hiResRe = regexp.MustCompile(`hi_res|hires|lossless|flac|24bit|"quality"\s*:
 // amazonHealthPath is where every Amazon instance serves its liveness document unless the
 // contributor overrides it.
 const amazonHealthPath = "/health"
+
+// deezerHealthPath is where a Deezer instance serves its liveness document unless the contributor
+// overrides it (Ultra MAX helper and the Monochrome fallback host both answer here).
+const deezerHealthPath = "/health"
 
 // amazonHealthErrorStatuses are the `status` values an Amazon instance uses to say it is NOT
 // serving. Deliberately a denylist: an instance that answers its health endpoint at all is up
@@ -289,6 +297,126 @@ func checkAmazonMusicInstance(ctx context.Context, payload map[string]any) Check
 		LatencyMs: ms,
 		Detail:    "HTTP " + strconv.Itoa(status),
 	}
+}
+
+// checkDeezerInstance ports lib/health.ts checkDeezerInstance.
+//
+// A self-hosted Deezer instance publishes its own liveness document, so like the Amazon tier this
+// one asks the instance directly: `GET {baseUrl}{healthPath || "/health"}` must answer HTTP 2xx
+// with a JSON object that says it is serving. checkAPI cannot express that — it treats anything
+// below 500 as reachable, so an instance answering `{"ok":false,…}` with a 200 would be handed to
+// every app as working.
+//
+// Two community shapes are in the wild: Ultra MAX (github.com/PaRaN01a-hash/ultramax-music,
+// helper/app.py `GET /health`) answers `{"ok":true,"user":{…}}` or `{"ok":false,"error":…}`, and
+// the Monochrome Deezer fallback host serves an account-pool document
+// `{"ok":bool,"accounts":{"total","available","dead","cooling",…},"defaultFormat":"FLAC",…}`.
+// The verdict: an explicit `ok:false` is dead; otherwise an `accounts` block with nothing
+// available or cooling is dead; otherwise the document is alive. Premium comes from the same
+// hi-res markers every other instance uses, read from `probeUrl` when one is given.
+func checkDeezerInstance(ctx context.Context, payload map[string]any) CheckResult {
+	baseURL := strings.TrimRight(strings.TrimSpace(str(payload["baseUrl"])), "/")
+	if baseURL == "" {
+		return CheckResult{Status: pool.StatusDead, Detail: "missing baseUrl"}
+	}
+
+	healthPath := strings.TrimSpace(str(payload["healthPath"]))
+	if healthPath == "" {
+		healthPath = deezerHealthPath
+	}
+	sep := "/"
+	if strings.HasPrefix(healthPath, "/") {
+		sep = ""
+	}
+	target := baseURL + sep + healthPath
+
+	started := time.Now()
+	res, err := httpx.Get(ctx, target, nil, timeoutMs)
+	if err != nil {
+		return CheckResult{Status: pool.StatusDead, Detail: httpx.Reason(err)}
+	}
+	ms := int(time.Since(started).Milliseconds())
+	status := res.StatusCode
+	if status < 200 || status >= 300 {
+		_ = res.Body.Close()
+		return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: "HTTP " + strconv.Itoa(status)}
+	}
+
+	body, err := httpx.ReadLimitedText(res, 20000)
+	if err != nil {
+		return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: httpx.Reason(err)}
+	}
+	var parsed any
+	if err := json.Unmarshal([]byte(body), &parsed); err != nil {
+		return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: "health response is not JSON"}
+	}
+	record, isObject := parsed.(map[string]any)
+	if !isObject {
+		return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: "health response is not an object"}
+	}
+
+	if ok, present := record["ok"].(bool); present && !ok {
+		return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: "status: not ok"}
+	}
+	accounts, hasAccounts := record["accounts"].(map[string]any)
+	_, hasUser := record["user"].(map[string]any)
+	if hasAccounts {
+		// An instance whose whole pool is exhausted still answers its document, so the counts —
+		// not the HTTP status — are what say it can serve right now.
+		if total := numAttr(accounts, "total"); total > 0 &&
+			numAttr(accounts, "available") == 0 && numAttr(accounts, "cooling") == 0 {
+			return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: "no accounts available"}
+		}
+	} else if !hasUser {
+		if ok, present := record["ok"].(bool); !present || !ok {
+			return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: "health response has no status"}
+		}
+	}
+
+	premium := hiResRe.MatchString(strings.ToLower(body))
+	if probeURL := strings.TrimSpace(str(payload["probeUrl"])); probeURL != "" {
+		premium = false
+		probeTarget := probeURL
+		if !strings.HasPrefix(probeURL, "http") {
+			psep := "/"
+			if strings.HasPrefix(probeURL, "/") {
+				psep = ""
+			}
+			probeTarget = baseURL + psep + probeURL
+		}
+		if probeRes, err := httpx.Get(ctx, probeTarget, nil, timeoutMs); err == nil {
+			if text, err := httpx.ReadLimitedText(probeRes, 20000); err == nil {
+				premium = hiResRe.MatchString(strings.ToLower(text))
+			}
+		}
+	}
+
+	return CheckResult{
+		OK:        true,
+		Premium:   premium,
+		Status:    classify(true, premium),
+		LatencyMs: ms,
+		Detail:    "HTTP " + strconv.Itoa(status),
+	}
+}
+
+// numAttr mirrors the TS `Number(value ?? 0)` read of a health document's numeric field: a JSON
+// number passes through, a numeric string is coerced, an absent/null field is 0, and anything else
+// is NaN — which compares false exactly like the TS, so a garbage count never trips the
+// "no accounts available" branch on one side only.
+func numAttr(m map[string]any, key string) float64 {
+	switch v := m[key].(type) {
+	case nil:
+		return 0
+	case float64:
+		return v
+	case string:
+		if n, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
+			return n
+		}
+		return math.NaN()
+	}
+	return math.NaN()
 }
 
 // isTidalRefreshToken reports whether a Tidal JWT is a refresh token rather than an access token.

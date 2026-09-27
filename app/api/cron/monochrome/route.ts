@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic"
 export const maxDuration = 60
 
 /**
- * Instance-sync cron: monochrome.tf plus SpotiFLAC's public Tidal and Qobuz lists. Each feed is
+ * Instance-sync cron: monochrome plus SpotiFLAC's public Tidal and Qobuz lists. Each feed is
  * isolated so one being unreachable never blocks the others, and all share one
  * dedupe/health-check/premium-gate core, so an instance another feed already contributed is
  * updated in place rather than duplicated.

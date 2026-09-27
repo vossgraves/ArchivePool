@@ -31,7 +31,7 @@ const DEFAULT_CONCURRENCY = 5
 /**
  * Health-checks a list of instance base URLs for one service and upserts the passing (premium)
  * ones as `kind=api` entries, updating rather than recreating any that already exist. This is the
- * shared core behind every instance feed (monochrome.tf, the SpotiFLAC HiFi list, …): a feed
+ * shared core behind every instance feed (monochrome, the SpotiFLAC HiFi list, …): a feed
  * module only has to produce the URLs and hand them here.
  *
  * Pool policy, identical for every feed: an instance must be reachable AND advertise hi-res to be
