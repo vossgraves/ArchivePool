@@ -8,6 +8,7 @@ import { ensureSchema } from "@/lib/db/ensure"
 import { leaseReplacement, releaseLease } from "@/lib/queries"
 import { checkEntryById } from "@/lib/health-sweep"
 import { clientIp, keyId, rateLimit, tooManyRequests } from "@/lib/rate-limit"
+import { isKind, isService } from "@/lib/sources"
 
 export const dynamic = "force-dynamic"
 
