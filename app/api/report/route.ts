@@ -6,8 +6,8 @@ import { db } from "@/lib/db"
 import { accountEntries, healthLog, instanceEntries } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
 import { leaseReplacement, releaseLease } from "@/lib/queries"
+import { checkEntryById } from "@/lib/health-sweep"
 import { clientIp, keyId, rateLimit, tooManyRequests } from "@/lib/rate-limit"
-import { isKind, isService } from "@/lib/sources"
 
 export const dynamic = "force-dynamic"
 
@@ -117,23 +117,40 @@ export async function POST(req: NextRequest) {
   const table = entry.kind === "account" ? accountEntries : instanceEntries
 
   if (reportType === "dead") {
-    await db
-      .update(table)
-      .set({
-        status: "pending", // demoted: not handed out fresh until the sweep re-verifies
-        consecutiveFailures: sql`${table.consecutiveFailures} + 1`,
-        checkCount: sql`${table.checkCount} + 1`,
-      })
-      .where(eq(table.id, entry.id))
+    // Verify-before-park: a report usually means the app's leased copy went stale (Tidal kills
+    // access tokens hourly, apps cache them for a day), not that the account died. Re-check live
+    // first: a healthy entry gets its counter bumped but stays servable, so one stale token can't
+    // silence an account for hours. Only a genuinely failing entry parks in pending.
+    const live = await checkEntryById(entry.id).catch(() => null)
+    if (live == null || !live.ok) {
+      await db
+        .update(table)
+        .set({
+          status: "pending", // demoted: not handed out fresh until the sweep re-verifies
+          consecutiveFailures: sql`${table.consecutiveFailures} + 1`,
+          checkCount: sql`${table.checkCount} + 1`,
+        })
+        .where(eq(table.id, entry.id))
 
-    const [current] = await db
-      .select({ consecutiveFailures: table.consecutiveFailures })
-      .from(table)
-      .where(eq(table.id, entry.id))
-      .limit(1)
+      const [current] = await db
+        .select({ consecutiveFailures: table.consecutiveFailures })
+        .from(table)
+        .where(eq(table.id, entry.id))
+        .limit(1)
 
-    if ((current?.consecutiveFailures ?? 0) >= DISABLE_AFTER_REPORTS) {
-      await db.update(table).set({ disabled: true }).where(eq(table.id, entry.id))
+      if ((current?.consecutiveFailures ?? 0) >= DISABLE_AFTER_REPORTS) {
+        await db.update(table).set({ disabled: true }).where(eq(table.id, entry.id))
+      }
+    } else {
+      // Healthy after all — count the report as a check so uptime stays honest, but reset the
+      // failure streak instead of growing it.
+      await db
+        .update(table)
+        .set({
+          consecutiveFailures: 0,
+          checkCount: sql`${table.checkCount} + 1`,
+        })
+        .where(eq(table.id, entry.id))
     }
   } else if (reportType === "not_premium") {
     // Non-premium entries are not served at all. The sweep re-enables on a false report.
