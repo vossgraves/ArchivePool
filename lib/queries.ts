@@ -1,11 +1,12 @@
 import "server-only"
 import { and, desc, eq, sql } from "drizzle-orm"
-import { decryptAtRest, encryptForClient } from "./crypto"
+import { decryptAtRest, encryptAtRest, encryptForClient } from "./crypto"
 import { db } from "./db"
 import { accountEntries, apiKeyLeases, apiKeyRequests, apiKeys, instanceEntries } from "./db/schema"
 import { ensureSchema } from "./db/ensure"
 import { CATEGORIES, type Kind, type Service } from "./sources"
 import type { KeyScope } from "./api-keys"
+import { ensureFreshTidalToken } from "./health"
 
 export interface CategoryStatus {
   service: Service
@@ -189,6 +190,7 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
       status: accountEntries.status,
       latencyMs: accountEntries.latencyMs,
       lastCheckedAt: accountEntries.lastCheckedAt,
+      fingerprint: accountEntries.fingerprint,
       payload: accountEntries.payload,
     })
     .from(accountEntries)
@@ -208,6 +210,18 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
       sql`${accountEntries.lastLeasedAt} asc nulls first`,
       accountEntries.id,
     )
+
+  // Tidal access tokens expire ~hourly while the sweep only runs every 6h, so a leased token is
+  // routinely dead on arrival ("dies soon" after linking). Refresh expired tidal payloads now —
+  // persisted by ensureFreshTidalToken — and serve the fresh ciphertext below.
+  for (const r of rows) {
+    if (r.service !== "tidal") continue
+    const plain = decryptAtRest(r.payload)
+    const fresh = await ensureFreshTidalToken(plain, r.fingerprint).catch(() => null)
+    if (fresh != null) {
+      r.payload = encryptAtRest({ ...plain, token: fresh })
+    }
+  }
 
   const leasedIds: number[] = []
   const picked: { id: number; service: Service }[] = []

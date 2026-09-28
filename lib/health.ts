@@ -347,6 +347,31 @@ function isTidalRefreshToken(token: string): boolean {
   }
 }
 
+/**
+ * True when a Tidal access JWT is expired or expires within the margin. Uses the file's own
+ * unverified JWT decoder — the answer only decides whether to refresh pro-actively.
+ */
+export function isTidalAccessExpired(token: string, marginSecs = 300): boolean {
+    const exp = decodeJwtPayload(token)?.exp
+    if (typeof exp !== "number" || exp <= 0) return false
+    return exp - marginSecs <= Date.now() / 1000
+}
+
+/**
+ * Refreshes a Tidal account payload's access token when it is expired or near expiry, persisting
+ * the new token. Returns the (possibly refreshed) access token, or null when no refresh is
+ * possible. Used pro-actively before serving a lease so apps never receive an hours-dead token.
+ */
+export async function ensureFreshTidalToken(
+    payload: Record<string, unknown>,
+    entryFingerprint?: string,
+): Promise<string | null> {
+    const token = String(payload.token ?? "").trim()
+    if (!token || isTidalRefreshToken(token)) return token || null
+    if (!isTidalAccessExpired(token)) return token
+    return tryRefreshTidalToken(payload, entryFingerprint)
+}
+
 async function tryRefreshTidalToken(
   payload: Record<string, unknown>,
   entryFingerprint?: string,
