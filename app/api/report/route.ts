@@ -5,9 +5,9 @@ import { clientEncryptionEnabled, deriveClientKey } from "@/lib/crypto"
 import { db } from "@/lib/db"
 import { accountEntries, healthLog, instanceEntries } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
-import { leaseReplacement, releaseLease } from "@/lib/queries"
 import { checkEntryById } from "@/lib/health-sweep"
 import { clientIp, keyId, rateLimit, tooManyRequests } from "@/lib/rate-limit"
+import { isKind, isService } from "@/lib/sources"
 
 export const dynamic = "force-dynamic"
 
