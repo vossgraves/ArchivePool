@@ -2,6 +2,8 @@ import { revalidatePath } from "next/cache"
 import { NextResponse, type NextRequest } from "next/server"
 import { describeSaveError, ingestSource } from "@/lib/ingest"
 import { pollDeviceToken } from "@/lib/tidal-oauth"
+import { getSessionUserId } from "@/lib/sessions"
+import { findUsernameById } from "@/lib/users"
 
 export const dynamic = "force-dynamic"
 
@@ -31,8 +33,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(outcome)
   }
 
-  // Authorized: build the account payload and ingest it exactly like a manual submission.
+  // Authorized: build the account payload and ingest it exactly like a manual submission. Credit
+  // the signed-in website user when there is one — otherwise device logins land anonymous and
+  // never appear on anyone's dashboard contributions.
   const note = "Added via Tidal sign-in"
+  const contributor = await getSessionUserId().then((id) => (id ? findUsernameById(id) : null)).catch(() => null)
   const payload: Record<string, unknown> = {
     token: outcome.accessToken,
     refreshToken: outcome.refreshToken,
@@ -41,7 +46,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const result = await ingestSource("tidal", "account", payload)
+    const result = await ingestSource("tidal", "account", payload, { contributor })
     revalidatePath("/")
     return NextResponse.json({
       state: "authorized",

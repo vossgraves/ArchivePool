@@ -2,7 +2,8 @@ import { revalidatePath } from "next/cache"
 import { NextResponse, type NextRequest } from "next/server"
 import { describeSaveError, ingestSource } from "@/lib/ingest"
 import { QOBUZ_APP_ID, qobuzLogin, scrapeQobuzAppSecret, validateAppSecret } from "@/lib/qobuz-oauth"
-
+import { getSessionUserId } from "@/lib/sessions"
+import { findUsernameById } from "@/lib/users"
 export const dynamic = "force-dynamic"
 
 /**
@@ -53,7 +54,10 @@ export async function POST(req: NextRequest) {
     })
   }
 
-  // Step 3: build payload and ingest, just like Tidal's device poll endpoint.
+  // Step 3: build payload and ingest, just like Tidal's device poll endpoint. Credit the signed-in
+  // website user when there is one — otherwise OAuth logins land anonymous and never appear on
+  // anyone's dashboard contributions.
+  const contributor = await getSessionUserId().then((id) => (id ? findUsernameById(id) : null)).catch(() => null)
   const payload: Record<string, unknown> = {
     token: loginResult.userAuthToken,
     appId: QOBUZ_APP_ID,
@@ -64,7 +68,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const result = await ingestSource("qobuz", "account", payload)
+    const result = await ingestSource("qobuz", "account", payload, { contributor })
     revalidatePath("/")
     return NextResponse.json({
       state: "authorized",
