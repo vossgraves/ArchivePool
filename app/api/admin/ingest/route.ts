@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
     const result = await ingestSource(body.service, body.kind, body.payload, {
       contributor: body.contributor ?? null,
     })
-    return NextResponse.json({ ok: true, ...result })
+    return NextResponse.json(result)
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : "ingest failed" }, { status: 500 })
   }
