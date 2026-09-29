@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto"
-import { sql } from "drizzle-orm"
+import { eq, sql } from "drizzle-orm"
 import { db } from "@/lib/db"
 import { accountEntries } from "@/lib/db/schema"
-import { encryptAtRest } from "@/lib/crypto"
+import { decryptAtRest, encryptAtRest } from "@/lib/crypto"
+import { scrapeQobuzAppSecret } from "./qobuz-oauth"
 import type { Kind, Service, Status } from "./sources"
 
 export interface CheckResult {
@@ -584,6 +585,49 @@ async function checkQobuzAppSecret(
   }
 }
 
+/**
+ * Qobuz rotates the web-player `app_secret`. Every pooled account stores its own copy, so a
+ * rotation invalidates all of them at once — each starts failing the signature probe even though
+ * its user token is still perfect, and without healing the whole tier goes dark until every
+ * contributor re-submits. Re-scrape the current secret, prove it against a known-good token, and
+ * rewrite it into every entry that still carries the stale one.
+ *
+ * Returns the working secret, or null when the secret is not the problem (or the bundle could not
+ * be read, in which case we must not churn every credential on a transient fetch failure).
+ */
+async function healQobuzAppSecret(appId: string, staleSecret: string, probeToken: string): Promise<string | null> {
+  let fresh: string | null = null
+  try {
+    fresh = await scrapeQobuzAppSecret()
+  } catch {
+    return null
+  }
+  if (!fresh || fresh === staleSecret) return null
+  // Prove the freshly-scraped secret actually signs, so a garbled scrape cannot be written to
+  // every account and turn a recoverable rotation into an outage.
+  const probe = await checkQobuzAppSecret(appId, fresh, probeToken)
+  if (!probe.ok) return null
+
+  // Rewrite every Qobuz account still holding the stale secret. The fingerprint is derived from the
+  // user token (see fingerprint()), not the secret, so this does not fork dedupe.
+  const rows = await db.select().from(accountEntries).where(eq(accountEntries.service, "qobuz"))
+  for (const row of rows) {
+    let plain: Record<string, unknown>
+    try {
+      plain = decryptAtRest(row.payload)
+    } catch {
+      continue
+    }
+    if (String(plain.appSecret ?? "").trim() !== staleSecret) continue
+    await db
+      .update(accountEntries)
+      .set({ payload: encryptAtRest({ ...plain, appSecret: fresh }) })
+      .where(sql`id = ${row.id}`)
+      .catch(() => { /* best-effort — a single row must not abort the heal */ })
+  }
+  return fresh
+}
+
 async function checkQobuzAccount(payload: Record<string, unknown>): Promise<CheckResult> {
   const token = String(payload.token ?? "").trim()
   const appId = String(payload.appId ?? "").trim()
@@ -634,7 +678,7 @@ const DEEZER_UA =
 async function probeAppleWebPlayback(
   mediaUserToken: string,
   devToken: string,
-): Promise<{ ok: boolean; detail: string; latencyMs: number }> {
+): Promise<{ ok: boolean; lossless: boolean; detail: string; latencyMs: number }> {
   // Probe ids only — never content. A long-standing, widely licensed track; if a given storefront
   // simply does not carry it, the answer is "inconclusive", which is not a death.
   const songIds = ["1499378108", "6792884101"]
@@ -658,7 +702,7 @@ async function probeAppleWebPlayback(
     if (!res.ok) {
       // 5xx is Apple's problem, not the token's; try the next id before judging.
       if (res.status >= 500) continue
-      return { ok: false, detail: `webPlayback HTTP ${res.status}`, latencyMs: ms }
+      return { ok: false, lossless: false, detail: `webPlayback HTTP ${res.status}`, latencyMs: ms }
     }
     const json = (await res.json().catch(() => null)) as {
       failureType?: string | number
@@ -667,17 +711,35 @@ async function probeAppleWebPlayback(
     } | null
     const assets = json?.songList?.[0]?.assets ?? []
     // A playable ctrp (AES-CTR) asset is the proof. cbcp is FairPlay and unusable here.
-    if (assets.some((a) => String(a.flavor ?? "").includes("ctrp") && a.URL)) {
-      return { ok: true, detail: "playback ok (ctrp asset)", latencyMs: ms }
+    const ctrp = assets.filter((a) => String(a.flavor ?? "").includes("ctrp") && a.URL)
+    if (ctrp.length > 0) {
+      // `meta.subscription.active` is true for trials and region-limited plans that still only
+      // serve lossy streams, so it is NOT evidence of a lossless entitlement. The bitrate in the
+      // flavor string is: the app treats 321..1411 as lossless, so the pool must measure the same
+      // thing — otherwise it labels a 256 kbps-only account "premium" and leases it to apps asking
+      // for FLAC, which then silently fall back to the worst stream available.
+      const maxKbps = ctrp.reduce((max, a) => {
+        const kbps = Number(/(\d+)$/.exec(String(a.flavor ?? ""))?.[1] ?? 0)
+        return Number.isFinite(kbps) && kbps > max ? kbps : max
+      }, 0)
+      const lossless = maxKbps >= 321
+      return {
+        ok: true,
+        lossless,
+        detail: lossless
+          ? `playback ok (ctrp ${maxKbps} kbps)`
+          : `playback ok but lossy only (ctrp ${maxKbps} kbps)`,
+        latencyMs: ms,
+      }
     }
     // No assets. A session/authorisation failure is terminal; a missing track is not.
     const failure = String(json?.failureType ?? "")
     const message = String(json?.customerMessage ?? "").toLowerCase()
     if (failure === "2002" || message.includes("session has ended") || message.includes("sign in again")) {
-      return { ok: false, detail: `webPlayback: ${json?.customerMessage ?? "session ended"}`, latencyMs: ms }
+      return { ok: false, lossless: false, detail: `webPlayback: ${json?.customerMessage ?? "session ended"}`, latencyMs: ms }
     }
   }
-  return { ok: true, detail: "webPlayback inconclusive (no probe track available)", latencyMs: 0 }
+  return { ok: true, lossless: false, detail: "webPlayback inconclusive (no probe track available)", latencyMs: 0 }
 }
 
 async function checkAppleMusicAccount(payload: Record<string, unknown>): Promise<CheckResult> {
@@ -743,12 +805,16 @@ async function checkAppleMusicAccount(payload: Record<string, unknown>): Promise
       return { ok: false, premium: false, status: "dead", latencyMs: playback.latencyMs, detail: playback.detail }
     }
 
+    // `active` is necessary but not sufficient: trials and some regional plans report active and
+    // still only ever serve lossy streams. The pool is a lossless pool, so the verdict follows the
+    // bitrate Apple actually offered. A lossy-only account reports "preview" and is auto-disabled
+    // by the sweep, which stops it being leased to apps that asked for FLAC.
     return {
       ok: true,
-      premium: true,
-      status: classify(true, true),
-      latencyMs: ms,
-      detail: detail,
+      premium: playback.lossless,
+      status: classify(true, playback.lossless),
+      latencyMs: ms + playback.latencyMs,
+      detail: `${detail}, ${playback.detail}`,
     }
   } catch (err) {
     return {
