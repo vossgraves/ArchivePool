@@ -14,10 +14,24 @@ import { createHash } from "node:crypto"
 
 // Public Qobuz web-player app credentials. These are widely known and used by every
 // open-source Qobuz client (streamrip, qobuz-dl, etc.) — they are NOT private.
+//
+// Qobuz has two distinct public app registrations in play, and they are NOT interchangeable:
+//
+//   950096963 (this one) + the play.qobuz.com secret — signs stream requests fine, but
+//       `user/login` answers "User authentication is required" for valid credentials. It is a
+//       web-player-only registration, which is why password sign-in appeared to be broken.
+//   712109809 + the open.qobuz.com secret — `user/login` works AND signs streams, verified
+//       end to end (a signed getFileUrl returns real track data, not a signature error).
+//
+// So: sign with what an entry already stores (its own pair), and log in with the login-capable
+// pair. Entries contributed before this split keep 950096963 and continue to work unchanged.
 export const QOBUZ_APP_ID = "950096963"
+export const QOBUZ_LOGIN_APP_ID = "712109809"
+export const QOBUZ_LOGIN_APP_SECRET = "589be88e4538daea11f509d29e4a23b1"
 
 const LOGIN_URL = "https://www.qobuz.com/api.json/0.2/user/login"
 const PLAYER_URL = "https://play.qobuz.com/login"
+const OPEN_URL = "https://open.qobuz.com/"
 
 // A stable, versioned Chrome UA consistent with what the Qobuz web player itself sends.
 // Using a fixed string (not randomised per call) prevents Qobuz from flagging sessions for
@@ -40,17 +54,19 @@ export async function qobuzLogin(
   username: string,
   password: string,
 ): Promise<QobuzLoginResult> {
+  // The login-capable registration. QOBUZ_APP_ID (950096963) answers "User authentication is
+  // required" for perfectly valid credentials, so sign-in with it could never have worked.
   const body = new URLSearchParams({
     username,
     email: username,
     password,
-    app_id: QOBUZ_APP_ID,
+    app_id: QOBUZ_LOGIN_APP_ID,
   })
   const res = await fetch(LOGIN_URL, {
     method: "POST",
     headers: {
       "content-type": "application/x-www-form-urlencoded",
-      "x-app-id": QOBUZ_APP_ID,
+      "x-app-id": QOBUZ_LOGIN_APP_ID,
       "user-agent": UA,
     },
     body,
@@ -89,15 +105,20 @@ export async function qobuzLogin(
 }
 
 /**
- * Scrapes the Qobuz web player page and extracts the app_secret from the JS bundle.
+ * Scrapes a Qobuz web player page and extracts the app_secret from its JS bundle.
  *
- * Qobuz embeds the secret as a 32-char lowercase hex string in one of its bundle scripts.
- * The technique is identical to what streamrip / qobuz-dl use.
+ * Qobuz embeds the secret as a 32-char lowercase hex string in one of its bundle scripts; the
+ * technique is identical to what streamrip / qobuz-dl use. [origin] selects which deployment to
+ * read, because the secret is per-registration: play.qobuz.com pairs with 950096963 and
+ * open.qobuz.com with 712109809.
  */
-export async function scrapeQobuzAppSecret(): Promise<string | null> {
+export async function scrapeQobuzAppSecret(
+  pageUrl = PLAYER_URL,
+  origin = "https://play.qobuz.com",
+): Promise<string | null> {
   try {
-    // Step 1: load the player login page to find the bundle script URLs.
-    const pageRes = await fetch(PLAYER_URL, {
+    // Step 1: load the player page to find the bundle script URLs.
+    const pageRes = await fetch(pageUrl, {
       headers: { "user-agent": UA },
       cache: "no-store",
     })
@@ -110,7 +131,7 @@ export async function scrapeQobuzAppSecret(): Promise<string | null> {
     let m: RegExpExecArray | null
     while ((m = scriptRe.exec(html)) !== null) {
       const src = m[1]
-      scriptUrls.push(src.startsWith("http") ? src : `https://play.qobuz.com${src}`)
+      scriptUrls.push(src.startsWith("http") ? src : `${origin}${src}`)
     }
 
     // Step 2: scan each bundle for a 32-char hex string (the app_secret).
@@ -146,6 +167,7 @@ export async function scrapeQobuzAppSecret(): Promise<string | null> {
 export async function validateAppSecret(
   appSecret: string,
   userAuthToken: string,
+  appId = QOBUZ_APP_ID,
 ): Promise<boolean> {
   const PROBE_TRACK = "5966783"
   const PROBE_FORMAT = "5"
@@ -158,10 +180,10 @@ export async function validateAppSecret(
   const url =
     `https://www.qobuz.com/api.json/0.2/track/getFileUrl?request_ts=${ts}&request_sig=${sig}` +
     `&track_id=${PROBE_TRACK}&format_id=${PROBE_FORMAT}&intent=stream` +
-    `&app_id=${encodeURIComponent(QOBUZ_APP_ID)}&user_auth_token=${encodeURIComponent(userAuthToken)}`
+    `&app_id=${encodeURIComponent(appId)}&user_auth_token=${encodeURIComponent(userAuthToken)}`
   try {
     const res = await fetch(url, {
-      headers: { "x-app-id": QOBUZ_APP_ID, "x-user-auth-token": userAuthToken, "user-agent": UA },
+      headers: { "x-app-id": appId, "x-user-auth-token": userAuthToken, "user-agent": UA },
       cache: "no-store",
       signal: AbortSignal.timeout(12_000),
     })

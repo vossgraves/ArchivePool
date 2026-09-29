@@ -1,7 +1,13 @@
 import { revalidatePath } from "next/cache"
 import { NextResponse, type NextRequest } from "next/server"
 import { describeSaveError, ingestSource } from "@/lib/ingest"
-import { QOBUZ_APP_ID, qobuzLogin, scrapeQobuzAppSecret, validateAppSecret } from "@/lib/qobuz-oauth"
+import {
+  QOBUZ_LOGIN_APP_ID,
+  QOBUZ_LOGIN_APP_SECRET,
+  qobuzLogin,
+  scrapeQobuzAppSecret,
+  validateAppSecret,
+} from "@/lib/qobuz-oauth"
 import { getSessionUserId } from "@/lib/sessions"
 import { findUsernameById } from "@/lib/users"
 export const dynamic = "force-dynamic"
@@ -37,17 +43,21 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "login_failed", detail }, { status: 401 })
   }
 
-  // Step 2: scrape the app_secret from the web player bundle.
-  const appSecret = await scrapeQobuzAppSecret()
-  const secretOk = appSecret ? await validateAppSecret(appSecret, loginResult.userAuthToken) : false
+  // Step 2: get an app_secret that pairs with the login registration. The secret is per-app, so
+  // read open.qobuz.com (which serves 712109809's bundle) and fall back to the known value rather
+  // than reaching for play.qobuz.com's — that secret belongs to 950096963 and would not sign.
+  const appSecret =
+    (await scrapeQobuzAppSecret("https://open.qobuz.com/", "https://open.qobuz.com")) ??
+    QOBUZ_LOGIN_APP_SECRET
+  const secretOk = await validateAppSecret(appSecret, loginResult.userAuthToken, QOBUZ_LOGIN_APP_ID)
 
-  if (!appSecret || !secretOk) {
+  if (!secretOk) {
     // Login succeeded but we can't get a working secret — return the token anyway
     // so the user can still manually paste the app_secret if needed.
     return NextResponse.json({
       state: "needs_secret",
       userAuthToken: loginResult.userAuthToken,
-      appId: QOBUZ_APP_ID,
+      appId: QOBUZ_LOGIN_APP_ID,
       userId: loginResult.userId,
       countryCode: loginResult.countryCode,
       detail: "Signed in, but could not scrape app_secret from bundle. Please paste it manually.",
@@ -60,7 +70,7 @@ export async function POST(req: NextRequest) {
   const contributor = await getSessionUserId().then((id) => (id ? findUsernameById(id) : null)).catch(() => null)
   const payload: Record<string, unknown> = {
     token: loginResult.userAuthToken,
-    appId: QOBUZ_APP_ID,
+    appId: QOBUZ_LOGIN_APP_ID,
     appSecret,
     username: loginResult.username ?? username,
     // Kept so the pool can renew this account by itself. A Qobuz user_auth_token is a bearer
