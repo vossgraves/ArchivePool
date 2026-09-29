@@ -3,9 +3,14 @@
 // any device, and the server polls until Tidal issues tokens. No redirect URI is required, so it
 // works cleanly from a website (unlike the app's WebView token-capture trick, which browsers block).
 
-// Well-known public Tidal "TV/device" OAuth client (matches ArchiveTune's device client).
-const CLIENT_ID = "zU4XHVVkc2tDPo4t"
-const CLIENT_SECRET = "VJKhDFqJPqvsPVNBV6ukXTJmwlvbttP7wlMlrc72se4="
+// Well-known public Tidal "TV/device" OAuth client.
+//
+// The previous registration (zU4XHVVkc2tDPo4t) was retired by Tidal: it still answers
+// device_authorization, but every token it mints carries internal cid 3235, and the refresh
+// grant then rejects them with "Client id 3235 not found" (natom/streamrip#897, #901; replaced by
+// #932). This is the client streamrip v2.2.0 ships.
+const CLIENT_ID = "fX2JxdmntZWK0ixT"
+const CLIENT_SECRET = "1Nm5AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg="
 const SCOPE = "r_usr+w_usr+w_sub"
 
 const DEVICE_AUTH_ENDPOINT = "https://auth.tidal.com/v1/oauth2/device_authorization"

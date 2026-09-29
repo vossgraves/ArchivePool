@@ -13,10 +13,15 @@ import (
 	"archivepool/server/internal/httpx"
 )
 
-// Tidal's well-known public "TV/device" OAuth client (matches ArchiveTune's device client).
+// Tidal's well-known public "TV/device" OAuth client.
+//
+// The previous registration (zU4XHVVkc2tDPo4t) was retired by Tidal: it still answers
+// device_authorization, but every token it mints carries internal cid 3235 and the refresh grant
+// rejects them with "Client id 3235 not found" (natom/streamrip#897, #901; replaced by #932).
+// This is the client streamrip v2.2.0 ships.
 const (
-	tidalClientID     = "zU4XHVVkc2tDPo4t"
-	tidalClientSecret = "VJKhDFqJPqvsPVNBV6ukXTJmwlvbttP7wlMlrc72se4="
+	tidalClientID     = "fX2JxdmntZWK0ixT"
+	tidalClientSecret = "1Nm5AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg="
 	tidalScope        = "r_usr+w_usr+w_sub"
 
 	tidalDeviceAuthURL = "https://auth.tidal.com/v1/oauth2/device_authorization"

@@ -39,9 +39,11 @@ type CheckResult struct {
 const (
 	timeoutMs = 12 * time.Second
 
-	// Tidal device-flow OAuth client (the same public credentials all open-source tooling uses).
-	tidalClientID     = "zU4XHVVkc2tDPo4t"
-	tidalClientSecret = "VJKhDFqJPqvsPVNBV6ukXTJmwlvbttP7wlMlrc72se4="
+	// Tidal device-flow OAuth client. The previous registration (zU4XHVVkc2tDPo4t) was retired:
+	// tokens it minted carry internal cid 3235 and now fail refresh with "Client id 3235 not
+	// found" (natom/streamrip#897, #901; replaced by #932). This is streamrip v2.2.0's client.
+	tidalClientID     = "fX2JxdmntZWK0ixT"
+	tidalClientSecret = "1Nm5AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg="
 	tidalTokenURL     = "https://auth.tidal.com/v1/oauth2/token"
 	// Tidal's own TV/device client UA, used for every Tidal API call so sessions are not flagged as
 	// coming from an unrecognised agent.
