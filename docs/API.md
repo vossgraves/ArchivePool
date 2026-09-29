@@ -347,9 +347,12 @@ validation server-side. The `/submit` page supports:
 
 - **Tidal accounts** — one-click **Sign in with Tidal** (OAuth device flow via
   `/api/tidal/device/start` + `/api/tidal/device/poll`), or pasting a token manually.
-- **Qobuz accounts** — username/password login proxied through `/api/qobuz/login`
-  (credentials never stored server-side beyond the encrypted pool record), or pasting
-  an appId/token pair.
+- **Qobuz accounts** — username/password login proxied through `/api/qobuz/login`, or
+  pasting an appId/token pair. Password sign-in **retains the credential** (encrypted at rest
+  inside the pool record, and never returned by any endpoint) so the pool can re-login and
+  renew the account itself: a Qobuz `user_auth_token` has no refresh endpoint, so a
+  token-only contribution is a one-shot that dies the first time Qobuz invalidates it.
+  Token-only submissions have nothing to renew with and are checked as before.
 - **Deezer accounts** — pasting an `arl` cookie.
 - **API instances** — a `baseUrl` for Tidal/Qobuz restream instances, and for Deezer instances,
   which are verified against their own `/health` document (see `/api/instances/deezer`).
