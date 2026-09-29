@@ -613,34 +613,49 @@ async function probeAppleWebPlayback(
   mediaUserToken: string,
   devToken: string,
 ): Promise<{ ok: boolean; detail: string; latencyMs: number }> {
-  // A long-standing, widely licensed track; used only as a token probe, never as content.
-  const songId = "1499378108" // "Waves" — Mr Probz
-  const { res, ms } = await timedFetch("https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/webPlayback", {
-    method: "POST",
-    headers: { "content-type": "application/json", "user-agent": APPLE_UA },
-    body: JSON.stringify({ songId, "media-user-token": mediaUserToken, devToken }),
-  })
-  if (!res.ok) {
-    // 5xx is Apple's problem, not the token's.
-    return { ok: res.status < 500, detail: `webPlayback HTTP ${res.status}`, latencyMs: ms }
+  // Probe ids only — never content. A long-standing, widely licensed track; if a given storefront
+  // simply does not carry it, the answer is "inconclusive", which is not a death.
+  const songIds = ["1499378108", "6792884101"]
+  for (const songId of songIds) {
+    // The request shape is Apple's web player contract: the song goes in the BODY as
+    // `salableAdamId`, and the two tokens travel as HEADERS. Sending them in the body (or
+    // omitting Authorization) is answered with failureType 2002 regardless of whether the
+    // token is actually good, which would make every account look dead.
+    const { res, ms } = await timedFetch("https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/webPlayback", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        authorization: `Bearer ${devToken}`,
+        "media-user-token": mediaUserToken,
+        origin: "https://music.apple.com",
+        referer: "https://music.apple.com/",
+        "user-agent": APPLE_UA,
+      },
+      body: JSON.stringify({ salableAdamId: songId, language: "en-us" }),
+    })
+    if (!res.ok) {
+      // 5xx is Apple's problem, not the token's; try the next id before judging.
+      if (res.status >= 500) continue
+      return { ok: false, detail: `webPlayback HTTP ${res.status}`, latencyMs: ms }
+    }
+    const json = (await res.json().catch(() => null)) as {
+      failureType?: string | number
+      customerMessage?: string
+      songList?: Array<{ assets?: Array<{ flavor?: string; URL?: string }> }>
+    } | null
+    const assets = json?.songList?.[0]?.assets ?? []
+    // A playable ctrp (AES-CTR) asset is the proof. cbcp is FairPlay and unusable here.
+    if (assets.some((a) => String(a.flavor ?? "").includes("ctrp") && a.URL)) {
+      return { ok: true, detail: "playback ok (ctrp asset)", latencyMs: ms }
+    }
+    // No assets. A session/authorisation failure is terminal; a missing track is not.
+    const failure = String(json?.failureType ?? "")
+    const message = String(json?.customerMessage ?? "").toLowerCase()
+    if (failure === "2002" || message.includes("session has ended") || message.includes("sign in again")) {
+      return { ok: false, detail: `webPlayback: ${json?.customerMessage ?? "session ended"}`, latencyMs: ms }
+    }
   }
-  const json = (await res.json().catch(() => null)) as {
-    failureType?: string | number
-    customerMessage?: string
-    songList?: Array<{ song?: { url?: string } }>
-  } | null
-  const url = json?.songList?.[0]?.song?.url
-  if (url) return { ok: true, detail: "playback ok", latencyMs: ms }
-
-  // No URL. A session/authorisation failure is terminal; an unknown shape is not.
-  const failure = String(json?.failureType ?? "")
-  const message = String(json?.customerMessage ?? "").toLowerCase()
-  const sessionDead =
-    failure === "2002" || message.includes("session has ended") || message.includes("sign in again")
-  if (sessionDead) {
-    return { ok: false, detail: `webPlayback: ${json?.customerMessage ?? "session ended"}`, latencyMs: ms }
-  }
-  return { ok: true, detail: `webPlayback inconclusive (${failure || "no url"})`, latencyMs: ms }
+  return { ok: true, detail: "webPlayback inconclusive (no probe track available)", latencyMs: 0 }
 }
 
 async function checkAppleMusicAccount(payload: Record<string, unknown>): Promise<CheckResult> {
