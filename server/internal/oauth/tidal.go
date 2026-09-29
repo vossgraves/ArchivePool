@@ -21,7 +21,7 @@ import (
 // This is the client streamrip v2.2.0 ships.
 const (
 	tidalClientID     = "fX2JxdmntZWK0ixT"
-	tidalClientSecret = "1Nm5AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg="
+	tidalClientSecret = "1Nn9AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg="
 	tidalScope        = "r_usr+w_usr+w_sub"
 
 	tidalDeviceAuthURL = "https://auth.tidal.com/v1/oauth2/device_authorization"

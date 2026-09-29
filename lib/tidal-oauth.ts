@@ -10,7 +10,7 @@
 // grant then rejects them with "Client id 3235 not found" (natom/streamrip#897, #901; replaced by
 // #932). This is the client streamrip v2.2.0 ships.
 const CLIENT_ID = "fX2JxdmntZWK0ixT"
-const CLIENT_SECRET = "1Nm5AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg="
+const CLIENT_SECRET = "1Nn9AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg="
 const SCOPE = "r_usr+w_usr+w_sub"
 
 const DEVICE_AUTH_ENDPOINT = "https://auth.tidal.com/v1/oauth2/device_authorization"

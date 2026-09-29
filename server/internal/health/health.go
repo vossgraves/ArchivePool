@@ -43,7 +43,7 @@ const (
 	// tokens it minted carry internal cid 3235 and now fail refresh with "Client id 3235 not
 	// found" (natom/streamrip#897, #901; replaced by #932). This is streamrip v2.2.0's client.
 	tidalClientID     = "fX2JxdmntZWK0ixT"
-	tidalClientSecret = "1Nm5AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg="
+	tidalClientSecret = "1Nn9AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg="
 	tidalTokenURL     = "https://auth.tidal.com/v1/oauth2/token"
 	// Tidal's own TV/device client UA, used for every Tidal API call so sessions are not flagged as
 	// coming from an unrecognised agent.

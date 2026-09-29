@@ -22,7 +22,7 @@ const TIMEOUT_MS = 12_000
 // rejects them with "Client id 3235 not found" (natom/streamrip#897, #901; replaced by #932).
 // This is the client streamrip v2.2.0 ships.
 const TIDAL_CLIENT_ID = "fX2JxdmntZWK0ixT"
-const TIDAL_CLIENT_SECRET = "1Nm5AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg="
+const TIDAL_CLIENT_SECRET = "1Nn9AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg="
 const TIDAL_TOKEN_ENDPOINT = "https://auth.tidal.com/v1/oauth2/token"
 
 // Tidal's own TV/device client UA — used for all Tidal API calls so sessions are not
