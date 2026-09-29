@@ -63,6 +63,13 @@ export async function POST(req: NextRequest) {
     appId: QOBUZ_APP_ID,
     appSecret,
     username: loginResult.username ?? username,
+    // Kept so the pool can renew this account by itself. A Qobuz user_auth_token is a bearer
+    // credential with no refresh endpoint: it dies when the user changes their password, revokes
+    // sessions, or the account is locked, and nothing short of a fresh login can replace it. Without
+    // the password every such account is a one-shot contribution the contributor has to re-submit.
+    // The whole payload is encrypted at rest by ingestSource, and the admin API deliberately never
+    // returns `payload` — so this is ciphertext on disk and absent from every response.
+    password,
     countryCode: loginResult.countryCode,
     note: "Added via Qobuz sign-in",
   }

@@ -3,8 +3,8 @@ import { eq, sql } from "drizzle-orm"
 import { db } from "@/lib/db"
 import { accountEntries } from "@/lib/db/schema"
 import { decryptAtRest, encryptAtRest } from "@/lib/crypto"
-import { scrapeQobuzAppSecret } from "./qobuz-oauth"
-import type { Kind, Service, Status } from "./sources"
+import { qobuzLogin, scrapeQobuzAppSecret, type QobuzLoginResult } from "./qobuz-oauth"
+import { fingerprint, type Kind, type Service, type Status } from "./sources"
 
 export interface CheckResult {
   ok: boolean
@@ -628,18 +628,88 @@ async function healQobuzAppSecret(appId: string, staleSecret: string, probeToken
   return fresh
 }
 
-async function checkQobuzAccount(payload: Record<string, unknown>): Promise<CheckResult> {
-  const token = String(payload.token ?? "").trim()
+/**
+ * Re-logs into Qobuz with a stored credential and swaps in the fresh `user_auth_token`.
+ *
+ * A Qobuz user token is a plain bearer credential: it has no refresh endpoint, so the only way to
+ * bring a revoked/rotated account back is a fresh `user/login`. Accounts contributed through
+ * /api/qobuz/login carry the email + password, so the pool can keep them alive on its own instead
+ * of the contributor re-submitting every time Qobuz invalidates them.
+ *
+ * Token-only contributions have nothing to renew with and are correctly skipped.
+ *
+ * The row is updated in place, matched on the OLD fingerprint, and the fingerprint is rewritten
+ * alongside the token — fingerprint() is derived from the token, so upserting on the new one would
+ * create a duplicate row and leave the dead entry behind.
+ */
+async function renewQobuzToken(
+  payload: Record<string, unknown>,
+  oldFingerprint?: string,
+): Promise<{ token: string | null; detail: string }> {
+  const email = String(payload.username ?? "").trim()
+  const password = String(payload.password ?? "").trim()
+  if (!email || !password) return { token: null, detail: "no stored credential to renew with" }
+  if (!oldFingerprint) return { token: null, detail: "no fingerprint to update" }
+
+  let login: QobuzLoginResult
+  try {
+    login = await qobuzLogin(email, password)
+  } catch (e) {
+    return { token: null, detail: `re-login failed: ${e instanceof Error ? e.message : "error"}` }
+  }
+  const fresh = login.userAuthToken
+  if (!fresh) return { token: null, detail: "re-login returned no token" }
+
+  const nextPayload: Record<string, unknown> = {
+    ...payload,
+    token: fresh,
+    ...(login.countryCode ? { countryCode: login.countryCode } : {}),
+  }
+  await db
+    .update(accountEntries)
+    .set({
+      payload: encryptAtRest(nextPayload),
+      fingerprint: fingerprint("qobuz", "account", nextPayload),
+    })
+    .where(sql`fingerprint = ${oldFingerprint}`)
+    .catch(() => { /* best-effort — the token still works this round */ })
+  return { token: fresh, detail: "re-logged in" }
+}
+async function checkQobuzAccount(
+  payload: Record<string, unknown>,
+  entryFingerprint?: string,
+): Promise<CheckResult> {
+  let token = String(payload.token ?? "").trim()
   const appId = String(payload.appId ?? "").trim()
   const appSecret = String(payload.appSecret ?? "").trim()
   if (!token || !appId || !appSecret) {
     return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: "missing token/appId/appSecret" }
   }
   try {
-    const { res, ms } = await timedFetch(
+    let { res, ms } = await timedFetch(
       `https://www.qobuz.com/api.json/0.2/user/get?app_id=${encodeURIComponent(appId)}&user_auth_token=${encodeURIComponent(token)}`,
       { headers: qobuzHeaders(appId, token) },
     )
+    if (!res.ok && (res.status === 401 || res.status === 403)) {
+      // A rejected user token is usually rotated or revoked, not gone. Accounts that arrived
+      // through the sign-in form carry the credential needed to log in again, so renew rather than
+      // dropping a contributor who did nothing wrong.
+      const renewed = await renewQobuzToken(payload, entryFingerprint).catch((e) => ({
+        token: null,
+        detail: `renew threw: ${e instanceof Error ? e.message : "error"}`,
+      }))
+      if (renewed.token) {
+        token = renewed.token
+        const retry = await timedFetch(
+          `https://www.qobuz.com/api.json/0.2/user/get?app_id=${encodeURIComponent(appId)}&user_auth_token=${encodeURIComponent(token)}`,
+          { headers: qobuzHeaders(appId, token) },
+        )
+        res = retry.res
+        ms += retry.ms
+      } else {
+        return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: `token rejected (${renewed.detail})` }
+      }
+    }
     if (!res.ok) {
       return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: `HTTP ${res.status}` }
     }
@@ -1003,7 +1073,7 @@ export async function runCheck(
   if (service === "deezer") return checkDeezerAccount(payload, entryFingerprint)
   if (service === "apple-music") return checkAppleMusicAccount(payload)
   if (service === "amazon-music") return checkAmazonMusicAccount(payload)
-  return checkQobuzAccount(payload)
+  return checkQobuzAccount(payload, entryFingerprint)
 }
 
 function reason(e: unknown): string {
