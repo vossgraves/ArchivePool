@@ -651,6 +651,23 @@ async function checkQobuzAccount(payload: Record<string, unknown>): Promise<Chec
     // token without a working secret cannot resolve any audio in the app.
     const secretCheck = await checkQobuzAppSecret(appId, appSecret, token)
     if (!secretCheck.ok) {
+      // A failed signature on a token that just authenticated is almost always Qobuz having
+      // rotated the web-player app_secret, not a bad account. Re-scrape and rewrite the new secret
+      // into every entry still holding the stale one, then re-test — otherwise one rotation takes
+      // the entire tier offline until every contributor resubmits.
+      const healed = await healQobuzAppSecret(appId, appSecret, token).catch(() => null)
+      if (healed) {
+        const retest = await checkQobuzAppSecret(appId, healed, token)
+        if (retest.ok) {
+          return {
+            ok: true,
+            premium,
+            status: classify(true, premium),
+            latencyMs: ms + secretCheck.ms + retest.ms,
+            detail: "user ok, app_secret rotated and re-verified",
+          }
+        }
+      }
       return { ok: false, premium, status: "dead", latencyMs: ms + secretCheck.ms, detail: secretCheck.detail }
     }
     return { ok: true, premium, status: classify(true, premium), latencyMs: ms + secretCheck.ms, detail: "user + secret ok" }
@@ -827,7 +844,59 @@ async function checkAppleMusicAccount(payload: Record<string, unknown>): Promise
   }
 }
 
-async function checkDeezerAccount(payload: Record<string, unknown>): Promise<CheckResult> {
+/**
+ * Rotates a Deezer ARL without the contributor. The cookie is not a long-lived secret: it
+ * naturally expires on roughly a day, which is why a pool of submitted ARLs bleeds out and every
+ * contributor has to re-submit daily. Deezer does issue a replacement from a live session, in two
+ * steps (the flow used by philippe44/lms-deezer's `refreshArl`, which re-runs it every 24h):
+ *
+ *   1. `deezer.getUserData` with the current ARL cookie → `SESSION_ID` + `checkForm`
+ *   2. `user.getArl` with `api_token=checkForm` and a `sid` cookie → a fresh ARL
+ *
+ * The new value is persisted so the pool holds the rotated one. Best-effort throughout: a failure
+ * here must never turn a working account into a dead one.
+ */
+async function rotateDeezerArl(
+  arl: string,
+  entryFingerprint?: string,
+): Promise<{ arl: string | null; detail: string }> {
+  const base = "https://www.deezer.com/ajax/gw-light.php"
+  const userRes = await timedFetch(
+    `${base}?method=deezer.getUserData&input=3&api_version=1.0&api_token=`,
+    { headers: { cookie: `arl=${arl}`, "user-agent": DEEZER_UA } },
+  )
+  if (!userRes.res.ok) return { arl: null, detail: `getUserData HTTP ${userRes.res.status}` }
+  const userJson = (await userRes.res.json().catch(() => null)) as {
+    results?: { SESSION_ID?: string; checkForm?: string }
+  } | null
+  const sessionId = String(userJson?.results?.SESSION_ID ?? "").trim()
+  const checkForm = String(userJson?.results?.checkForm ?? "").trim()
+  if (!sessionId || !checkForm) return { arl: null, detail: "no session to rotate from" }
+
+  const arlRes = await timedFetch(
+    `${base}?method=user.getArl&input=3&api_version=1.0&api_token=${encodeURIComponent(checkForm)}`,
+    { headers: { cookie: `sid=${sessionId}`, "user-agent": DEEZER_UA } },
+  )
+  if (!arlRes.res.ok) return { arl: null, detail: `getArl HTTP ${arlRes.res.status}` }
+  const arlJson = (await arlRes.res.json().catch(() => null)) as { results?: unknown } | null
+  const rotated = String(arlJson?.results ?? "").trim()
+  if (!rotated || rotated === arl) return { arl: null, detail: "rotation returned nothing new" }
+
+  if (entryFingerprint) {
+    // Best-effort persistence — a DB hiccup must not fail the health check.
+    await db
+      .update(accountEntries)
+      .set({ payload: encryptAtRest({ arl: rotated }) })
+      .where(sql`fingerprint = ${entryFingerprint}`)
+      .catch(() => { /* ignore */ })
+  }
+  return { arl: rotated, detail: "arl rotated" }
+}
+
+async function checkDeezerAccount(
+  payload: Record<string, unknown>,
+  entryFingerprint?: string,
+): Promise<CheckResult> {
   const arl = String(payload.arl ?? "").trim()
   if (!arl) return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: "missing arl" }
 
@@ -869,12 +938,21 @@ async function checkDeezerAccount(payload: Record<string, unknown>): Promise<Che
         : false
     const premium = lossless || Boolean(options.web_hq)
 
+    // A live ARL can mint a replacement for itself, so rotate rather than waiting out the expiry
+    // that has been costing contributors a daily re-submit. A rotation problem must never
+    // downgrade an otherwise healthy account.
+    const rotation = await rotateDeezerArl(arl, entryFingerprint).catch((e) => ({
+      arl: null,
+      detail: `rotation error: ${reason(e)}`,
+    }))
+    const session = premium ? "session ok (lossless)" : "session ok (lossy only)"
+
     return {
       ok: true,
       premium,
       status: classify(true, premium),
       latencyMs: ms,
-      detail: premium ? "session ok (lossless)" : "session ok (lossy only)",
+      detail: rotation.arl ? `${session}, arl rotated` : `${session} (${rotation.detail})`,
     }
   } catch (e) {
     return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: reason(e) }
@@ -922,7 +1000,7 @@ export async function runCheck(
   if (kind === "api" && service === "amazon-music") return checkAmazonMusicInstance(payload)
   if (kind === "api") return checkApi(service, payload)
   if (service === "tidal") return checkTidalAccount(payload, entryFingerprint)
-  if (service === "deezer") return checkDeezerAccount(payload)
+  if (service === "deezer") return checkDeezerAccount(payload, entryFingerprint)
   if (service === "apple-music") return checkAppleMusicAccount(payload)
   if (service === "amazon-music") return checkAmazonMusicAccount(payload)
   return checkQobuzAccount(payload)
