@@ -11,10 +11,14 @@ import { clientIp, keyId, rateLimit, tooManyRequests } from "@/lib/rate-limit"
 import { isKind, isService } from "@/lib/sources"
 
 export const dynamic = "force-dynamic"
-
 // Keyed on IP because reports may arrive without a key. See docs/REPORT_ENDPOINT.md.
-const REPORT_IP_LIMIT = 60
-const REPORT_KEY_LIMIT = 60
+//
+// 20 per 5 minutes, not the 60 this used to allow: every report now costs one live provider check
+// (that is what makes a false report harmless), so the endpoint is a metered call into Qobuz /
+// Tidal / Deezer / Apple. A legitimate app reports a credential at most a few times ever, so 20 is
+// far above real traffic while capping what one address can spend.
+const REPORT_IP_LIMIT = 20
+const REPORT_KEY_LIMIT = 20
 const REPORT_WINDOW_MS = 5 * 60_000
 
 // A single report can be noise, so auto-disable only once several apps agree.
@@ -154,7 +158,34 @@ export async function POST(req: NextRequest) {
         .where(eq(table.id, entry.id))
     }
   } else if (reportType === "not_premium") {
-    // Non-premium entries are not served at all. The sweep re-enables on a false report.
+    // A "not premium" report used to disable the entry outright, unverified. Reports are keyless
+    // and need no lease, and entry ids are small sequential integers — so anyone who guessed an id
+    // could switch a healthy premium account off with a single request and walk the whole pool in
+    // under a hundred calls, well inside the IP rate limit. Re-verify first, exactly as the dead
+    // path does: the live check decides entitlement from the provider's own answer, so a wrong
+    // report is discarded and the account keeps serving.
+    const live = await checkEntryById(entry.id).catch(() => null)
+    if (live == null || live.premium) {
+      // Still premium by the provider's own account of it, or we could not reach the provider to
+      // find out. Either way the report does not stand: a flaky network must not be able to switch
+      // a healthy account off, which would hand the abuse straight back. The hourly sweep is the
+      // authority on entitlement and will disable it if the account really has lapsed. Recorded
+      // either way, so a systematic false-reporter stays visible.
+      await db.insert(healthLog).values({
+        entryId: entry.id,
+        ok: true,
+        premium: true,
+        latencyMs: null,
+        detail:
+          live == null
+            ? "app report: not_premium (rejected — live check unavailable)"
+            : "app report: not_premium (rejected — live check still premium)",
+      })
+      return NextResponse.json(
+        { ok: true, id: entry.id, ignored: "not_premium" },
+        { headers: { "cache-control": "private, no-store" } },
+      )
+    }
     await db
       .update(table)
       .set({
