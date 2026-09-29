@@ -124,8 +124,9 @@ export function QobuzConnect() {
       <div className="flex flex-col gap-1">
         <span className="text-sm font-medium">Sign in with Qobuz</span>
         <span className="text-xs text-muted-foreground leading-relaxed">
-          We sign in directly with Qobuz&apos;s API — your password is sent only to Qobuz, never
-          stored here. The session token is what gets added to the pool.
+          We sign in directly with Qobuz&apos;s API. Your email and password are kept encrypted so
+          the pool can sign in again and renew this account for you — a Qobuz session token cannot
+          refresh itself, so without them the account would die and need re-submitting.
         </span>
       </div>
 
