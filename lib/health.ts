@@ -600,7 +600,49 @@ const DEEZER_GATEWAY =
 const DEEZER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-/** Only a lossless plan can serve FLAC, so a free account reports "preview", not "alive". */
+/**
+ * Asks Apple's web-playback endpoint for a real stream URL. This is the only call that proves a
+ * Media-User-Token can still actually play something.
+ *
+ * A song that simply is not available in the account's storefront is NOT a dead token — that would
+ * flip healthy accounts off the pool on a regional catalogue gap — so only Apple's own
+ * "session has ended" style answers count as death. Anything else is reported as inconclusive and
+ * the caller keeps the entry.
+ */
+async function probeAppleWebPlayback(
+  mediaUserToken: string,
+  devToken: string,
+): Promise<{ ok: boolean; detail: string; latencyMs: number }> {
+  // A long-standing, widely licensed track; used only as a token probe, never as content.
+  const songId = "1499378108" // "Waves" — Mr Probz
+  const { res, ms } = await timedFetch("https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/webPlayback", {
+    method: "POST",
+    headers: { "content-type": "application/json", "user-agent": APPLE_UA },
+    body: JSON.stringify({ songId, "media-user-token": mediaUserToken, devToken }),
+  })
+  if (!res.ok) {
+    // 5xx is Apple's problem, not the token's.
+    return { ok: res.status < 500, detail: `webPlayback HTTP ${res.status}`, latencyMs: ms }
+  }
+  const json = (await res.json().catch(() => null)) as {
+    failureType?: string | number
+    customerMessage?: string
+    songList?: Array<{ song?: { url?: string } }>
+  } | null
+  const url = json?.songList?.[0]?.song?.url
+  if (url) return { ok: true, detail: "playback ok", latencyMs: ms }
+
+  // No URL. A session/authorisation failure is terminal; an unknown shape is not.
+  const failure = String(json?.failureType ?? "")
+  const message = String(json?.customerMessage ?? "").toLowerCase()
+  const sessionDead =
+    failure === "2002" || message.includes("session has ended") || message.includes("sign in again")
+  if (sessionDead) {
+    return { ok: false, detail: `webPlayback: ${json?.customerMessage ?? "session ended"}`, latencyMs: ms }
+  }
+  return { ok: true, detail: `webPlayback inconclusive (${failure || "no url"})`, latencyMs: ms }
+}
+
 async function checkAppleMusicAccount(payload: Record<string, unknown>): Promise<CheckResult> {
   const token = String(payload.token ?? "").trim()
   // Media-User-Tokens always start with "0." — anything else is a paste error.
@@ -644,12 +686,32 @@ async function checkAppleMusicAccount(payload: Record<string, unknown>): Promise
     const active = subscription.active
     // A resolving storefront alone does not prove a paid plan — `meta.subscription.active` is false
     // for a signed-in free account, which must report "preview" rather than "alive".
+    if (!active) {
+      return {
+        ok: true,
+        premium: false,
+        status: classify(true, false),
+        latencyMs: ms,
+        detail: `${detail} (no active subscription)`,
+      }
+    }
+
+    // An active subscription says nothing about whether the token can still play. Apple keeps
+    // `/v1/me/account` answering 200 + active=true long after a Media-User-Token stops being able
+    // to obtain a stream, and the only way to learn that is to ask for one. Without this probe the
+    // pool kept leasing tokens that 401-free catalog searches could never play, which is why Apple
+    // looked healthy on the board while every app reported "did not resolve".
+    const playback = await probeAppleWebPlayback(token, devToken)
+    if (!playback.ok) {
+      return { ok: false, premium: false, status: "dead", latencyMs: playback.latencyMs, detail: playback.detail }
+    }
+
     return {
       ok: true,
-      premium: active,
-      status: classify(true, active),
+      premium: true,
+      status: classify(true, true),
       latencyMs: ms,
-      detail: active ? detail : `${detail} (no active subscription)`,
+      detail: detail,
     }
   } catch (err) {
     return {
