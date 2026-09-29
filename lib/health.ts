@@ -369,19 +369,19 @@ export async function ensureFreshTidalToken(
     const token = String(payload.token ?? "").trim()
     if (!token || isTidalRefreshToken(token)) return token || null
     if (!isTidalAccessExpired(token)) return token
-    return tryRefreshTidalToken(payload, entryFingerprint)
+    return (await tryRefreshTidalToken(payload, entryFingerprint)).token
 }
 
 async function tryRefreshTidalToken(
   payload: Record<string, unknown>,
   entryFingerprint?: string,
-): Promise<string | null> {
+): Promise<{ token: string | null; detail: string }> {
   // Contributors are handed a single value labelled "Token" which is in fact the refresh token,
   // so fall back to it when no separate refreshToken was supplied. Without this every Tidal
   // submission failed its live check and was rejected as dead.
   const refreshToken =
     String(payload.refreshToken ?? "").trim() || String(payload.token ?? "").trim()
-  if (!refreshToken) return null
+  if (!refreshToken) return { token: null, detail: "no refresh token" }
 
   // Requesting a superset of a token's granted scopes makes Tidal answer 400 invalid_scope on
   // tokens minted elsewhere. Fall back to the narrower scope rather than calling it dead.
@@ -412,13 +412,26 @@ async function tryRefreshTidalToken(
         ok = true
         break
       }
+      const err = (await res.json().catch(() => ({}))) as {
+        error?: string
+        error_description?: string
+      }
+      // Tidal retires client registrations. When that happens the grant fails with
+      // "invalid_client / Client id N not found" for EVERY credential minted by that client,
+      // no matter which client_id the caller presents — the id comes from the token itself.
+      // Surfacing it precisely is the difference between "this account died" and "the whole
+      // onboarding path is dead", which is what the board has to tell an operator.
+      if (err.error === "invalid_client" && /client id .* not found/i.test(err.error_description ?? "")) {
+        return { token: null, detail: `refresh client retired by Tidal (${err.error_description})` }
+      }
       // Only a scope rejection is worth retrying; anything else (bad token, revoked) fails both.
-      const err = (await res.json().catch(() => ({}))) as { error?: string }
-      if (err.error !== "invalid_scope") return null
+      if (err.error !== "invalid_scope") {
+        return { token: null, detail: `refresh rejected: ${err.error ?? res.status}` }
+      }
     }
-    if (!ok || !json) return null
+    if (!ok || !json) return { token: null, detail: "refresh failed" }
     const newToken = json.access_token
-    if (!newToken) return null
+    if (!newToken) return { token: null, detail: "refresh returned no access token" }
 
     // Persist the refreshed token back to the DB so it doesn't expire again on the next cycle.
     // Tidal accounts now live in account_entries; the fingerprint is unique there.
@@ -436,9 +449,9 @@ async function tryRefreshTidalToken(
         .catch(() => { /* best-effort — don't fail health check on DB error */ })
     }
 
-    return newToken
+    return { token: newToken, detail: "refreshed" }
   } catch {
-    return null
+    return { token: null, detail: "refresh threw" }
   }
 }
 
@@ -459,10 +472,10 @@ async function checkTidalAccount(
     // round-trip proving that.
     if (isTidalRefreshToken(token)) {
       const exchanged = await tryRefreshTidalToken(payload, entryFingerprint)
-      if (!exchanged) {
-        return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: "refresh token rejected" }
+      if (!exchanged.token) {
+        return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: exchanged.detail }
       }
-      token = exchanged
+      token = exchanged.token
     }
 
     // Validate the OAuth access token against Tidal's session endpoint.
@@ -473,13 +486,17 @@ async function checkTidalAccount(
     // On 401 — attempt a refresh before giving up.
     if (res.status === 401) {
       const refreshed = await tryRefreshTidalToken(payload, entryFingerprint)
-      if (refreshed) {
-        token = refreshed
+      if (refreshed.token) {
+        token = refreshed.token
         const retry = await timedFetch("https://api.tidal.com/v1/sessions", {
           headers: tidalHeaders(token),
         })
         res = retry.res
         ms = retry.ms
+      } else {
+        // The access token died and the refresh path explains why — report that, not a bare 401,
+        // so the board distinguishes a dead credential from a dead Tidal client registration.
+        return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: refreshed.detail }
       }
     }
 
