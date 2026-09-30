@@ -5,6 +5,14 @@ import { countRecentUsersByIpUa, createUser, findUserByUsername, validateCredent
 export const dynamic = "force-dynamic"
 
 export async function POST(req: NextRequest) {
+  // Opt-out kill-switch: signup is open unless a deployment explicitly sets "false".
+  if (process.env.ALLOW_PUBLIC_SIGNUP === "false") {
+    return NextResponse.json(
+      { error: "signup_disabled", detail: "Public registration is disabled. Contact the administrator." },
+      { status: 403 },
+    )
+  }
+
   let body: { username?: string; password?: string }
   try {
     body = await req.json()
