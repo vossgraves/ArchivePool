@@ -16,6 +16,7 @@ export type AuditAction =
   | "entry.remove"
   | "entry.force_check"
   | "entry.purge_dead"
+  | "entry.purge"
   | "user.role_change"
 
 function clientIp(req: NextRequest): string {

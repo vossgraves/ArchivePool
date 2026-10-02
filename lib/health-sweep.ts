@@ -58,9 +58,8 @@ export async function runHealthSweep(force = false) {
   }
 
   const now = Date.now()
-  // Entries parked in `pending` by app `dead` reports (report.go) must be re-verified promptly:
-  // they are neither servable nor dead, and the 6h stale window would otherwise leave user-reported
-  // failures unconfirmed for hours. Pending always qualifies; everything else follows staleness.
+  // Entries parked in `pending` by app `dead` reports are neither servable nor dead, so they are
+  // re-verified promptly instead of waiting out the 6h stale window.
   const entries = force
     ? allEntries
     : allEntries.filter(

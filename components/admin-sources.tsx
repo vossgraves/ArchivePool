@@ -282,9 +282,7 @@ export function AdminSources() {
     const filtered = inCategory.filter((e) => {
       if (filter === "all") return true
       if (filter === "removed") return e.removed
-      // "Active" means still in rotation consideration: not removed, not disabled, not dead.
-      // Previously this showed every non-removed row including dead/disabled ones, which made
-      // purged-but-listed entries look like live pool state.
+      // Dead and disabled rows would otherwise read as live pool state.
       if (filter === "active") return !e.removed && !e.disabled && e.status !== "dead"
       if (filter === "alive") return isServable(e)
       return !e.removed && (e.disabled || e.status === "dead" || e.consecutiveFailures > 0)

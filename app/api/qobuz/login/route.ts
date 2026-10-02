@@ -10,14 +10,15 @@ import {
 } from "@/lib/qobuz-oauth"
 import { getSessionUserId } from "@/lib/sessions"
 import { findUsernameById } from "@/lib/users"
+
 export const dynamic = "force-dynamic"
 
 /**
  * POST /api/qobuz/login
  * Body: { username: string, password: string }
  *
- * Logs in to Qobuz, scrapes the app_secret from the web player bundle, validates both,
- * then ingests the account into the pool — exactly like the Tidal device flow.
+ * Logs in to Qobuz, scrapes the login registration's app_secret from its web player bundle,
+ * validates both, then ingests the account into the pool — exactly like the Tidal device flow.
  */
 export async function POST(req: NextRequest) {
   let username = ""
@@ -43,12 +44,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "login_failed", detail }, { status: 401 })
   }
 
-  // Step 2: get an app_secret that pairs with the login registration. The secret is per-app, so
-  // read open.qobuz.com (which serves 712109809's bundle) and fall back to the known value rather
-  // than reaching for play.qobuz.com's — that secret belongs to 950096963 and would not sign.
-  const appSecret =
-    (await scrapeQobuzAppSecret("https://open.qobuz.com/", "https://open.qobuz.com")) ??
-    QOBUZ_LOGIN_APP_SECRET
+  // The secret is per-registration: play.qobuz.com's belongs to the older app id and would not
+  // sign for the login one, hence the scrape by app id with a known-value fallback.
+  const appSecret = (await scrapeQobuzAppSecret(QOBUZ_LOGIN_APP_ID)) ?? QOBUZ_LOGIN_APP_SECRET
   const secretOk = await validateAppSecret(appSecret, loginResult.userAuthToken, QOBUZ_LOGIN_APP_ID)
 
   if (!secretOk) {

@@ -281,6 +281,12 @@ Request: `{ "id": 42 }` → `{ "ok": true, "result": { ... } }`. `404` when unkn
 { "ok": true, "removed": 3 }
 ```
 
+### `POST /api/admin/purge-entry` — destroy the credentials of a removed entry
+
+Request: `{ "id": 42, "mode": "payload" }`. `mode` is `payload` (default: blank the stored payload,
+keep the row for the Removed tab) or `row` (delete the row). `409` unless the entry is already
+removed, `404` when unknown. Irreversible; audited as `entry.purge`.
+
 ---
 
 ## App feedback (open when `READ_KEYS_ENFORCED=false`)
@@ -297,11 +303,13 @@ Request (`Authorization: Bearer <read key>` when enforcement is on; open otherwi
 { "service": "deezer", "kind": "account", "id": 42, "report": "dead" }
 ```
 
-- `report: "dead"` — the credential refused playback (expired ARL, revoked token). The entry is
-  demoted to `pending`; after 3 reports it is disabled and no longer served. The hourly sweep
-  re-verifies and can re-enable it if the server-side check disagrees.
+- `report: "dead"` — the credential refused playback (expired ARL, revoked token). The pool
+  re-checks it live first: a healthy entry keeps serving (the app's cached copy was stale), a
+  failing one is demoted to `pending`, and after 3 failures it is disabled and no longer served.
+  The sweep re-verifies and can re-enable it.
 - `report: "not_premium"` — the credential works but lacks the premium tier the pool believed it
-  had. Clears the `premium` flag so premium-first lease ordering stops preferring it.
+  had. The pool re-checks it live and disables the entry only when the provider confirms it; a
+  report the check cannot confirm is ignored (`ignored: "not_premium"`).
 
 Target by `id` (from `/api/sources`/`/api/accounts`) or `fingerprint`. On a `dead`/`not_premium`
 report against an **account** entry, if the reporting key actually held a per-key lease on that
