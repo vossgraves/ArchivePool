@@ -95,6 +95,9 @@ func toLeased(row db.Row, clientKey []byte) LeasedEntry {
 	// Decrypt at rest, re-encrypt for the client, so what leaves the server is ciphertext
 	// end-to-end. Routes fail closed when no key is available.
 	payload := crypto.DecryptAtRest(row.JSON("payload"))
+	// The contributor's own password is kept only so the pool can renew the account; no consumer of
+	// the pool may ever receive it, even encrypted.
+	delete(payload, "password")
 	out := LeasedEntry{
 		"id":            row.Int("id"),
 		"premium":       row.Bool("premium"),
