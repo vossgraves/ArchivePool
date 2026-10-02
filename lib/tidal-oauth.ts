@@ -3,14 +3,12 @@
 // any device, and the server polls until Tidal issues tokens. No redirect URI is required, so it
 // works cleanly from a website (unlike the app's WebView token-capture trick, which browsers block).
 
-// Well-known public Tidal "TV/device" OAuth client.
-//
-// The previous registration (zU4XHVVkc2tDPo4t) was retired by Tidal: it still answers
-// device_authorization, but every token it mints carries internal cid 3235, and the refresh
-// grant then rejects them with "Client id 3235 not found" (natom/streamrip#897, #901; replaced by
-// #932). This is the client streamrip v2.2.0 ships.
-const CLIENT_ID = "fX2JxdmntZWK0ixT"
-const CLIENT_SECRET = "1Nn9AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg="
+// Public Tidal "TV/device" OAuth client, shared with the refresh grant in health.ts. The previous
+// registration (zU4XHVVkc2tDPo4t) was retired: it still answers device_authorization, but every
+// token it mints carries internal cid 3235 and the refresh grant rejects them with "Client id 3235
+// not found" (natom/streamrip#897, #901). The secret is tidalapi's; streamrip's copy is stale.
+export const TIDAL_CLIENT_ID = "fX2JxdmntZWK0ixT"
+export const TIDAL_CLIENT_SECRET = "1Nn9AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg="
 const SCOPE = "r_usr+w_usr+w_sub"
 
 const DEVICE_AUTH_ENDPOINT = "https://auth.tidal.com/v1/oauth2/device_authorization"
@@ -45,7 +43,7 @@ export type PollOutcome =
 
 /** Kick off a device authorization. Returns the code + link to show the user. */
 export async function startDeviceAuth(): Promise<DeviceStart> {
-  const body = new URLSearchParams({ client_id: CLIENT_ID, scope: SCOPE })
+  const body = new URLSearchParams({ client_id: TIDAL_CLIENT_ID, scope: SCOPE })
   const res = await fetch(DEVICE_AUTH_ENDPOINT, {
     method: "POST",
     headers: {
@@ -84,8 +82,8 @@ export async function startDeviceAuth(): Promise<DeviceStart> {
 /** Poll once for a device code. Callers should wait `interval` seconds between polls. */
 export async function pollDeviceToken(deviceCode: string): Promise<PollOutcome> {
   const body = new URLSearchParams({
-    client_id: CLIENT_ID,
-    client_secret: CLIENT_SECRET,
+    client_id: TIDAL_CLIENT_ID,
+    client_secret: TIDAL_CLIENT_SECRET,
     device_code: deviceCode,
     grant_type: "urn:ietf:params:oauth:grant-type:device_code",
     scope: SCOPE,

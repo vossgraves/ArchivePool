@@ -13,16 +13,18 @@ import (
 	"archivepool/server/internal/httpx"
 )
 
-// Tidal's well-known public "TV/device" OAuth client.
-//
-// The previous registration (zU4XHVVkc2tDPo4t) was retired by Tidal: it still answers
-// device_authorization, but every token it mints carries internal cid 3235 and the refresh grant
-// rejects them with "Client id 3235 not found" (natom/streamrip#897, #901; replaced by #932).
-// This is the client streamrip v2.2.0 ships.
+// The public Tidal "TV/device" OAuth client, shared with the refresh grant in the health package.
+// The previous registration (zU4XHVVkc2tDPo4t) was retired: it still answers device_authorization,
+// but every token it mints carries internal cid 3235 and the refresh grant rejects them with
+// "Client id 3235 not found" (natom/streamrip#897, #901). The secret is tidalapi's; streamrip's
+// copy is stale.
 const (
-	tidalClientID     = "fX2JxdmntZWK0ixT"
-	tidalClientSecret = "1Nn9AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg="
-	tidalScope        = "r_usr+w_usr+w_sub"
+	TidalClientID     = "fX2JxdmntZWK0ixT"
+	TidalClientSecret = "1Nn9AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg="
+)
+
+const (
+	tidalScope = "r_usr+w_usr+w_sub"
 
 	tidalDeviceAuthURL = "https://auth.tidal.com/v1/oauth2/device_authorization"
 	tidalTokenURL      = "https://auth.tidal.com/v1/oauth2/token"
@@ -56,7 +58,7 @@ type PollOutcome struct {
 
 // StartDeviceAuth kicks off a device authorization.
 func StartDeviceAuth(ctx context.Context) (DeviceStart, error) {
-	form := url.Values{"client_id": {tidalClientID}, "scope": {tidalScope}}
+	form := url.Values{"client_id": {TidalClientID}, "scope": {tidalScope}}
 	res, err := httpx.PostForm(ctx, tidalDeviceAuthURL, map[string]string{"user-agent": tidalUA}, form, 12*time.Second)
 	if err != nil {
 		return DeviceStart{}, err
@@ -92,8 +94,8 @@ func StartDeviceAuth(ctx context.Context) (DeviceStart, error) {
 // PollDeviceToken polls once. Callers should wait `interval` seconds between polls.
 func PollDeviceToken(ctx context.Context, deviceCode string) (PollOutcome, error) {
 	form := url.Values{
-		"client_id":     {tidalClientID},
-		"client_secret": {tidalClientSecret},
+		"client_id":     {TidalClientID},
+		"client_secret": {TidalClientSecret},
 		"device_code":   {deviceCode},
 		"grant_type":    {"urn:ietf:params:oauth:grant-type:device_code"},
 		"scope":         {tidalScope},
