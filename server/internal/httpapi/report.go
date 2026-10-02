@@ -7,14 +7,15 @@ import (
 
 	"archivepool/server/internal/auth"
 	"archivepool/server/internal/crypto"
+	"archivepool/server/internal/health"
 	"archivepool/server/internal/pool"
 )
 
 // Rate-limit posture of /api/report (docs/REPORT_ENDPOINT.md). Keyed on IP because reports may
-// arrive without a key.
+// arrive without a key. Low because every report costs one live provider check.
 const (
-	reportIPLimit    = 60
-	reportKeyLimit   = 60
+	reportIPLimit    = 20
+	reportKeyLimit   = 20
 	reportWindowMs   = 5 * 60_000
 	replacementLimit = 3
 	replacementMs    = 60 * 60_000
@@ -40,7 +41,8 @@ type reportResponse struct {
 	Replacement map[string]serviceAccountGroup `json:"replacement"`
 }
 
-// handleReport is the app's side channel — never a truth source; the sweep arbitrates.
+// handleReport is the app's side channel — never a truth source: a report only triggers a live
+// re-check of the entry.
 func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -155,32 +157,64 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if reportType == "dead" {
-		if _, err := s.DB.Exec(ctx, `
-			update `+table+` set status = 'pending',
-			  consecutive_failures = consecutive_failures + 1,
-			  check_count = check_count + 1
-			where id = $1`, entry.ID); err != nil {
-			writeEmpty(w, http.StatusInternalServerError)
-			return
-		}
-		current, err := s.DB.QueryRow(ctx,
-			`select consecutive_failures from `+table+` where id = $1 limit 1`, entry.ID)
+		// Verify-before-park: a report usually means the app's cached copy went stale, not that the
+		// account died. The live check already records itself and resets a healthy entry, so only a
+		// failing one is parked.
+		live, err := health.CheckEntryByID(ctx, s.DB, entry.ID)
 		if err != nil {
-			writeEmpty(w, http.StatusInternalServerError)
-			return
+			live = nil
 		}
-		if current.Int("consecutive_failures") >= disableAfterReports {
-			if _, err := s.DB.Exec(ctx, `update `+table+` set disabled = true where id = $1`, entry.ID); err != nil {
+		if live == nil || !live.OK {
+			park := `update ` + table + ` set status = 'pending'`
+			if live == nil {
+				// A check that could not run recorded nothing, so the report itself is the failure.
+				park += `, consecutive_failures = consecutive_failures + 1, check_count = check_count + 1`
+			}
+			if _, err := s.DB.Exec(ctx, park+` where id = $1`, entry.ID); err != nil {
 				writeEmpty(w, http.StatusInternalServerError)
 				return
 			}
+			current, err := s.DB.QueryRow(ctx,
+				`select consecutive_failures from `+table+` where id = $1 limit 1`, entry.ID)
+			if err != nil {
+				writeEmpty(w, http.StatusInternalServerError)
+				return
+			}
+			if current.Int("consecutive_failures") >= disableAfterReports {
+				if _, err := s.DB.Exec(ctx, `update `+table+` set disabled = true where id = $1`, entry.ID); err != nil {
+					writeEmpty(w, http.StatusInternalServerError)
+					return
+				}
+			}
 		}
 	} else if reportType == "not_premium" {
-		// Non-premium entries are not served at all. The sweep re-enables on a false report.
-		if _, err := s.DB.Exec(ctx, `
-			update `+table+` set premium = false, disabled = true, check_count = check_count + 1
-			where id = $1`, entry.ID); err != nil {
-			writeEmpty(w, http.StatusInternalServerError)
+		// Reports are keyless and entry ids are small sequential integers, so an unverified report
+		// would let one request switch a healthy account off and one address walk the whole pool.
+		// The provider's own answer decides entitlement; a wrong report is discarded.
+		live, err := health.CheckEntryByID(ctx, s.DB, entry.ID)
+		if err != nil {
+			live = nil
+		}
+		if live == nil || !live.OK || live.Premium {
+			// Also rejected when the check could not decide: a flaky network must not hand the abuse
+			// back. Entitlement is judged only from a check that ran and succeeded, and that check
+			// has already disabled the entry itself when the account really is not premium.
+			reason := "live check still premium"
+			switch {
+			case live == nil:
+				reason = "live check unavailable"
+			case !live.OK:
+				reason = "live check failed"
+			}
+			if _, err := s.DB.Exec(ctx, `
+				insert into health_log (entry_id, ok, premium, latency_ms, detail)
+				values ($1, true, true, null, $2)`,
+				entry.ID, "app report: not_premium (rejected — "+reason+")"); err != nil {
+				writeEmpty(w, http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": entry.ID, "ignored": "not_premium"},
+				map[string]string{"cache-control": "private, no-store"})
 			return
 		}
 	}

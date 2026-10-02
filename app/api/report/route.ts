@@ -11,12 +11,10 @@ import { clientIp, keyId, rateLimit, tooManyRequests } from "@/lib/rate-limit"
 import { isKind, isService } from "@/lib/sources"
 
 export const dynamic = "force-dynamic"
+
 // Keyed on IP because reports may arrive without a key. See docs/REPORT_ENDPOINT.md.
-//
-// 20 per 5 minutes, not the 60 this used to allow: every report now costs one live provider check
-// (that is what makes a false report harmless), so the endpoint is a metered call into Qobuz /
-// Tidal / Deezer / Apple. A legitimate app reports a credential at most a few times ever, so 20 is
-// far above real traffic while capping what one address can spend.
+// Low because every report costs one live provider check: a legitimate app reports a credential at
+// most a few times ever, and this caps what one address can spend on Qobuz / Tidal / Deezer / Apple.
 const REPORT_IP_LIMIT = 20
 const REPORT_KEY_LIMIT = 20
 const REPORT_WINDOW_MS = 5 * 60_000
@@ -122,18 +120,22 @@ export async function POST(req: NextRequest) {
   const table = entry.kind === "account" ? accountEntries : instanceEntries
 
   if (reportType === "dead") {
-    // Verify-before-park: a report usually means the app's leased copy went stale (Tidal kills
-    // access tokens hourly, apps cache them for a day), not that the account died. Re-check live
-    // first: a healthy entry gets its counter bumped but stays servable, so one stale token can't
-    // silence an account for hours. Only a genuinely failing entry parks in pending.
+    // Verify-before-park: a report usually means the app's cached copy went stale (Tidal kills
+    // access tokens hourly, apps cache them for a day), not that the account died. The live check
+    // already records itself and resets a healthy entry, so only a failing one is parked.
     const live = await checkEntryById(entry.id).catch(() => null)
     if (live == null || !live.ok) {
       await db
         .update(table)
         .set({
           status: "pending", // demoted: not handed out fresh until the sweep re-verifies
-          consecutiveFailures: sql`${table.consecutiveFailures} + 1`,
-          checkCount: sql`${table.checkCount} + 1`,
+          // A check that could not run recorded nothing, so the report itself is the failure.
+          ...(live == null
+            ? {
+                consecutiveFailures: sql`${table.consecutiveFailures} + 1`,
+                checkCount: sql`${table.checkCount} + 1`,
+              }
+            : {}),
         })
         .where(eq(table.id, entry.id))
 
@@ -146,54 +148,31 @@ export async function POST(req: NextRequest) {
       if ((current?.consecutiveFailures ?? 0) >= DISABLE_AFTER_REPORTS) {
         await db.update(table).set({ disabled: true }).where(eq(table.id, entry.id))
       }
-    } else {
-      // Healthy after all — count the report as a check so uptime stays honest, but reset the
-      // failure streak instead of growing it.
-      await db
-        .update(table)
-        .set({
-          consecutiveFailures: 0,
-          checkCount: sql`${table.checkCount} + 1`,
-        })
-        .where(eq(table.id, entry.id))
     }
   } else if (reportType === "not_premium") {
-    // A "not premium" report used to disable the entry outright, unverified. Reports are keyless
-    // and need no lease, and entry ids are small sequential integers — so anyone who guessed an id
-    // could switch a healthy premium account off with a single request and walk the whole pool in
-    // under a hundred calls, well inside the IP rate limit. Re-verify first, exactly as the dead
-    // path does: the live check decides entitlement from the provider's own answer, so a wrong
-    // report is discarded and the account keeps serving.
+    // Reports are keyless and entry ids are small sequential integers, so an unverified report
+    // would let one request switch a healthy account off and one address walk the whole pool.
+    // The provider's own answer decides entitlement; a wrong report is discarded.
     const live = await checkEntryById(entry.id).catch(() => null)
-    if (live == null || live.premium) {
-      // Still premium by the provider's own account of it, or we could not reach the provider to
-      // find out. Either way the report does not stand: a flaky network must not be able to switch
-      // a healthy account off, which would hand the abuse straight back. The hourly sweep is the
-      // authority on entitlement and will disable it if the account really has lapsed. Recorded
-      // either way, so a systematic false-reporter stays visible.
+    if (live == null || !live.ok || live.premium) {
+      // Also rejected when the check could not decide: a flaky network must not hand the abuse
+      // back. Entitlement is judged only from a check that ran and succeeded, and that check has
+      // already disabled the entry itself when the account really is not premium. Logged either
+      // way, so a systematic false-reporter stays visible.
       await db.insert(healthLog).values({
         entryId: entry.id,
         ok: true,
         premium: true,
         latencyMs: null,
-        detail:
-          live == null
-            ? "app report: not_premium (rejected — live check unavailable)"
-            : "app report: not_premium (rejected — live check still premium)",
+        detail: `app report: not_premium (rejected — ${
+          live == null ? "live check unavailable" : !live.ok ? "live check failed" : "live check still premium"
+        })`,
       })
       return NextResponse.json(
         { ok: true, id: entry.id, ignored: "not_premium" },
         { headers: { "cache-control": "private, no-store" } },
       )
     }
-    await db
-      .update(table)
-      .set({
-        premium: false,
-        disabled: true,
-        checkCount: sql`${table.checkCount} + 1`,
-      })
-      .where(eq(table.id, entry.id))
   }
 
   await db.insert(healthLog).values({
