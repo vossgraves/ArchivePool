@@ -130,17 +130,21 @@ func (s *Server) handleQobuzLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 2: scrape the app_secret from the web player bundle.
-	appSecret := oauth.ScrapeQobuzAppSecret(ctx)
-	secretOK := appSecret != "" && oauth.ValidateAppSecret(ctx, appSecret, login.UserAuthToken)
+	// The secret is per-registration: play.qobuz.com's belongs to the older app id and would not
+	// sign for the login one, hence the scrape by app id with a known-value fallback.
+	appSecret := oauth.ScrapeQobuzAppSecret(ctx, oauth.QobuzLoginAppID)
+	if appSecret == "" {
+		appSecret = oauth.QobuzLoginAppSecret
+	}
+	secretOK := oauth.ValidateAppSecret(ctx, appSecret, login.UserAuthToken, oauth.QobuzLoginAppID)
 
-	if appSecret == "" || !secretOK {
+	if !secretOK {
 		// Login succeeded but we can't get a working secret — return the token anyway so the user can
 		// still manually paste the app_secret if needed.
 		writeJSON(w, http.StatusOK, needsSecret{
 			State:         "needs_secret",
 			UserAuthToken: login.UserAuthToken,
-			AppID:         oauth.QobuzAppID,
+			AppID:         oauth.QobuzLoginAppID,
 			UserID:        login.UserID,
 			CountryCode:   login.CountryCode,
 			Detail:        "Signed in, but could not scrape app_secret from bundle. Please paste it manually.",
@@ -148,10 +152,10 @@ func (s *Server) handleQobuzLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 3: build payload and ingest, just like Tidal's device poll endpoint.
+	// Build the payload and ingest, just like Tidal's device poll endpoint.
 	payload := map[string]any{
 		"token":     login.UserAuthToken,
-		"appId":     oauth.QobuzAppID,
+		"appId":     oauth.QobuzLoginAppID,
 		"appSecret": appSecret,
 		"note":      "Added via Qobuz sign-in",
 	}
