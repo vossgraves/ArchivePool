@@ -36,7 +36,8 @@ export function QobuzConnect() {
 
   const submit = useCallback(async () => {
     if (phase === "submitting") return
-    // `required` is inert outside a <form>, so the check lives here.
+    // The inputs carry no native constraints (they would gate SubmitForm's own submit), so the
+    // check lives here.
     if (!email.trim() || !password) {
       setPhase("error")
       setMessage("Enter your Qobuz email and password.")
@@ -131,12 +132,18 @@ export function QobuzConnect() {
 
       {phase === "idle" || phase === "submitting" || phase === "error" ? (
         <div className="flex flex-col gap-3">
+          {/* No `required` and no type="email" here: these inputs sit inside SubmitForm's <form>,
+              so either constraint joins that form's native validation and blocks "Verify &
+              contribute" for someone using the manual-paste path with these left blank.
+              submit() checks them itself. */}
           <label className="flex flex-col gap-1.5">
             <span className="text-sm font-medium">Email</span>
             <input
-              type="email"
+              type="text"
+              inputMode="email"
               autoComplete="email"
-              required
+              autoCapitalize="none"
+              spellCheck={false}
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               onKeyDown={onEnter(submit)}
@@ -149,7 +156,6 @@ export function QobuzConnect() {
             <input
               type="password"
               autoComplete="current-password"
-              required
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               onKeyDown={onEnter(submit)}

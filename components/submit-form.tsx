@@ -197,9 +197,10 @@ export function SubmitForm({ username = null }: { username?: string | null }) {
       if (current === "tidal" && /token/i.test(state.message)) setTidalManualOpen(true)
     }
     // The verdict renders below the fold, far from the fields just filled: bring it into
-    // view and focus it after every submit, success or failure.
+    // view and focus it after every submit, success or failure. focus() scrolls instantly by
+    // default, which would cut the smooth scroll short, so it leaves scrolling to the line above.
     noticeRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })
-    noticeRef.current?.focus()
+    noticeRef.current?.focus({ preventScroll: true })
   }, [state])
 
   // Controlled Qobuz account fields so the "paste from message" box can auto-fill them.
