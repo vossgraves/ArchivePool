@@ -1,6 +1,6 @@
 # ArchivePool
 
-A self-hostable **community source pool** for [ArchiveTune](https://github.com/vossgraves/ArchiveTune).
+A self-hostable **community source pool** for [ArchiveTune](https://github.com/NatuneGroup/ArchiveTune).
 People anonymously contribute Tidal/Qobuz API instances and accounts; the site health-checks them
 on a schedule, auto-drops the dead/non-premium ones, and serves the surviving pool as JSON that the
 app auto-discovers at runtime.
