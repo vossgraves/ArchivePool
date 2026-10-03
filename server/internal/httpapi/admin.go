@@ -400,6 +400,69 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	}{users}, nil)
 }
 
+// handleAdminUserCreate is POST /api/admin/users: create an account by hand, for deployments that
+// set ALLOW_PUBLIC_SIGNUP="false". Body: { username, password, role?: "user" | "admin" }; any role
+// other than "admin" is "user". Any admin may already promote via PATCH, so creating an admin
+// directly grants nothing new.
+func (s *Server) handleAdminUserCreate(w http.ResponseWriter, r *http.Request) {
+	actor := s.adminActor(r)
+	if actor == nil {
+		unauthorized(w)
+		return
+	}
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+		Role     string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, errBody{Error: "invalid_body"}, nil)
+		return
+	}
+	username := strings.ToLower(strings.TrimSpace(body.Username))
+	role := "user"
+	if body.Role == "admin" {
+		role = "admin"
+	}
+
+	if problem := auth.ValidateCredentials(username, body.Password); problem != "" {
+		writeJSON(w, http.StatusBadRequest, errJSON("invalid_input", problem), nil)
+		return
+	}
+	existing, err := auth.FindUserByUsername(r.Context(), s.DB, username)
+	if err != nil {
+		writeEmpty(w, http.StatusInternalServerError)
+		return
+	}
+	if existing.Valid() {
+		writeJSON(w, http.StatusConflict, errJSON("username_taken", "That username is already registered."), nil)
+		return
+	}
+
+	userID, name, err := auth.CreateUser(r.Context(), s.DB, username, body.Password, "", "")
+	if err != nil {
+		logf("[admin] user create failed: %v", err)
+		writeEmpty(w, http.StatusInternalServerError)
+		return
+	}
+	if role == "admin" {
+		if _, err := auth.SetUserRole(r.Context(), s.DB, userID, "admin"); err != nil {
+			logf("[admin] promote new user failed: %v", err)
+			writeEmpty(w, http.StatusInternalServerError)
+			return
+		}
+	}
+
+	auth.RecordAudit(r.Context(), s.DB, r, actor, auth.AuditUserCreate,
+		"user:"+strconv.Itoa(userID), map[string]any{"username": name, "role": role})
+	writeJSON(w, http.StatusOK, struct {
+		OK       bool   `json:"ok"`
+		UserID   int    `json:"userId"`
+		Username string `json:"username"`
+		Role     string `json:"role"`
+	}{true, userID, name, role}, nil)
+}
+
 // handleAdminUserPatch is PATCH /api/admin/users: promote or demote an account.
 //
 // A named admin may not demote themselves — the only way back would be the shared ADMIN_TOKEN, and

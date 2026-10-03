@@ -106,7 +106,7 @@ available, exercised against a real deployment.
 | 7 | `POST /api/report` | ✅ | `dead`/`not_premium`, 3-report auto-disable, lease-proofed replacement (registered key + proven lease + 3/hour), `replacement` envelope identical to `/api/accounts` |
 | 8 | `GET /api/cron/health` | ✅ | `CRON_SECRET` or admin token; external ingestion (isolated), sweep, snapshot rewrite, cache invalidation; a run that cannot take the sweep lease reports `locked:true` and does nothing (see "Scheduled-job exclusivity") |
 | 9 | `GET /api/cron/monochrome` | ✅ | monochrome + SpotiFLAC sync, snapshot rewrite, `ok` true if either feed succeeded, 500 when both failed; either sync reporting `locked:true` means another instance held the lease |
-| 10 | `POST /api/auth/signup` | ✅ | username/password rules, 5 accounts per IP+UA per 24h, session cookie |
+| 10 | `POST /api/auth/signup` | ✅ | username/password rules, 5 accounts per IP+UA per 24h, session cookie; 403 `signup_disabled` when `ALLOW_PUBLIC_SIGNUP="false"` |
 | 11 | `POST /api/auth/login` | ✅ | 10 attempts per IP+username and 30 per IP per 10 min, uniform `invalid_credentials` |
 | 12 | `POST /api/auth/logout` | ✅ | clears the cookie (`Max-Age=0`) |
 | 13 | `GET /api/auth/me` | ✅ | `{username}` or 401 |
@@ -123,6 +123,7 @@ available, exercised against a real deployment.
 | 24 | `POST /api/admin/requests/{id}` | ✅ | approve (no minting) / reject (≥10-char note), audit rows |
 | 25 | `GET /api/admin/users` | ✅ | never selects `password_hash` |
 | 26 | `PATCH /api/admin/users` | ✅ | role change, `cannot_demote_self`, audit `user.role_change` |
+| 26a | `POST /api/admin/users` | ✅ | manual account creation (`role` "admin" or "user"), 409 `username_taken`, audit `user.create` |
 | 27 | `GET /api/admin/audit` | ✅ | `limit` clamped to 1..500 |
 | 28 | `GET /api/admin/remove` | ✅ | every entry, ids sorted ascending, `payload` never selected |
 | 29 | `POST /api/admin/remove` | ✅ | hard remove/restore across both tables by id, audit `entry.remove` |
