@@ -3,7 +3,9 @@ package health
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
+	"strconv"
 	"sync"
 	"time"
 
@@ -150,7 +152,9 @@ func RunHealthSweep(ctx context.Context, database *db.DB, force bool) (SweepSumm
 	now := time.Now()
 	entries := make([]Entry, 0, len(allEntries))
 	for _, e := range allEntries {
-		if force || e.LastCheckedAt == nil || now.Sub(*e.LastCheckedAt) > staleAfter {
+		// Entries parked in pending by a dead report are neither servable nor dead, so they are
+		// re-verified promptly instead of waiting out the stale window.
+		if force || e.Status == string(pool.StatusPending) || e.LastCheckedAt == nil || now.Sub(*e.LastCheckedAt) > staleAfter {
 			entries = append(entries, e)
 		}
 	}
@@ -378,8 +382,16 @@ func mapLimit[T any](items []T, limit int, fn func(T)) {
 func runItem[T any](item T, fn func(T)) {
 	defer func() {
 		if r := recover(); r != nil {
-			logf("[health] check panicked for %v: %v", item, r)
+			logf("[health] check panicked for %s: %v", describeItem(item), r)
 		}
 	}()
 	fn(item)
+}
+
+// describeItem names an item for the log without printing it: an Entry carries its payload.
+func describeItem(item any) string {
+	if e, ok := item.(Entry); ok {
+		return "entry " + strconv.Itoa(e.ID)
+	}
+	return fmt.Sprint(item)
 }

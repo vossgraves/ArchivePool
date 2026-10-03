@@ -4,11 +4,8 @@
 //   POST https://www.qobuz.com/api.json/0.2/user/login
 //   with username, password, app_id → returns user_auth_token immediately.
 //
-// The app_secret is not returned by the API. It is embedded in the web player JS bundle.
-// We fetch the play.qobuz.com page server-side (no CORS) and scrape it.
-//
-// The same app_id / app_secret pair that works on the web player also works in the app
-// because the signing algorithm is public and only the secret changes.
+// The app_secret is not returned by the API. It is embedded in the web player JS bundle, so we
+// fetch the player page server-side (no CORS) and scrape it.
 
 import { createHash } from "node:crypto"
 
@@ -30,8 +27,11 @@ export const QOBUZ_LOGIN_APP_ID = "712109809"
 export const QOBUZ_LOGIN_APP_SECRET = "589be88e4538daea11f509d29e4a23b1"
 
 const LOGIN_URL = "https://www.qobuz.com/api.json/0.2/user/login"
-const PLAYER_URL = "https://play.qobuz.com/login"
-const OPEN_URL = "https://open.qobuz.com/"
+
+const SECRET_SOURCES: Record<string, { page: string; origin: string }> = {
+  [QOBUZ_APP_ID]: { page: "https://play.qobuz.com/login", origin: "https://play.qobuz.com" },
+  [QOBUZ_LOGIN_APP_ID]: { page: "https://open.qobuz.com/", origin: "https://open.qobuz.com" },
+}
 
 // A stable, versioned Chrome UA consistent with what the Qobuz web player itself sends.
 // Using a fixed string (not randomised per call) prevents Qobuz from flagging sessions for
@@ -54,8 +54,6 @@ export async function qobuzLogin(
   username: string,
   password: string,
 ): Promise<QobuzLoginResult> {
-  // The login-capable registration. QOBUZ_APP_ID (950096963) answers "User authentication is
-  // required" for perfectly valid credentials, so sign-in with it could never have worked.
   const body = new URLSearchParams({
     username,
     email: username,
@@ -105,20 +103,17 @@ export async function qobuzLogin(
 }
 
 /**
- * Scrapes a Qobuz web player page and extracts the app_secret from its JS bundle.
+ * Scrapes the Qobuz web player that serves [appId]'s registration and extracts the app_secret from
+ * its JS bundle.
  *
  * Qobuz embeds the secret as a 32-char lowercase hex string in one of its bundle scripts; the
- * technique is identical to what streamrip / qobuz-dl use. [origin] selects which deployment to
- * read, because the secret is per-registration: play.qobuz.com pairs with 950096963 and
- * open.qobuz.com with 712109809.
+ * technique is identical to what streamrip / qobuz-dl use. The secret is per-registration, so an
+ * unknown appId falls back to the play.qobuz.com player.
  */
-export async function scrapeQobuzAppSecret(
-  pageUrl = PLAYER_URL,
-  origin = "https://play.qobuz.com",
-): Promise<string | null> {
+export async function scrapeQobuzAppSecret(appId = QOBUZ_APP_ID): Promise<string | null> {
+  const { page, origin } = SECRET_SOURCES[appId] ?? SECRET_SOURCES[QOBUZ_APP_ID]
   try {
-    // Step 1: load the player page to find the bundle script URLs.
-    const pageRes = await fetch(pageUrl, {
+    const pageRes = await fetch(page, {
       headers: { "user-agent": UA },
       cache: "no-store",
     })

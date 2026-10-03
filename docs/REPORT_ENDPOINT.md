@@ -1,12 +1,12 @@
 # /api/report
 
-Apps report what they observed at playback time. The pool records it and lets the hourly sweep be
-the arbiter.
+Apps report what they observed at playback time. The pool re-checks the entry live before acting,
+so a report only ever triggers a verification and never decides the outcome on its own.
 
 | Report | Meaning | Effect |
 |---|---|---|
-| `dead` | the credential refused the app — bad token, expired ARL, revoked session | bumps `consecutive_failures` and demotes to `pending`; disabled once `DISABLE_AFTER_REPORTS` apps agree |
-| `not_premium` | it works but does not deliver the tier the pool believed | clears `premium` and disables, since non-premium entries are not served |
+| `dead` | the credential refused the app — bad token, expired ARL, revoked session | live check; a failing entry is demoted to `pending` and disabled at `DISABLE_AFTER_REPORTS` failures, a healthy one keeps serving |
+| `not_premium` | it works but does not deliver the tier the pool believed | live check; the entry is disabled only when the provider confirms it is not premium, otherwise the report is ignored |
 
 This is deliberately a **side channel, not a truth source**. Nothing is deleted, and the sweep
 re-checks every entry server-side (Tidal tokens even rotate there), so false reports decay on
@@ -39,8 +39,8 @@ must succeed either way.
 
 ## Rate limits
 
-`REPORT_IP_LIMIT` / `REPORT_KEY_LIMIT` are 60 per 5 minutes — far above any real device's
-dead-token chatter, while making bulk `dead`-spam against healthy entries impractical. The sweep
-re-enables wrongly disabled entries hourly, so this is a bump, not a wall.
+`REPORT_IP_LIMIT` / `REPORT_KEY_LIMIT` are 20 per 5 minutes. Every report costs a live provider
+check, so the limit caps what one address can spend there; it is still far above any real device's
+dead-token chatter.
 
 All limiter windows are per serverless instance, not global.

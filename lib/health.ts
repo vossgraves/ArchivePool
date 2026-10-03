@@ -4,6 +4,7 @@ import { db } from "@/lib/db"
 import { accountEntries } from "@/lib/db/schema"
 import { decryptAtRest, encryptAtRest } from "@/lib/crypto"
 import { qobuzLogin, scrapeQobuzAppSecret, type QobuzLoginResult } from "./qobuz-oauth"
+import { TIDAL_CLIENT_ID, TIDAL_CLIENT_SECRET } from "./tidal-oauth"
 import { fingerprint, type Kind, type Service, type Status } from "./sources"
 
 export interface CheckResult {
@@ -16,14 +17,6 @@ export interface CheckResult {
 
 const TIMEOUT_MS = 12_000
 
-// Tidal device-flow OAuth client.
-//
-// The previous registration (zU4XHVVkc2tDPo4t) was retired by Tidal: it still answers
-// device_authorization, but every token it mints carries internal cid 3235 and the refresh grant
-// rejects them with "Client id 3235 not found" (natom/streamrip#897, #901; replaced by #932).
-// This is the client streamrip v2.2.0 ships.
-const TIDAL_CLIENT_ID = "fX2JxdmntZWK0ixT"
-const TIDAL_CLIENT_SECRET = "1Nn9AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg="
 const TIDAL_TOKEN_ENDPOINT = "https://auth.tidal.com/v1/oauth2/token"
 
 // Tidal's own TV/device client UA — used for all Tidal API calls so sessions are not
@@ -336,7 +329,6 @@ async function checkDeezerInstance(payload: Record<string, unknown>): Promise<Ch
   }
 }
 
-/** Refreshes a Tidal access token and writes it back, so later checks use the new one. */
 /**
  * True when a Tidal JWT is a refresh token rather than an access token. The payload is read
  * without verifying the signature, which is safe because the answer only decides which grant to
@@ -358,9 +350,9 @@ function isTidalRefreshToken(token: string): boolean {
  * unverified JWT decoder — the answer only decides whether to refresh pro-actively.
  */
 export function isTidalAccessExpired(token: string, marginSecs = 300): boolean {
-    const exp = decodeJwtPayload(token)?.exp
-    if (typeof exp !== "number" || exp <= 0) return false
-    return exp - marginSecs <= Date.now() / 1000
+  const exp = decodeJwtPayload(token)?.exp
+  if (typeof exp !== "number" || exp <= 0) return false
+  return exp - marginSecs <= Date.now() / 1000
 }
 
 /**
@@ -369,15 +361,16 @@ export function isTidalAccessExpired(token: string, marginSecs = 300): boolean {
  * possible. Used pro-actively before serving a lease so apps never receive an hours-dead token.
  */
 export async function ensureFreshTidalToken(
-    payload: Record<string, unknown>,
-    entryFingerprint?: string,
+  payload: Record<string, unknown>,
+  entryFingerprint?: string,
 ): Promise<string | null> {
-    const token = String(payload.token ?? "").trim()
-    if (!token || isTidalRefreshToken(token)) return token || null
-    if (!isTidalAccessExpired(token)) return token
-    return (await tryRefreshTidalToken(payload, entryFingerprint)).token
+  const token = String(payload.token ?? "").trim()
+  if (!token || isTidalRefreshToken(token)) return token || null
+  if (!isTidalAccessExpired(token)) return token
+  return (await tryRefreshTidalToken(payload, entryFingerprint)).token
 }
 
+/** Refreshes a Tidal access token and writes it back, so later checks use the new one. */
 async function tryRefreshTidalToken(
   payload: Record<string, unknown>,
   entryFingerprint?: string,
@@ -422,11 +415,9 @@ async function tryRefreshTidalToken(
         error?: string
         error_description?: string
       }
-      // Tidal retires client registrations. When that happens the grant fails with
-      // "invalid_client / Client id N not found" for EVERY credential minted by that client,
-      // no matter which client_id the caller presents — the id comes from the token itself.
-      // Surfacing it precisely is the difference between "this account died" and "the whole
-      // onboarding path is dead", which is what the board has to tell an operator.
+      // A retired client registration fails the grant with "Client id N not found" for EVERY
+      // credential it minted, whichever client_id the caller presents (the id comes from the token
+      // itself). Surfacing it separates "this account died" from "the onboarding path is dead".
       if (err.error === "invalid_client" && /client id .* not found/i.test(err.error_description ?? "")) {
         return { token: null, detail: `refresh client retired by Tidal (${err.error_description})` }
       }
@@ -500,8 +491,6 @@ async function checkTidalAccount(
         res = retry.res
         ms = retry.ms
       } else {
-        // The access token died and the refresh path explains why — report that, not a bare 401,
-        // so the board distinguishes a dead credential from a dead Tidal client registration.
         return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: refreshed.detail }
       }
     }
@@ -586,30 +575,21 @@ async function checkQobuzAppSecret(
 }
 
 /**
- * Qobuz rotates the web-player `app_secret`. Every pooled account stores its own copy, so a
- * rotation invalidates all of them at once — each starts failing the signature probe even though
- * its user token is still perfect, and without healing the whole tier goes dark until every
- * contributor re-submits. Re-scrape the current secret, prove it against a known-good token, and
- * rewrite it into every entry that still carries the stale one.
+ * Qobuz rotates `app_secret` per app registration, and every pooled account stores its own copy, so
+ * a rotation makes all of them fail the signature probe at once even though their user tokens are
+ * fine. Re-scrape the secret for this app id, prove it signs with a known-good token, and rewrite it
+ * into every entry of that app still carrying the stale one.
  *
- * Returns the working secret, or null when the secret is not the problem (or the bundle could not
- * be read, in which case we must not churn every credential on a transient fetch failure).
+ * Returns the working secret, or null when the secret is not the problem or the bundle could not
+ * be read — a transient fetch failure must not churn every credential.
  */
 async function healQobuzAppSecret(appId: string, staleSecret: string, probeToken: string): Promise<string | null> {
-  let fresh: string | null = null
-  try {
-    fresh = await scrapeQobuzAppSecret()
-  } catch {
-    return null
-  }
+  const fresh = await scrapeQobuzAppSecret(appId)
   if (!fresh || fresh === staleSecret) return null
-  // Prove the freshly-scraped secret actually signs, so a garbled scrape cannot be written to
-  // every account and turn a recoverable rotation into an outage.
   const probe = await checkQobuzAppSecret(appId, fresh, probeToken)
   if (!probe.ok) return null
 
-  // Rewrite every Qobuz account still holding the stale secret. The fingerprint is derived from the
-  // user token (see fingerprint()), not the secret, so this does not fork dedupe.
+  // The fingerprint derives from the user token, not the secret, so this does not fork dedupe.
   const rows = await db.select().from(accountEntries).where(eq(accountEntries.service, "qobuz"))
   for (const row of rows) {
     let plain: Record<string, unknown>
@@ -618,29 +598,24 @@ async function healQobuzAppSecret(appId: string, staleSecret: string, probeToken
     } catch {
       continue
     }
-    if (String(plain.appSecret ?? "").trim() !== staleSecret) continue
+    if (String(plain.appId ?? "").trim() !== appId || String(plain.appSecret ?? "").trim() !== staleSecret) continue
     await db
       .update(accountEntries)
       .set({ payload: encryptAtRest({ ...plain, appSecret: fresh }) })
-      .where(sql`id = ${row.id}`)
+      .where(eq(accountEntries.id, row.id))
       .catch(() => { /* best-effort — a single row must not abort the heal */ })
   }
   return fresh
 }
 
 /**
- * Re-logs into Qobuz with a stored credential and swaps in the fresh `user_auth_token`.
+ * Re-logs into Qobuz with a stored credential and swaps in the fresh `user_auth_token`. A user
+ * token has no refresh endpoint, so a fresh `user/login` is the only way to revive a revoked one;
+ * token-only contributions carry no credential and are skipped.
  *
- * A Qobuz user token is a plain bearer credential: it has no refresh endpoint, so the only way to
- * bring a revoked/rotated account back is a fresh `user/login`. Accounts contributed through
- * /api/qobuz/login carry the email + password, so the pool can keep them alive on its own instead
- * of the contributor re-submitting every time Qobuz invalidates them.
- *
- * Token-only contributions have nothing to renew with and are correctly skipped.
- *
- * The row is updated in place, matched on the OLD fingerprint, and the fingerprint is rewritten
- * alongside the token — fingerprint() is derived from the token, so upserting on the new one would
- * create a duplicate row and leave the dead entry behind.
+ * The row is matched on the OLD fingerprint and the fingerprint is rewritten alongside the token:
+ * it derives from the token, so upserting on the new one would duplicate the row and leave the
+ * dead entry behind.
  */
 async function renewQobuzToken(
   payload: Record<string, unknown>,
@@ -675,6 +650,7 @@ async function renewQobuzToken(
     .catch(() => { /* best-effort — the token still works this round */ })
   return { token: fresh, detail: "re-logged in" }
 }
+
 async function checkQobuzAccount(
   payload: Record<string, unknown>,
   entryFingerprint?: string,
@@ -690,10 +666,7 @@ async function checkQobuzAccount(
       `https://www.qobuz.com/api.json/0.2/user/get?app_id=${encodeURIComponent(appId)}&user_auth_token=${encodeURIComponent(token)}`,
       { headers: qobuzHeaders(appId, token) },
     )
-    if (!res.ok && (res.status === 401 || res.status === 403)) {
-      // A rejected user token is usually rotated or revoked, not gone. Accounts that arrived
-      // through the sign-in form carry the credential needed to log in again, so renew rather than
-      // dropping a contributor who did nothing wrong.
+    if (res.status === 401 || res.status === 403) {
       const renewed = await renewQobuzToken(payload, entryFingerprint).catch((e) => ({
         token: null,
         detail: `renew threw: ${e instanceof Error ? e.message : "error"}`,
@@ -721,10 +694,8 @@ async function checkQobuzAccount(
     // token without a working secret cannot resolve any audio in the app.
     const secretCheck = await checkQobuzAppSecret(appId, appSecret, token)
     if (!secretCheck.ok) {
-      // A failed signature on a token that just authenticated is almost always Qobuz having
-      // rotated the web-player app_secret, not a bad account. Re-scrape and rewrite the new secret
-      // into every entry still holding the stale one, then re-test — otherwise one rotation takes
-      // the entire tier offline until every contributor resubmits.
+      // A failed signature on a token that just authenticated is almost always a rotated
+      // app_secret, not a bad account.
       const healed = await healQobuzAppSecret(appId, appSecret, token).catch(() => null)
       if (healed) {
         const retest = await checkQobuzAppSecret(appId, healed, token)
@@ -754,26 +725,22 @@ const DEEZER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 /**
- * Asks Apple's web-playback endpoint for a real stream URL. This is the only call that proves a
- * Media-User-Token can still actually play something.
+ * Asks Apple's web-playback endpoint for a real stream URL, the only call that proves a
+ * Media-User-Token can still play something.
  *
- * A song that simply is not available in the account's storefront is NOT a dead token — that would
- * flip healthy accounts off the pool on a regional catalogue gap — so only Apple's own
- * "session has ended" style answers count as death. Anything else is reported as inconclusive and
- * the caller keeps the entry.
+ * `lossless` is null when the probe could not decide. A song missing from the account's storefront
+ * or an Apple-side error is not a dead token, so only Apple's own "session has ended" style answers
+ * report `ok: false`.
  */
 async function probeAppleWebPlayback(
   mediaUserToken: string,
   devToken: string,
-): Promise<{ ok: boolean; lossless: boolean; detail: string; latencyMs: number }> {
-  // Probe ids only — never content. A long-standing, widely licensed track; if a given storefront
-  // simply does not carry it, the answer is "inconclusive", which is not a death.
+): Promise<{ ok: boolean; lossless: boolean | null; detail: string; latencyMs: number }> {
   const songIds = ["1499378108", "6792884101"]
   for (const songId of songIds) {
-    // The request shape is Apple's web player contract: the song goes in the BODY as
-    // `salableAdamId`, and the two tokens travel as HEADERS. Sending them in the body (or
-    // omitting Authorization) is answered with failureType 2002 regardless of whether the
-    // token is actually good, which would make every account look dead.
+    // Apple's web player contract: the song goes in the BODY as `salableAdamId` and the tokens in
+    // HEADERS. Any other shape is answered with failureType 2002 whether or not the token is good,
+    // which would make every account look dead.
     const { res, ms } = await timedFetch("https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/webPlayback", {
       method: "POST",
       headers: {
@@ -787,8 +754,7 @@ async function probeAppleWebPlayback(
       body: JSON.stringify({ salableAdamId: songId, language: "en-us" }),
     })
     if (!res.ok) {
-      // 5xx is Apple's problem, not the token's; try the next id before judging.
-      if (res.status >= 500) continue
+      if (res.status >= 500 || res.status === 429) continue
       return { ok: false, lossless: false, detail: `webPlayback HTTP ${res.status}`, latencyMs: ms }
     }
     const json = (await res.json().catch(() => null)) as {
@@ -797,14 +763,12 @@ async function probeAppleWebPlayback(
       songList?: Array<{ assets?: Array<{ flavor?: string; URL?: string }> }>
     } | null
     const assets = json?.songList?.[0]?.assets ?? []
-    // A playable ctrp (AES-CTR) asset is the proof. cbcp is FairPlay and unusable here.
+    // ctrp (AES-CTR) is the playable flavor; cbcp is FairPlay and unusable here.
     const ctrp = assets.filter((a) => String(a.flavor ?? "").includes("ctrp") && a.URL)
     if (ctrp.length > 0) {
-      // `meta.subscription.active` is true for trials and region-limited plans that still only
-      // serve lossy streams, so it is NOT evidence of a lossless entitlement. The bitrate in the
-      // flavor string is: the app treats 321..1411 as lossless, so the pool must measure the same
-      // thing — otherwise it labels a 256 kbps-only account "premium" and leases it to apps asking
-      // for FLAC, which then silently fall back to the worst stream available.
+      // `meta.subscription.active` is true for trials and region-limited plans that still only serve
+      // lossy streams, so entitlement is read from the bitrate in the flavor string instead; the app
+      // treats 321..1411 as lossless and the pool must measure the same thing.
       const maxKbps = ctrp.reduce((max, a) => {
         const kbps = Number(/(\d+)$/.exec(String(a.flavor ?? ""))?.[1] ?? 0)
         return Number.isFinite(kbps) && kbps > max ? kbps : max
@@ -819,14 +783,13 @@ async function probeAppleWebPlayback(
         latencyMs: ms,
       }
     }
-    // No assets. A session/authorisation failure is terminal; a missing track is not.
     const failure = String(json?.failureType ?? "")
     const message = String(json?.customerMessage ?? "").toLowerCase()
     if (failure === "2002" || message.includes("session has ended") || message.includes("sign in again")) {
       return { ok: false, lossless: false, detail: `webPlayback: ${json?.customerMessage ?? "session ended"}`, latencyMs: ms }
     }
   }
-  return { ok: true, lossless: false, detail: "webPlayback inconclusive (no probe track available)", latencyMs: 0 }
+  return { ok: true, lossless: null, detail: "webPlayback inconclusive (no probe track available)", latencyMs: 0 }
 }
 
 async function checkAppleMusicAccount(payload: Record<string, unknown>): Promise<CheckResult> {
@@ -882,24 +845,21 @@ async function checkAppleMusicAccount(payload: Record<string, unknown>): Promise
       }
     }
 
-    // An active subscription says nothing about whether the token can still play. Apple keeps
-    // `/v1/me/account` answering 200 + active=true long after a Media-User-Token stops being able
-    // to obtain a stream, and the only way to learn that is to ask for one. Without this probe the
-    // pool kept leasing tokens that 401-free catalog searches could never play, which is why Apple
-    // looked healthy on the board while every app reported "did not resolve".
+    // Apple keeps `/v1/me/account` answering 200 + active=true long after a Media-User-Token can no
+    // longer obtain a stream; only asking for one shows it.
     const playback = await probeAppleWebPlayback(token, devToken)
     if (!playback.ok) {
       return { ok: false, premium: false, status: "dead", latencyMs: playback.latencyMs, detail: playback.detail }
     }
 
-    // `active` is necessary but not sufficient: trials and some regional plans report active and
-    // still only ever serve lossy streams. The pool is a lossless pool, so the verdict follows the
-    // bitrate Apple actually offered. A lossy-only account reports "preview" and is auto-disabled
-    // by the sweep, which stops it being leased to apps that asked for FLAC.
+    // The verdict follows the bitrate Apple offered, so a lossy-only account reports "preview" and
+    // the sweep disables it. An inconclusive probe keeps the subscription verdict: disabling a
+    // healthy account on a transient Apple error would be worse than one stale sweep.
+    const premium = playback.lossless ?? true
     return {
       ok: true,
-      premium: playback.lossless,
-      status: classify(true, playback.lossless),
+      premium,
+      status: classify(true, premium),
       latencyMs: ms + playback.latencyMs,
       detail: `${detail}, ${playback.detail}`,
     }
@@ -915,21 +875,21 @@ async function checkAppleMusicAccount(payload: Record<string, unknown>): Promise
 }
 
 /**
- * Rotates a Deezer ARL without the contributor. The cookie is not a long-lived secret: it
- * naturally expires on roughly a day, which is why a pool of submitted ARLs bleeds out and every
- * contributor has to re-submit daily. Deezer does issue a replacement from a live session, in two
- * steps (the flow used by philippe44/lms-deezer's `refreshArl`, which re-runs it every 24h):
+ * Rotates a Deezer ARL without the contributor. The cookie expires after roughly a day, which is why
+ * a pool of submitted ARLs bleeds out. Deezer issues a replacement from a live session in two steps
+ * (the flow philippe44/lms-deezer's `refreshArl` re-runs every 24h):
  *
  *   1. `deezer.getUserData` with the current ARL cookie → `SESSION_ID` + `checkForm`
  *   2. `user.getArl` with `api_token=checkForm` and a `sid` cookie → a fresh ARL
  *
- * The new value is persisted so the pool holds the rotated one. Best-effort throughout: a failure
- * here must never turn a working account into a dead one.
+ * The new value is persisted. Best-effort throughout: a failure here must never turn a working
+ * account into a dead one.
  */
 async function rotateDeezerArl(
-  arl: string,
+  payload: Record<string, unknown>,
   entryFingerprint?: string,
 ): Promise<{ arl: string | null; detail: string }> {
+  const arl = String(payload.arl ?? "").trim()
   const base = "https://www.deezer.com/ajax/gw-light.php"
   const userRes = await timedFetch(
     `${base}?method=deezer.getUserData&input=3&api_version=1.0&api_token=`,
@@ -953,12 +913,11 @@ async function rotateDeezerArl(
   if (!rotated || rotated === arl) return { arl: null, detail: "rotation returned nothing new" }
 
   if (entryFingerprint) {
-    // Best-effort persistence — a DB hiccup must not fail the health check.
     await db
       .update(accountEntries)
-      .set({ payload: encryptAtRest({ arl: rotated }) })
+      .set({ payload: encryptAtRest({ ...payload, arl: rotated }) })
       .where(sql`fingerprint = ${entryFingerprint}`)
-      .catch(() => { /* ignore */ })
+      .catch(() => { /* best-effort — a DB hiccup must not fail the health check */ })
   }
   return { arl: rotated, detail: "arl rotated" }
 }
@@ -1008,10 +967,7 @@ async function checkDeezerAccount(
         : false
     const premium = lossless || Boolean(options.web_hq)
 
-    // A live ARL can mint a replacement for itself, so rotate rather than waiting out the expiry
-    // that has been costing contributors a daily re-submit. A rotation problem must never
-    // downgrade an otherwise healthy account.
-    const rotation = await rotateDeezerArl(arl, entryFingerprint).catch((e) => ({
+    const rotation = await rotateDeezerArl(payload, entryFingerprint).catch((e) => ({
       arl: null,
       detail: `rotation error: ${reason(e)}`,
     }))

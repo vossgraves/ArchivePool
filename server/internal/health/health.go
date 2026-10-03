@@ -24,6 +24,7 @@ import (
 	"archivepool/server/internal/crypto"
 	"archivepool/server/internal/db"
 	"archivepool/server/internal/httpx"
+	"archivepool/server/internal/oauth"
 	"archivepool/server/internal/pool"
 )
 
@@ -39,12 +40,7 @@ type CheckResult struct {
 const (
 	timeoutMs = 12 * time.Second
 
-	// Tidal device-flow OAuth client. The previous registration (zU4XHVVkc2tDPo4t) was retired:
-	// tokens it minted carry internal cid 3235 and now fail refresh with "Client id 3235 not
-	// found" (natom/streamrip#897, #901; replaced by #932). This is streamrip v2.2.0's client.
-	tidalClientID     = "fX2JxdmntZWK0ixT"
-	tidalClientSecret = "1Nn9AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg="
-	tidalTokenURL     = "https://auth.tidal.com/v1/oauth2/token"
+	tidalTokenURL = "https://auth.tidal.com/v1/oauth2/token"
 	// Tidal's own TV/device client UA, used for every Tidal API call so sessions are not flagged as
 	// coming from an unrecognised agent.
 	tidalUA = "TIDAL/1000 (Linux; Android 10)"
@@ -472,8 +468,8 @@ func tryRefreshTidalToken(ctx context.Context, database *db.DB, payload map[stri
 	ok := false
 	for _, scope := range scopes {
 		form := url.Values{
-			"client_id":     {tidalClientID},
-			"client_secret": {tidalClientSecret},
+			"client_id":     {oauth.TidalClientID},
+			"client_secret": {oauth.TidalClientSecret},
 			"refresh_token": {refreshToken},
 			"grant_type":    {"refresh_token"},
 			"scope":         {scope},

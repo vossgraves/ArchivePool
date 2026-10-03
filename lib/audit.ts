@@ -16,6 +16,7 @@ export type AuditAction =
   | "entry.remove"
   | "entry.force_check"
   | "entry.purge_dead"
+  | "entry.purge"
   | "user.create"
   | "user.role_change"
 

@@ -31,7 +31,7 @@ throws: the action has already happened by the time it is called, and a failed w
 reported to the caller as a failed action.
 
 Recorded actions: `key.create`, `key.revoke`, `key.restore`, `key.delete`, `request.approve`,
-`request.reject`, `entry.remove`, `entry.force_check`, `entry.purge_dead`, `user.role_change`.
+`request.reject`, `entry.remove`, `entry.force_check`, `entry.purge_dead`, `entry.purge`, `user.role_change`.
 
 `target` is a free-form `"<kind>:<id>"` so one table covers keys, requests, entries and users
 without a column per kind. Read it from the Audit log panel or `GET /api/admin/audit?limit=`.

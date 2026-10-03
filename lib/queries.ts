@@ -156,13 +156,17 @@ function toLeased(
 ): LeasedEntry {
   // Decrypt at rest, re-encrypt for the client, so what leaves the server is ciphertext
   // end-to-end. Routes fail closed when no key is available.
+  const servable = decryptAtRest(row.payload)
+  // The contributor's own password is kept only so the pool can renew the account; no consumer of
+  // the pool may ever receive it, even encrypted.
+  delete servable.password
   return {
     id: row.id,
     premium: row.premium,
     status: row.status,
     latencyMs: row.latencyMs,
     lastCheckedAt: row.lastCheckedAt ? new Date(row.lastCheckedAt).toISOString() : null,
-    ...encryptForClient(decryptAtRest(row.payload), clientKey),
+    ...encryptForClient(servable, clientKey),
   }
 }
 
@@ -212,16 +216,21 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
     )
 
   // Tidal access tokens expire ~hourly while the sweep only runs every 6h, so a leased token is
-  // routinely dead on arrival ("dies soon" after linking). Refresh expired tidal payloads now —
-  // persisted by ensureFreshTidalToken — and serve the fresh ciphertext below.
-  for (const r of rows) {
-    if (r.service !== "tidal") continue
-    const plain = decryptAtRest(r.payload)
-    const fresh = await ensureFreshTidalToken(plain, r.fingerprint).catch(() => null)
-    if (fresh != null) {
-      r.payload = encryptAtRest({ ...plain, token: fresh })
-    }
-  }
+  // routinely dead on arrival. Only the rows about to be served are refreshed: the candidate list
+  // is the whole pool, and refreshing all of it would put a Tidal round trip per account on every
+  // lease request.
+  await Promise.all(
+    rows
+      .filter((r) => r.service === "tidal")
+      .slice(0, LEASE_PER_CATEGORY_ACCOUNT)
+      .map(async (r) => {
+        const plain = decryptAtRest(r.payload)
+        const fresh = await ensureFreshTidalToken(plain, r.fingerprint).catch(() => null)
+        if (fresh != null && fresh !== String(plain.token ?? "").trim()) {
+          r.payload = encryptAtRest({ ...plain, token: fresh })
+        }
+      }),
+  )
 
   const leasedIds: number[] = []
   const picked: { id: number; service: Service }[] = []

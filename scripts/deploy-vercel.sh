@@ -13,7 +13,8 @@
 #   CRON_SECRET=...             (optional) generated if unset
 #   VERCEL_SCOPE=...            (optional) team slug/id
 #   REPO=owner/name             (optional) defaults to vossgraves/ArchivePool
-#   APP_REPO=owner/name         (optional) Android repo to repoint, "" to skip
+#   APP_REPO=owner/name         (optional) Android repo to repoint, defaults to
+#                               NatuneGroup/ArchiveTune; "" to skip
 #
 # Usage:
 #   export VERCEL_TOKEN=... POOL_ENCRYPTION_KEY=... POOL_CLIENT_KEY=... DATABASE_URL=...
@@ -22,7 +23,7 @@
 set -euo pipefail
 
 REPO="${REPO:-vossgraves/ArchivePool}"
-APP_REPO="${APP_REPO-vossgraves/ArchiveTune}"
+APP_REPO="${APP_REPO-NatuneGroup/ArchiveTune}"
 PROJECT="${PROJECT:-archivepool}"
 
 die()  { printf '\n  ERROR: %s\n\n' "$*" >&2; exit 1; }

@@ -26,7 +26,7 @@ type AuditRow = {
 }
 
 /** Destructive actions are called out so a scan of the list surfaces them first. */
-const DESTRUCTIVE = new Set(["key.delete", "entry.remove", "entry.purge_dead", "request.reject"])
+const DESTRUCTIVE = new Set(["key.delete", "entry.remove", "entry.purge_dead", "entry.purge", "request.reject"])
 
 export function AdminAudit() {
   const [rows, setRows] = useState<AuditRow[] | null>(null)

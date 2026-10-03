@@ -1,6 +1,6 @@
 "use client"
 
-import { useActionState, useState } from "react"
+import { useEffect, useActionState, useRef, useState } from "react"
 import { submitSource, type SubmitState } from "@/app/actions/submit"
 import { TidalConnect } from "@/components/tidal-connect"
 import { QobuzConnect } from "@/components/qobuz-connect"
@@ -176,6 +176,32 @@ export function SubmitForm({ username = null }: { username?: string | null }) {
   // Attribution is still theirs to decline, and the checkbox says plainly what it does.
   const [credit, setCredit] = useState(true)
   const [state, action, pending] = useActionState(submitSource, initial)
+  // Manual-paste sections start closed, and `required` inside a closed <details> is a trap:
+  // native validation cannot focus the hidden control, so the submit does nothing and the page
+  // jumps to the top. The server already validates these fields, so the collapsed sections
+  // carry no required flags; an error naming a field inside one reopens it so the fix is
+  // visible right next to the notice.
+  const [tidalManualOpen, setTidalManualOpen] = useState(false)
+  const [qobuzManualOpen, setQobuzManualOpen] = useState(false)
+  const noticeRef = useRef<HTMLDivElement>(null)
+  const serviceRef = useRef(service)
+  useEffect(() => {
+    serviceRef.current = service
+  }, [service])
+
+  useEffect(() => {
+    if (!state.message) return
+    if (!state.ok) {
+      const current = serviceRef.current
+      if (current === "qobuz" && /token|app_?id|app_?secret/i.test(state.message)) setQobuzManualOpen(true)
+      if (current === "tidal" && /token/i.test(state.message)) setTidalManualOpen(true)
+    }
+    // The verdict renders below the fold, far from the fields just filled: bring it into
+    // view and focus it after every submit, success or failure. focus() scrolls instantly by
+    // default, which would cut the smooth scroll short, so it leaves scrolling to the line above.
+    noticeRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })
+    noticeRef.current?.focus({ preventScroll: true })
+  }, [state])
 
   // Controlled Qobuz account fields so the "paste from message" box can auto-fill them.
   const [qToken, setQToken] = useState("")
@@ -283,7 +309,11 @@ export function SubmitForm({ username = null }: { username?: string | null }) {
       ) : service === "tidal" ? (
         <div className="flex flex-col gap-4">
           <TidalConnect />
-          <details className="rounded-md border border-border">
+          <details
+            className="rounded-md border border-border"
+            open={tidalManualOpen}
+            onToggle={(e) => setTidalManualOpen(e.currentTarget.open)}
+          >
             <summary className="cursor-pointer px-3 py-2 text-sm text-muted-foreground">
               Or paste a token manually
             </summary>
@@ -402,7 +432,11 @@ export function SubmitForm({ username = null }: { username?: string | null }) {
       ) : (
         <div className="flex flex-col gap-4">
           <QobuzConnect />
-          <details className="rounded-md border border-border">
+          <details
+            className="rounded-md border border-border"
+            open={qobuzManualOpen}
+            onToggle={(e) => setQobuzManualOpen(e.currentTarget.open)}
+          >
             <summary className="cursor-pointer px-3 py-2 text-sm text-muted-foreground">
               Or paste a token manually
             </summary>
@@ -428,17 +462,15 @@ export function SubmitForm({ username = null }: { username?: string | null }) {
                 key="qobuz-token"
                 label="User auth token"
                 name="token"
-                required
                 placeholder="Qobuz user_auth_token"
                 value={qToken}
                 onChange={setQToken}
               />
-              <Field key="qobuz-appId" label="App ID" name="appId" required placeholder="Qobuz app_id" value={qAppId} onChange={setQAppId} />
+              <Field key="qobuz-appId" label="App ID" name="appId" placeholder="Qobuz app_id" value={qAppId} onChange={setQAppId} />
               <Field
                 key="qobuz-appSecret"
                 label="App Secret"
                 name="appSecret"
-                required
                 placeholder="Qobuz app_secret"
                 hint="Required to sign stream URLs. Without it, the app cannot resolve Qobuz FLAC."
                 value={qAppSecret}
@@ -496,15 +528,17 @@ export function SubmitForm({ username = null }: { username?: string | null }) {
       </Button>
 
       {state.message ? (
-        <Notice tone={state.ok ? "ok" : "error"}>
-          {state.ok && state.status ? (
-            <span className="mr-2 font-mono text-[0.625rem] uppercase tracking-[0.1em]">
-              {state.status}
-              {state.premium ? " · premium" : ""}
-            </span>
-          ) : null}
-          {state.message}
-        </Notice>
+        <div ref={noticeRef} tabIndex={-1} className="outline-none">
+          <Notice tone={state.ok ? "ok" : "error"}>
+            {state.ok && state.status ? (
+              <span className="mr-2 font-mono text-[0.625rem] uppercase tracking-[0.1em]">
+                {state.status}
+                {state.premium ? " · premium" : ""}
+              </span>
+            ) : null}
+            {state.message}
+          </Notice>
+        </div>
       ) : null}
     </form>
   )
