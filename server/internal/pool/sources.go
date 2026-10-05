@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Package pool is the domain layer for the credential/instance pool: the service vocabulary,
 // fingerprinting, the servable predicates, the lease queries and the dashboard reads.
 // It mirrors lib/sources.ts, lib/queries.ts and the pool half of lib/health-sweep.ts.

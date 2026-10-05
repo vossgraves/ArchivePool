@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Package blob publishes the pool's servable instance URLs to Vercel Blob and reads them back, so
 // the discovery routes can answer without waking the database compute (lib/edge-snapshot.ts).
 //

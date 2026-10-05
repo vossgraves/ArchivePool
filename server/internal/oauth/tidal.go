@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Package oauth holds the two third-party credential-acquisition flows: Tidal's device
 // authorization (lib/tidal-oauth.ts) and Qobuz's credential login plus app_secret scrape
 // (lib/qobuz-oauth.ts).

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import { createHash } from "crypto"
 
 export type Service = "tidal" | "qobuz" | "deezer" | "apple-music" | "amazon-music"

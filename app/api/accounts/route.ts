@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import { NextResponse, type NextRequest } from "next/server"
 import { identifyReadKey, readKeyFromRequest } from "@/lib/api-keys"
 import { clientEncryptionEnabled, deriveClientKey } from "@/lib/crypto"

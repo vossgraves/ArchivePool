@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Tidal OAuth "device authorization" flow. This is the same grant used by TVs, the CLI, and
 // open-source Tidal tooling: the user is shown a short code and a link.tidal.com URL, logs in on
 // any device, and the server polls until Tidal issues tokens. No redirect URI is required, so it

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 /*
  * End-to-end verification of the ArchivePool site: signup → dashboard →
  * request key → key-gated feed → docs/login pages render. Run against a

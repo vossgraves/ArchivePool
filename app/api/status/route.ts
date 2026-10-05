@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import { NextResponse } from "next/server"
 import { HISTORY_DAYS, getPoolHistory, getStatus, type CategoryStatus } from "@/lib/queries"
 import { STATUS_TTL_MS, cached } from "@/lib/ttl-cache"

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Package kdf holds the key-derivation primitives the port needs but the standard library does not
 // provide: PBKDF2-HMAC-SHA256 (used by SCRAM) and scrypt (used for password hashing, replacing
 // Node's crypto.scrypt).

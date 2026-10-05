@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 import { and, desc, eq, gt, ne, sql } from "drizzle-orm"
 import type { NextRequest } from "next/server"

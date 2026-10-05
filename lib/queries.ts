@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import "server-only"
 import { and, desc, eq, sql } from "drizzle-orm"
 import { decryptAtRest, encryptAtRest, encryptForClient } from "./crypto"

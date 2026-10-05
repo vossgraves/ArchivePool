@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Package httpx wraps the outbound HTTP calls the port makes to third-party services. Every call
 // carries the pool's identifying User-Agent and an explicit timeout, mirroring the TS's
 // `fetch(..., { cache: "no-store" })` plus AbortController pattern.

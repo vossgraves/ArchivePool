@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Command archivepool is the Go port of the ArchivePool backend: a drop-in for the Next.js /api/*
 // surface (30 route handlers plus the manual-submission server action's logic).
 //

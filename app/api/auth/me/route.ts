@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import { NextResponse } from "next/server"
 import { eq } from "drizzle-orm"
 import { db } from "@/lib/db"

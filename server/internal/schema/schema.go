@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Package schema is the runtime, idempotent migration that mirrors lib/db/ensure.ts.
 //
 // ensure.ts is the authoritative runtime list: it self-heals databases created from older

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Package config reads the deployment's environment. Every variable name is identical to the TS
 // app's (see .env.example), so one environment file drives both during the cutover.
 package config

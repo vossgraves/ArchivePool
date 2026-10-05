@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import { NextResponse, type NextRequest } from "next/server"
 import { getSessionUserId } from "@/lib/sessions"
 import { deleteUserApiKey, setUserKeyRevoked } from "@/lib/api-keys"

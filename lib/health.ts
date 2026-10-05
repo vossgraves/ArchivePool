@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import { createHash } from "node:crypto"
 import { eq, sql } from "drizzle-orm"
 import { db } from "@/lib/db"

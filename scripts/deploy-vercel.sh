@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
 #
 # One-shot bootstrap: deploy ArchivePool to Vercel, wire up every secret, schedule the health
 # sweep, and repoint the Android app at the new URL.

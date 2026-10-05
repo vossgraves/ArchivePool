@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import { NextResponse, type NextRequest } from "next/server"
 import { identifyReadKey } from "@/lib/api-keys"
 import { SNAPSHOT_CACHE_CONTROL, readInstanceSnapshot } from "@/lib/edge-snapshot"

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import "server-only"
 import { createHmac, timingSafeEqual } from "node:crypto"
 import { cookies } from "next/headers"

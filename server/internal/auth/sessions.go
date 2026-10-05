@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Package auth implements every authentication model the TS app has, mirroring lib/sessions.ts,
 // lib/admin-auth.ts, lib/api-keys.ts, lib/users.ts and lib/audit.ts.
 //

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import { revalidatePath } from "next/cache"
 import { NextResponse, type NextRequest } from "next/server"
 import { describeSaveError, ingestSource } from "@/lib/ingest"
