@@ -196,4 +196,7 @@ Go server handles `/api/*`.
 - Payloads (tokens, credentials, instance URLs) are only exposed through the pool JSON endpoints —
   never on the public status page, which reports counts and health only.
 - The health log is trimmed to ~30 days automatically.
-- This project ships no license file; add one if you intend others to reuse it.
+
+## License
+
+ArchivePool is licensed under the [GNU GPL v3](LICENSE) (GPL-3.0-or-later).
