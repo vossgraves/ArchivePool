@@ -21,6 +21,11 @@ type credentialsBody struct {
 
 // handleSignup is POST /api/auth/signup.
 func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
+	// Opt-out kill-switch: signup is open unless a deployment explicitly sets "false".
+	if s.Cfg.PublicSignupDisabled {
+		writeJSON(w, http.StatusForbidden, errJSON("signup_disabled", "Public registration is disabled. Contact the administrator."), nil)
+		return
+	}
 	ctx := r.Context()
 	var body credentialsBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {

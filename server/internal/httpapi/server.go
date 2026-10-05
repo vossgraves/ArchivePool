@@ -105,6 +105,7 @@ func (s *Server) Handler() http.Handler {
 	r.Handle(http.MethodGet, "/api/admin/requests", s.handleAdminRequests)
 	r.Handle(http.MethodPost, "/api/admin/requests/{id}", s.handleAdminRequestReview)
 	r.Handle(http.MethodGet, "/api/admin/users", s.handleAdminUsers)
+	r.Handle(http.MethodPost, "/api/admin/users", s.handleAdminUserCreate)
 	r.Handle(http.MethodPatch, "/api/admin/users", s.handleAdminUserPatch)
 	r.Handle(http.MethodGet, "/api/admin/audit", s.handleAdminAudit)
 	r.Handle(http.MethodGet, "/api/admin/remove", s.handleAdminRemoveList)

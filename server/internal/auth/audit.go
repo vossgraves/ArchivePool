@@ -23,6 +23,7 @@ const (
 	AuditEntryForceCheck AuditAction = "entry.force_check"
 	AuditEntryPurgeDead  AuditAction = "entry.purge_dead"
 	AuditEntryPurge      AuditAction = "entry.purge"
+	AuditUserCreate      AuditAction = "user.create"
 	AuditUserRoleChange  AuditAction = "user.role_change"
 )
 

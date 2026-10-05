@@ -21,6 +21,9 @@ type Config struct {
 	BlobReadWriteToken string
 	Port               string
 	NodeEnv            string
+	// PublicSignupDisabled mirrors `process.env.ALLOW_PUBLIC_SIGNUP === "false"`: an opt-out
+	// kill-switch, so signup stays open unless a deployment sets exactly "false".
+	PublicSignupDisabled bool
 }
 
 // Load reads the environment. It deliberately does not validate: the TS app fails closed at the
@@ -28,17 +31,18 @@ type Config struct {
 // rather than at boot, and callers rely on that.
 func Load() *Config {
 	return &Config{
-		DatabaseURL:        strings.TrimSpace(os.Getenv("DATABASE_URL")),
-		AdminTokenHash:     strings.TrimSpace(os.Getenv("ADMIN_TOKEN_HASH")),
-		AdminToken:         os.Getenv("ADMIN_TOKEN"),
-		CronSecret:         os.Getenv("CRON_SECRET"),
-		ReadKeysEnforced:   os.Getenv("READ_KEYS_ENFORCED") == "true",
-		SessionSecret:      strings.TrimSpace(os.Getenv("SESSION_SECRET")),
-		PoolEncryptionKey:  os.Getenv("POOL_ENCRYPTION_KEY"),
-		PoolClientKey:      os.Getenv("POOL_CLIENT_KEY"),
-		BlobReadWriteToken: os.Getenv("BLOB_READ_WRITE_TOKEN"),
-		Port:               port(),
-		NodeEnv:            os.Getenv("NODE_ENV"),
+		DatabaseURL:          strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		AdminTokenHash:       strings.TrimSpace(os.Getenv("ADMIN_TOKEN_HASH")),
+		AdminToken:           os.Getenv("ADMIN_TOKEN"),
+		CronSecret:           os.Getenv("CRON_SECRET"),
+		ReadKeysEnforced:     os.Getenv("READ_KEYS_ENFORCED") == "true",
+		SessionSecret:        strings.TrimSpace(os.Getenv("SESSION_SECRET")),
+		PoolEncryptionKey:    os.Getenv("POOL_ENCRYPTION_KEY"),
+		PoolClientKey:        os.Getenv("POOL_CLIENT_KEY"),
+		BlobReadWriteToken:   os.Getenv("BLOB_READ_WRITE_TOKEN"),
+		Port:                 port(),
+		NodeEnv:              os.Getenv("NODE_ENV"),
+		PublicSignupDisabled: os.Getenv("ALLOW_PUBLIC_SIGNUP") == "false",
 	}
 }
 

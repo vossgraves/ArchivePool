@@ -42,6 +42,8 @@ create a project and paste its connection string into `DATABASE_URL`.
 | `READ_KEYS_ENFORCED`  | recommended | `"true"` also requires a per-app key for `/api/discovery/*`; `/api/sources` always requires one. |
 | `POOL_ENCRYPTION_KEY` | yes for accounts | base64 32-byte AES key. Encrypts credentials at rest in the DB. `openssl rand -base64 32`. |
 | `POOL_CLIENT_KEY`     | yes for accounts | separate base64 32-byte AES key. `/api/sources` returns ciphertext; the app decrypts. |
+| `SESSION_SECRET`      | yes for users | base64 32-byte key. Signs HttpOnly session cookies. `openssl rand -base64 32`. |
+| `ALLOW_PUBLIC_SIGNUP` | recommended | `"true"` enables public account creation. `"false"` (recommended) restricts signup to admin-created accounts only. |
 
 \* Set exactly one of `ADMIN_TOKEN_HASH` / `ADMIN_TOKEN`. If neither is set, every admin route
 returns 401 — it fails closed rather than opening up.
@@ -171,6 +173,32 @@ The credential feed is always restricted. To provision the app and optionally re
    only its hash is stored, so it is shown once.
 3. Give the key to the app. For ArchiveTune, set it as the `SOURCE_PROVIDER_KEY` build secret
    (GitHub Actions secret) and point `SOURCE_PROVIDER_URL` at your deployment.
+
+## User account management
+
+By default, public signup is **disabled** (`ALLOW_PUBLIC_SIGNUP` unset or `"false"`). This prevents unauthorized users from creating accounts and requesting API keys.
+
+### Creating user accounts (when public signup is disabled)
+
+Admins can manually create accounts via the API:
+
+```bash
+curl -X POST https://archivepool.vercel.app/api/admin/users \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"username": "alice", "password": "secure-password-here", "role": "user"}'
+```
+
+Set `role` to `"admin"` to create another administrator. Once created, users can sign in at `/login` and request API keys at `/dashboard`.
+
+### Enabling public signup (not recommended)
+
+Set `ALLOW_PUBLIC_SIGNUP="true"` to allow anyone to create accounts via `/signup`. This is convenient for testing but **not recommended in production** because:
+- Anyone can create an account and request API keys
+- While key requests require admin approval, this creates unnecessary moderation overhead
+- It exposes your instance to spam and abuse
+
+When public signup is enabled, rate limiting (5 accounts per IP+UA per 24h) helps but doesn't eliminate abuse.
 
 ## Connecting ArchiveTune
 

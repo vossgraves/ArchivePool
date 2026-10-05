@@ -218,6 +218,7 @@ func TestEveryDocumentedRouteIsRegistered(t *testing.T) {
 		{"GET", "/api/admin/requests"},
 		{"POST", "/api/admin/requests/{id}"},
 		{"GET", "/api/admin/users"},
+		{"POST", "/api/admin/users"},
 		{"PATCH", "/api/admin/users"},
 		{"GET", "/api/admin/audit"},
 		{"GET", "/api/admin/remove"},
