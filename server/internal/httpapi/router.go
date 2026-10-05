@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Package httpapi is the HTTP surface: every route handler of app/api/**/route.ts plus the one
 // server action, wired to the same paths, methods, status codes, headers and JSON shapes.
 package httpapi

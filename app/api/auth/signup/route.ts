@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import { NextResponse, type NextRequest } from "next/server"
 import { setSessionCookie } from "@/lib/sessions"
 import { countRecentUsersByIpUa, createUser, findUserByUsername, validateCredentials } from "@/lib/users"

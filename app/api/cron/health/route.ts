@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import { NextResponse, type NextRequest } from "next/server"
 import { isCronAuthorized as authorized } from "@/lib/admin-auth"
 import { runHealthSweep } from "@/lib/health-sweep"

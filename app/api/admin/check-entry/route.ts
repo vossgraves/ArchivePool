@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import { NextResponse, type NextRequest } from "next/server"
 import { resolveAdmin } from "@/lib/admin-auth"
 import { checkEntryById } from "@/lib/health-sweep"

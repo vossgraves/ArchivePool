@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import { ImageResponse } from "next/og"
 import { BRAND_MARK } from "@/components/brand-mark"
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import type { Metadata } from "next"
 import { SiteHeader } from "@/components/site-header"
 import { PageHeader } from "@/components/page-header"

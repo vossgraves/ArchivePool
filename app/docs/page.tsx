@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import Link from "next/link"
 import { SiteHeader } from "@/components/site-header"
 import { buttonVariants } from "@/components/ui/button"

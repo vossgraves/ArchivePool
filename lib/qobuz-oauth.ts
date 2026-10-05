@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Qobuz credential-based login for the pool website.
 //
 // Qobuz has no device/PKCE flow like Tidal. The closest equivalent is:

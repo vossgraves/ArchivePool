@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import Link from "next/link"
 import { ArrowUpRight } from "lucide-react"
 import ParticleButton from "@/components/kokonutui/particle-button"

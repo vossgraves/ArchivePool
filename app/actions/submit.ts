@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 "use server"
 
 import { revalidatePath } from "next/cache"

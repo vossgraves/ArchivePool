@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Package crypto mirrors lib/crypto.ts byte for byte: field-level AES-256-GCM at rest plus the
 // re-encryption layer handed to clients.
 //

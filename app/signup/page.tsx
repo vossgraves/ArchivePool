@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import { redirect } from "next/navigation"
 import { SiteHeader } from "@/components/site-header"
 import { AuthForm } from "@/components/auth-form"

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Package pgwire implements the subset of the PostgreSQL frontend/backend protocol the
 // ArchivePool Go port needs: startup (with SSLRequest, MD5 / cleartext / SCRAM-SHA-256 auth),
 // the simple query protocol and the extended (Parse/Bind/Describe/Execute) protocol.

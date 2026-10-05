@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Package ratelimit is lib/rate-limit.ts: an in-memory sliding-window limiter, the per-key
 // fingerprint helper and the client-IP extraction the routes key their buckets on.
 //

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import { sql } from "drizzle-orm"
 import { atRestEncryptionEnabled, encryptAtRest } from "@/lib/crypto"
 import { db } from "@/lib/db"

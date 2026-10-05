@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import { drizzle } from "drizzle-orm/node-postgres"
 import { Pool } from "pg"
 import * as schema from "./schema"

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Package db is the pool + query layer that replaces lib/db/index.ts (a node-postgres Pool) and
 // the drizzle call sites. Queries are written as explicit SQL with $n placeholders, which the
 // pgwire extended protocol binds server-side — the same mechanism drizzle uses, so no query text

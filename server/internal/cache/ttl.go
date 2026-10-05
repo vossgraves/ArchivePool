@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Package cache is the process-local read-through TTL cache from lib/ttl-cache.ts.
 //
 // It exists for the same reason there: every poll from an app client costs a database query, and on

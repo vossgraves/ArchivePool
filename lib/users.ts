@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import "server-only"
 import { scrypt as scryptCb, randomBytes, timingSafeEqual } from "node:crypto"
 import { promisify } from "node:util"
