@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later
 -- ArchivePool database schema
 -- Run this once against your Postgres database (Neon, Supabase, plain Postgres, etc.)
 -- e.g.  psql "$DATABASE_URL" -f scripts/schema.sql

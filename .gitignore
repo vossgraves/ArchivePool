@@ -24,3 +24,6 @@ node_modules
 
 # Playwright e2e screenshot output (scripts/e2e.cjs)
 .e2e-screens/
+
+# Local clones of forked/related repos (never part of this codebase)
+.forks/
