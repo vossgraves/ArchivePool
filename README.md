@@ -42,6 +42,7 @@ create a project and paste its connection string into `DATABASE_URL`.
 | `READ_KEYS_ENFORCED`  | recommended | `"true"` also requires a per-app key for `/api/discovery/*`; `/api/sources` always requires one. |
 | `POOL_ENCRYPTION_KEY` | yes for accounts | base64 32-byte AES key. Encrypts credentials at rest in the DB. `openssl rand -base64 32`. |
 | `POOL_CLIENT_KEY`     | yes for accounts | separate base64 32-byte AES key. `/api/sources` returns ciphertext; the app decrypts. |
+| `POOL_DB_MAX_CONNECTIONS` | no  | Per-instance Postgres connection cap (2–20, default 3). Idle connections close after 5 s so Neon can scale to zero. |
 
 \* Set exactly one of `ADMIN_TOKEN_HASH` / `ADMIN_TOKEN`. If neither is set, every admin route
 returns 401 — it fails closed rather than opening up.
