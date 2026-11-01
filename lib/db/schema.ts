@@ -43,6 +43,10 @@ const entryColumns = {
   // Per-entry verify lease claimed by /api/report before paying for a live check: without it,
   // concurrent serverless instances all see a stale verdict and all probe the provider at once.
   verifyLeaseUntil: timestamp("verify_lease_until", { withTimezone: true }),
+  // Set (to the check's own timestamp) by every check that ran and SUCCEEDED, any entitlement.
+  // The report path refuses to record a report-driven failure over a success newer than the
+  // report itself — without this a racing check's verdict can be overwritten by the report.
+  lastOkAt: timestamp("last_ok_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }
 

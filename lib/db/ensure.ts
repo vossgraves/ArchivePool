@@ -157,6 +157,11 @@ const STATEMENTS: string[] = [
   // 2026-11-01: per-entry verify lease for report-driven checks (see app/api/report).
   `ALTER TABLE account_entries ADD COLUMN IF NOT EXISTS verify_lease_until timestamptz`,
   `ALTER TABLE instance_entries ADD COLUMN IF NOT EXISTS verify_lease_until timestamptz`,
+
+  // 2026-11-01: last successful-check timestamp — the report path's park/failure UPDATEs are
+  // no-ops when a success newer than the report landed (see app/api/report).
+  `ALTER TABLE account_entries ADD COLUMN IF NOT EXISTS last_ok_at timestamptz`,
+  `ALTER TABLE instance_entries ADD COLUMN IF NOT EXISTS last_ok_at timestamptz`,
 ]
 
 const globalForMigrations = globalThis as unknown as { __poolSchemaEnsured?: Promise<void> }

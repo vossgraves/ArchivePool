@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { NextResponse, type NextRequest } from "next/server"
-import { and, eq, sql } from "drizzle-orm"
+import { and, eq, or, sql } from "drizzle-orm"
 import { identifyReadKey, readKeyFromRequest } from "@/lib/api-keys"
 import { clientEncryptionEnabled, deriveClientKey } from "@/lib/crypto"
 import { db } from "@/lib/db"
@@ -37,6 +37,11 @@ const REPORT_VERIFY_COOLDOWN_MS = 15 * 60_000
 // one probe (12s health timeout plus refresh chains). If the claimant dies mid-probe, reports
 // keep answering from the stored verdict until this lapses; they never pile onto the provider.
 const VERIFY_LEASE_SECS = 120
+
+// The probe a claim pays for must finish well inside the lease: every fetch in the check chain
+// honours this signal, so a hung provider cannot hold the lease hostage or make the next claim
+// double up on it.
+const PROBE_BUDGET_MS = 45_000
 
 const REPORT_TYPES: Record<string, true> = { dead: true, not_premium: true }
 
@@ -153,6 +158,12 @@ export async function POST(req: NextRequest) {
 
   const table = entry.kind === "account" ? accountEntries : instanceEntries
 
+  // The report's start on the DATABASE's clock: the park/failure UPDATE below refuses to apply
+  // when a check that succeeded after this moment already landed (the last_ok_at guard), so the
+  // reference instant must come from the same clock that writes that column.
+  const startedRows = await db.execute(sql`select now() as now`)
+  const reportStartedAt = (startedRows.rows[0] as { now: Date }).now
+
   // A stored verdict is the entry's last *check* outcome, kept separate from serving policy:
   // 'alive'/'preview' mean the probe succeeded (premium flag tells entitlement), 'dead' means it
   // failed, 'pending' that none has decided yet. `disabled` is deliberately NOT folded in — a
@@ -209,7 +220,7 @@ export async function POST(req: NextRequest) {
     // and one fewer upstream call is the point of the cooldown.
     if (fresh && isFresh(fresh.lastCheckedAt)) return { verdict: storedVerdict(fresh), probed: false }
 
-    const verdict = await checkEntryById(entry.id).catch(() => null)
+    const verdict = await checkEntryById(entry.id, AbortSignal.timeout(PROBE_BUDGET_MS)).catch(() => null)
     return { verdict, probed: true }
   }
 
@@ -227,10 +238,20 @@ export async function POST(req: NextRequest) {
       //  - not probed            → the stored verdict came off the record; the report is the
       //                            qualifying signal DISABLE_AFTER_REPORTS watches.
       const reportCounts = !probed || live == null
-      const [updated] = await db
+      // Count, park and threshold-disable in ONE statement:
+      //  - the counter increments in place, so a racing report on another instance folds in
+      //    rather than two snapshots overwriting each other;
+      //  - disabled is OR-ed with the new count crossing the threshold, so this write can only
+      //    add a disable, never undo one — and it fires whether the +1 comes from this report
+      //    (reportCounts) or was already counted by the probe that just ran;
+      //  - the last_ok_at guard makes the whole thing a no-op when a check that ran and
+      //    succeeded landed after this report began — a fresh success always outranks a
+      //    report-driven failure.
+      await db
         .update(table)
         .set({
           status: "pending", // demoted: not handed out fresh until the sweep re-verifies
+          disabled: sql`${table.disabled} or (${table.consecutiveFailures} + ${reportCounts ? 1 : 0}) >= ${DISABLE_AFTER_REPORTS}`,
           ...(reportCounts
             ? {
                 consecutiveFailures: sql`${table.consecutiveFailures} + 1`,
@@ -238,12 +259,12 @@ export async function POST(req: NextRequest) {
               }
             : {}),
         })
-        .where(eq(table.id, entry.id))
-        .returning({ consecutiveFailures: table.consecutiveFailures })
-
-      if ((updated?.consecutiveFailures ?? 0) >= DISABLE_AFTER_REPORTS) {
-        await db.update(table).set({ disabled: true }).where(eq(table.id, entry.id))
-      }
+        .where(
+          and(
+            eq(table.id, entry.id),
+            or(sql`${table.lastOkAt} is null`, sql`${table.lastOkAt} < ${reportStartedAt}`),
+          ),
+        )
     }
   } else if (reportType === "not_premium") {
     // Reports are keyless and entry ids are small sequential integers, so an unverified report

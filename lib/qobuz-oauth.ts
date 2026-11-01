@@ -48,12 +48,22 @@ export interface QobuzLoginResult {
 }
 
 /**
+ * Per-request timeout merged with an optional overall probe deadline — report-path checks pass
+ * one down so a re-login or secret scrape cannot outlive the verify lease that paid for it.
+ */
+function fetchSignal(deadline?: AbortSignal): AbortSignal {
+  const own = AbortSignal.timeout(12_000)
+  return deadline ? AbortSignal.any([own, deadline]) : own
+}
+
+/**
  * Signs in with Qobuz credentials. Returns the user_auth_token on success.
  * Throws a user-friendly Error on failure.
  */
 export async function qobuzLogin(
   username: string,
   password: string,
+  deadline?: AbortSignal,
 ): Promise<QobuzLoginResult> {
   const body = new URLSearchParams({
     username,
@@ -69,6 +79,7 @@ export async function qobuzLogin(
       "user-agent": UA,
     },
     body,
+    signal: fetchSignal(deadline),
     cache: "no-store",
   })
 
@@ -111,11 +122,12 @@ export async function qobuzLogin(
  * technique is identical to what streamrip / qobuz-dl use. The secret is per-registration, so an
  * unknown appId falls back to the play.qobuz.com player.
  */
-export async function scrapeQobuzAppSecret(appId = QOBUZ_APP_ID): Promise<string | null> {
+export async function scrapeQobuzAppSecret(appId = QOBUZ_APP_ID, deadline?: AbortSignal): Promise<string | null> {
   const { page, origin } = SECRET_SOURCES[appId] ?? SECRET_SOURCES[QOBUZ_APP_ID]
   try {
     const pageRes = await fetch(page, {
       headers: { "user-agent": UA },
+      signal: fetchSignal(deadline),
       cache: "no-store",
     })
     if (!pageRes.ok) return null
@@ -138,6 +150,7 @@ export async function scrapeQobuzAppSecret(appId = QOBUZ_APP_ID): Promise<string
       try {
         const jsRes = await fetch(url, {
           headers: { "user-agent": UA },
+          signal: fetchSignal(deadline),
           cache: "no-store",
         })
         if (!jsRes.ok) continue

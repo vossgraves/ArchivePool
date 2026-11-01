@@ -5,12 +5,29 @@ so a report only ever triggers a verification and never decides the outcome on i
 
 | Report | Meaning | Effect |
 |---|---|---|
-| `dead` | the credential refused the app — bad token, expired ARL, revoked session | live check; a failing entry is demoted to `pending` and disabled at `DISABLE_AFTER_REPORTS` failures, a healthy one keeps serving |
-| `not_premium` | it works but does not deliver the tier the pool believed | live check; the entry is disabled only when the provider confirms it is not premium, otherwise the report is ignored |
+| `dead` | the credential refused the app — bad token, expired ARL, revoked session | live or recent stored check; a failing entry is demoted to `pending` and disabled at `DISABLE_AFTER_REPORTS` qualifying failure signals, a healthy one keeps serving |
+| `not_premium` | it works but does not deliver the tier the pool believed | live or recent stored check; the entry is disabled only when the provider confirms it is not premium, otherwise the report is ignored |
 
 This is deliberately a **side channel, not a truth source**. Nothing is deleted, and the sweep
 re-checks every entry server-side (Tidal tokens even rotate there), so false reports decay on
 their own.
+
+## How verification scales
+
+A report does not always pay for a live check. A stored verdict inside
+`REPORT_VERIFY_COOLDOWN_MS` (15 min) answers in its place — the few accounts a shared key holds
+are reported thousands of times a day, and re-probing each one is what feeds Tidal
+`abuse_detected`. When the verdict is stale, the report claims a per-entry
+`verify_lease_until` (120 s) before probing: only the claimant runs the provider check
+(bounded by a 45 s signal through every fetch in the chain), and every other report in the
+window resolves from the stored row. Reports therefore cannot pile onto one provider call per
+report, and one hung upstream cannot hold a lease hostage.
+
+Failure accounting is report-aware but check-anchored: a probe that ran already recorded its own
+result, so the report's `consecutive_failures` increment applies only when the report itself is
+the qualifying signal — and the whole park/count/disable happens in one guarded UPDATE that does
+nothing when a check that succeeded after the report began already landed (`last_ok_at`). A
+fresh success always outranks a report.
 
 ## Why a report can earn a replacement
 

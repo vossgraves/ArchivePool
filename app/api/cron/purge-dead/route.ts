@@ -31,6 +31,10 @@ const eligible = (table: typeof accountEntries | typeof instanceEntries) =>
           where hl.entry_id = ${table.id}
             and hl.ok and hl.premium
             and hl.checked_at > now() - make_interval(days => ${GRACE_DAYS})
+            -- Report marker rows are bookkeeping, not a check outcome: a rejected not_premium
+            -- report writes ok=true/premium=true, and without this exclusion a chronically
+            -- reported entry would supply its own "recovery evidence" forever.
+            and (hl.detail is null or hl.detail not like 'app report%')
         )`,
   )
 

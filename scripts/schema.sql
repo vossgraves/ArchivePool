@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS account_entries (
   last_checked_at      timestamptz,
   last_leased_at       timestamptz,                          -- least-recently-leased rotation
   verify_lease_until   timestamptz,                          -- report-path verify anti-stampede
+  last_ok_at           timestamptz,                          -- last check that ran and succeeded
   created_at           timestamptz NOT NULL DEFAULT now()
 );
 
@@ -60,6 +61,7 @@ CREATE TABLE IF NOT EXISTS instance_entries (
   last_checked_at      timestamptz,
   last_leased_at       timestamptz,
   verify_lease_until   timestamptz,
+  last_ok_at           timestamptz,
   created_at           timestamptz NOT NULL DEFAULT now()
 );
 

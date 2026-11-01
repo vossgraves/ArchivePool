@@ -46,7 +46,7 @@ function decodeJwtPayload(jwt: string): Record<string, unknown> | null {
 }
 
 /** Mirrors the app-side scraper: home page → JS bundle → ES256 JWTs → `iss: AMPWebPlay`. */
-async function ampDevToken(): Promise<string | null> {
+async function ampDevToken(deadline?: AbortSignal): Promise<string | null> {
   const now = Date.now() / 1000
   if (ampTokenCache && ampTokenCache.exp - 60 > now && Date.now() - ampTokenCache.at < AMP_TOKEN_TTL_MS) {
     return ampTokenCache.token
@@ -54,6 +54,7 @@ async function ampDevToken(): Promise<string | null> {
   try {
     const home = await fetch(APPLE_MUSIC_HOME, {
       headers: { "user-agent": APPLE_UA },
+      signal: probeSignal(deadline),
       cache: "no-store",
     })
     if (!home.ok) return ampTokenCache?.token ?? null
@@ -65,6 +66,7 @@ async function ampDevToken(): Promise<string | null> {
     }
     const jsRes = await fetch(`https://music.apple.com/${bundle}`, {
       headers: { "user-agent": APPLE_UA },
+      signal: probeSignal(deadline),
       cache: "no-store",
     })
     if (!jsRes.ok) return ampTokenCache?.token ?? null
@@ -86,14 +88,21 @@ async function ampDevToken(): Promise<string | null> {
   }
 }
 
-async function timedFetch(url: string, init?: RequestInit): Promise<{ res: Response; ms: number }> {
+async function timedFetch(
+  url: string,
+  init?: RequestInit,
+  deadline?: AbortSignal,
+): Promise<{ res: Response; ms: number }> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
+  // A caller-supplied deadline bounds the whole probe, not just this request: whichever signal
+  // fires first wins, so a report-path check cannot outlive the verify lease that paid for it.
+  const signal = deadline ? AbortSignal.any([controller.signal, deadline]) : controller.signal
   const started = Date.now()
   try {
     const res = await fetch(url, {
       ...init,
-      signal: controller.signal,
+      signal,
       headers: { "user-agent": "ArchiveTune-SourcePool/1.0", ...(init?.headers ?? {}) },
       cache: "no-store",
     })
@@ -101,6 +110,16 @@ async function timedFetch(url: string, init?: RequestInit): Promise<{ res: Respo
   } finally {
     clearTimeout(timer)
   }
+}
+
+/**
+ * TIMEOUT_MS merged with an optional overall probe deadline — the raw fetch sites (Tidal token
+ * refresh, the Apple dev-token scrape, the Qobuz OAuth helpers) get the same composition
+ * timedFetch applies without growing their own controller plumbing.
+ */
+function probeSignal(deadline?: AbortSignal): AbortSignal {
+  const own = AbortSignal.timeout(TIMEOUT_MS)
+  return deadline ? AbortSignal.any([own, deadline]) : own
 }
 
 function classify(ok: boolean, premium: boolean): Status {
@@ -116,7 +135,7 @@ function classify(ok: boolean, premium: boolean): Status {
 const HI_RES_RE = /hi_res|hires|lossless|flac|24bit|"quality"\s*:\s*"(lossless|hi_res|hi-res)/
 
 /** Alive when the base URL answers without a server error; premium inferred from a probe. */
-async function checkApi(service: Service, payload: Record<string, unknown>): Promise<CheckResult> {
+async function checkApi(service: Service, payload: Record<string, unknown>, deadline?: AbortSignal): Promise<CheckResult> {
   const baseUrl = String(payload.baseUrl ?? "").trim().replace(/\/+$/, "")
   if (!baseUrl) return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: "missing baseUrl" }
 
@@ -124,7 +143,7 @@ async function checkApi(service: Service, payload: Record<string, unknown>): Pro
   const target = healthPath ? `${baseUrl}${healthPath.startsWith("/") ? "" : "/"}${healthPath}` : baseUrl
 
   try {
-    const { res, ms } = await timedFetch(target)
+    const { res, ms } = await timedFetch(target, undefined, deadline)
     const reachable = res.status < 500
     if (!reachable) {
       return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: `HTTP ${res.status}` }
@@ -135,7 +154,7 @@ async function checkApi(service: Service, payload: Record<string, unknown>): Pro
     const probeUrl = String(payload.probeUrl ?? "").trim()
     try {
       const probeTarget = probeUrl ? (probeUrl.startsWith("http") ? probeUrl : `${baseUrl}${probeUrl.startsWith("/") ? "" : "/"}${probeUrl}`) : target
-      const { res: probeRes } = await timedFetch(probeTarget)
+      const { res: probeRes } = await timedFetch(probeTarget, undefined, deadline)
       const text = (await probeRes.text()).slice(0, 20_000).toLowerCase()
       premium = HI_RES_RE.test(text)
     } catch {
@@ -186,7 +205,7 @@ const AMAZON_HEALTH_ERROR_STATUSES: Record<string, true> = {
  * that is the existing pool-wide rule, not an Amazon-specific one, and it is what keeps a lossy
  * instance out of a lossless pool.
  */
-async function checkAmazonMusicInstance(payload: Record<string, unknown>): Promise<CheckResult> {
+async function checkAmazonMusicInstance(payload: Record<string, unknown>, deadline?: AbortSignal): Promise<CheckResult> {
   const baseUrl = String(payload.baseUrl ?? "").trim().replace(/\/+$/, "")
   if (!baseUrl) return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: "missing baseUrl" }
 
@@ -194,7 +213,7 @@ async function checkAmazonMusicInstance(payload: Record<string, unknown>): Promi
   const target = `${baseUrl}${healthPath.startsWith("/") ? "" : "/"}${healthPath}`
 
   try {
-    const { res, ms } = await timedFetch(target)
+    const { res, ms } = await timedFetch(target, undefined, deadline)
     if (res.status < 200 || res.status >= 300) {
       return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: `HTTP ${res.status}` }
     }
@@ -228,7 +247,7 @@ async function checkAmazonMusicInstance(payload: Record<string, unknown>): Promi
       premium = false
       try {
         const probeTarget = probeUrl.startsWith("http") ? probeUrl : `${baseUrl}${probeUrl.startsWith("/") ? "" : "/"}${probeUrl}`
-        const { res: probeRes } = await timedFetch(probeTarget)
+        const { res: probeRes } = await timedFetch(probeTarget, undefined, deadline)
         const probeText = (await probeRes.text()).slice(0, 20_000).toLowerCase()
         premium = HI_RES_RE.test(probeText)
       } catch {
@@ -264,7 +283,7 @@ async function checkAmazonMusicInstance(payload: Record<string, unknown>): Promi
  * alive. Premium comes from the same hi-res markers every other instance uses (`defaultFormat:
  * "FLAC"` matches the literal `flac` arm), read from `probeUrl` when one is given.
  */
-async function checkDeezerInstance(payload: Record<string, unknown>): Promise<CheckResult> {
+async function checkDeezerInstance(payload: Record<string, unknown>, deadline?: AbortSignal): Promise<CheckResult> {
   const baseUrl = String(payload.baseUrl ?? "").trim().replace(/\/+$/, "")
   if (!baseUrl) return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: "missing baseUrl" }
 
@@ -272,7 +291,7 @@ async function checkDeezerInstance(payload: Record<string, unknown>): Promise<Ch
   const target = `${baseUrl}${healthPath.startsWith("/") ? "" : "/"}${healthPath}`
 
   try {
-    const { res, ms } = await timedFetch(target)
+    const { res, ms } = await timedFetch(target, undefined, deadline)
     if (res.status < 200 || res.status >= 300) {
       return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: `HTTP ${res.status}` }
     }
@@ -316,7 +335,7 @@ async function checkDeezerInstance(payload: Record<string, unknown>): Promise<Ch
       premium = false
       try {
         const probeTarget = probeUrl.startsWith("http") ? probeUrl : `${baseUrl}${probeUrl.startsWith("/") ? "" : "/"}${probeUrl}`
-        const { res: probeRes } = await timedFetch(probeTarget)
+        const { res: probeRes } = await timedFetch(probeTarget, undefined, deadline)
         const probeText = (await probeRes.text()).slice(0, 20_000).toLowerCase()
         premium = HI_RES_RE.test(probeText)
       } catch {
@@ -364,17 +383,19 @@ export function isTidalAccessExpired(token: string, marginSecs = 300): boolean {
 export async function ensureFreshTidalToken(
   payload: Record<string, unknown>,
   entryFingerprint?: string,
+  deadline?: AbortSignal,
 ): Promise<string | null> {
   const token = String(payload.token ?? "").trim()
   if (!token || isTidalRefreshToken(token)) return token || null
   if (!isTidalAccessExpired(token)) return token
-  return (await tryRefreshTidalToken(payload, entryFingerprint)).token
+  return (await tryRefreshTidalToken(payload, entryFingerprint, deadline)).token
 }
 
 /** Refreshes a Tidal access token and writes it back, so later checks use the new one. */
 async function tryRefreshTidalToken(
   payload: Record<string, unknown>,
   entryFingerprint?: string,
+  deadline?: AbortSignal,
 ): Promise<{ token: string | null; detail: string }> {
   // Contributors are handed a single value labelled "Token" which is in fact the refresh token,
   // so fall back to it when no separate refreshToken was supplied. Without this every Tidal
@@ -405,6 +426,7 @@ async function tryRefreshTidalToken(
           "user-agent": TIDAL_UA,
         },
         body,
+        signal: probeSignal(deadline),
         cache: "no-store",
       })
       if (res.ok) {
@@ -456,6 +478,7 @@ async function tryRefreshTidalToken(
 async function checkTidalAccount(
   payload: Record<string, unknown>,
   entryFingerprint?: string,
+  deadline?: AbortSignal,
 ): Promise<CheckResult> {
   let token = String(payload.token ?? "").trim()
   if (!token) return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: "missing token" }
@@ -469,7 +492,7 @@ async function checkTidalAccount(
     // A refresh token would 401 as a Bearer, so exchange it first rather than spending a
     // round-trip proving that.
     if (isTidalRefreshToken(token)) {
-      const exchanged = await tryRefreshTidalToken(payload, entryFingerprint)
+      const exchanged = await tryRefreshTidalToken(payload, entryFingerprint, deadline)
       if (!exchanged.token) {
         return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: exchanged.detail }
       }
@@ -479,11 +502,11 @@ async function checkTidalAccount(
     // Validate the OAuth access token against Tidal's session endpoint.
     let { res, ms } = await timedFetch("https://api.tidal.com/v1/sessions", {
       headers: tidalHeaders(token),
-    })
+    }, deadline)
 
     // On 401 — attempt a refresh before giving up.
     if (res.status === 401) {
-      const refreshed = await tryRefreshTidalToken(payload, entryFingerprint)
+      const refreshed = await tryRefreshTidalToken(payload, entryFingerprint, deadline)
       if (refreshed.token) {
         token = refreshed.token
         const retry = await timedFetch("https://api.tidal.com/v1/sessions", {
@@ -511,6 +534,7 @@ async function checkTidalAccount(
         const sub = await timedFetch(
           `https://api.tidal.com/v1/users/${session.userId}/subscription?countryCode=${session.countryCode}`,
           { headers: tidalHeaders(token) },
+          deadline,
         )
         if (sub.res.ok) {
           const body = (await sub.res.text()).toLowerCase()
@@ -552,6 +576,7 @@ async function checkQobuzAppSecret(
   appId: string,
   appSecret: string,
   token: string,
+  deadline?: AbortSignal,
 ): Promise<{ ok: boolean; detail: string; ms: number }> {
   const ts = Math.floor(Date.now() / 1000).toString()
   const sig = createHash("md5")
@@ -562,7 +587,7 @@ async function checkQobuzAppSecret(
     `&track_id=${QOBUZ_PROBE_TRACK_ID}&format_id=${QOBUZ_PROBE_FORMAT_ID}&intent=stream` +
     `&app_id=${encodeURIComponent(appId)}&user_auth_token=${encodeURIComponent(token)}`
   try {
-    const { res, ms } = await timedFetch(url, { headers: qobuzHeaders(appId, token) })
+    const { res, ms } = await timedFetch(url, { headers: qobuzHeaders(appId, token) }, deadline)
     const body = (await res.text()).toLowerCase()
     // A bad app_secret yields a signature error (HTTP 400). Everything else (a signed URL, or a
     // plan/geo restriction on this specific track) means the secret itself is valid.
@@ -584,10 +609,15 @@ async function checkQobuzAppSecret(
  * Returns the working secret, or null when the secret is not the problem or the bundle could not
  * be read — a transient fetch failure must not churn every credential.
  */
-async function healQobuzAppSecret(appId: string, staleSecret: string, probeToken: string): Promise<string | null> {
-  const fresh = await scrapeQobuzAppSecret(appId)
+async function healQobuzAppSecret(
+  appId: string,
+  staleSecret: string,
+  probeToken: string,
+  deadline?: AbortSignal,
+): Promise<string | null> {
+  const fresh = await scrapeQobuzAppSecret(appId, deadline)
   if (!fresh || fresh === staleSecret) return null
-  const probe = await checkQobuzAppSecret(appId, fresh, probeToken)
+  const probe = await checkQobuzAppSecret(appId, fresh, probeToken, deadline)
   if (!probe.ok) return null
 
   // The fingerprint derives from the user token, not the secret, so this does not fork dedupe.
@@ -621,6 +651,7 @@ async function healQobuzAppSecret(appId: string, staleSecret: string, probeToken
 async function renewQobuzToken(
   payload: Record<string, unknown>,
   oldFingerprint?: string,
+  deadline?: AbortSignal,
 ): Promise<{ token: string | null; detail: string }> {
   const email = String(payload.username ?? "").trim()
   const password = String(payload.password ?? "").trim()
@@ -629,7 +660,7 @@ async function renewQobuzToken(
 
   let login: QobuzLoginResult
   try {
-    login = await qobuzLogin(email, password)
+    login = await qobuzLogin(email, password, deadline)
   } catch (e) {
     return { token: null, detail: `re-login failed: ${e instanceof Error ? e.message : "error"}` }
   }
@@ -655,6 +686,7 @@ async function renewQobuzToken(
 async function checkQobuzAccount(
   payload: Record<string, unknown>,
   entryFingerprint?: string,
+  deadline?: AbortSignal,
 ): Promise<CheckResult> {
   let token = String(payload.token ?? "").trim()
   const appId = String(payload.appId ?? "").trim()
@@ -666,9 +698,10 @@ async function checkQobuzAccount(
     let { res, ms } = await timedFetch(
       `https://www.qobuz.com/api.json/0.2/user/get?app_id=${encodeURIComponent(appId)}&user_auth_token=${encodeURIComponent(token)}`,
       { headers: qobuzHeaders(appId, token) },
+      deadline,
     )
     if (res.status === 401 || res.status === 403) {
-      const renewed = await renewQobuzToken(payload, entryFingerprint).catch((e) => ({
+      const renewed = await renewQobuzToken(payload, entryFingerprint, deadline).catch((e) => ({
         token: null,
         detail: `renew threw: ${e instanceof Error ? e.message : "error"}`,
       }))
@@ -677,6 +710,7 @@ async function checkQobuzAccount(
         const retry = await timedFetch(
           `https://www.qobuz.com/api.json/0.2/user/get?app_id=${encodeURIComponent(appId)}&user_auth_token=${encodeURIComponent(token)}`,
           { headers: qobuzHeaders(appId, token) },
+          deadline,
         )
         res = retry.res
         ms += retry.ms
@@ -693,13 +727,13 @@ async function checkQobuzAccount(
     const premium = /lossless|hi-res|hires|studio|sublime|"format_id"\s*:\s*(6|7|27)/.test(body)
     // The user token is valid; now confirm the app_secret actually signs stream requests, since a
     // token without a working secret cannot resolve any audio in the app.
-    const secretCheck = await checkQobuzAppSecret(appId, appSecret, token)
+    const secretCheck = await checkQobuzAppSecret(appId, appSecret, token, deadline)
     if (!secretCheck.ok) {
       // A failed signature on a token that just authenticated is almost always a rotated
       // app_secret, not a bad account.
-      const healed = await healQobuzAppSecret(appId, appSecret, token).catch(() => null)
+      const healed = await healQobuzAppSecret(appId, appSecret, token, deadline).catch(() => null)
       if (healed) {
-        const retest = await checkQobuzAppSecret(appId, healed, token)
+        const retest = await checkQobuzAppSecret(appId, healed, token, deadline)
         if (retest.ok) {
           return {
             ok: true,
@@ -736,6 +770,7 @@ const DEEZER_UA =
 async function probeAppleWebPlayback(
   mediaUserToken: string,
   devToken: string,
+  deadline?: AbortSignal,
 ): Promise<{ ok: boolean; lossless: boolean | null; detail: string; latencyMs: number }> {
   const songIds = ["1499378108", "6792884101"]
   for (const songId of songIds) {
@@ -753,7 +788,7 @@ async function probeAppleWebPlayback(
         "user-agent": APPLE_UA,
       },
       body: JSON.stringify({ salableAdamId: songId, language: "en-us" }),
-    })
+    }, deadline)
     if (!res.ok) {
       if (res.status >= 500 || res.status === 429) continue
       return { ok: false, lossless: false, detail: `webPlayback HTTP ${res.status}`, latencyMs: ms }
@@ -793,7 +828,7 @@ async function probeAppleWebPlayback(
   return { ok: true, lossless: null, detail: "webPlayback inconclusive (no probe track available)", latencyMs: 0 }
 }
 
-async function checkAppleMusicAccount(payload: Record<string, unknown>): Promise<CheckResult> {
+async function checkAppleMusicAccount(payload: Record<string, unknown>, deadline?: AbortSignal): Promise<CheckResult> {
   const token = String(payload.token ?? "").trim()
   // Media-User-Tokens always start with "0." — anything else is a paste error.
   if (!token.startsWith("0.")) {
@@ -801,7 +836,7 @@ async function checkAppleMusicAccount(payload: Record<string, unknown>): Promise
   }
 
   try {
-    const devToken = await ampDevToken()
+    const devToken = await ampDevToken(deadline)
     if (!devToken) {
       // Cannot probe without a dev JWT; report pending rather than dead so a transient
       // scraping failure does not wipe healthy entries from rotation.
@@ -818,7 +853,7 @@ async function checkAppleMusicAccount(payload: Record<string, unknown>): Promise
         referer: "https://music.apple.com/",
         "user-agent": APPLE_UA,
       },
-    })
+    }, deadline)
     if (!res.ok) {
       return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: `HTTP ${res.status}` }
     }
@@ -848,7 +883,7 @@ async function checkAppleMusicAccount(payload: Record<string, unknown>): Promise
 
     // Apple keeps `/v1/me/account` answering 200 + active=true long after a Media-User-Token can no
     // longer obtain a stream; only asking for one shows it.
-    const playback = await probeAppleWebPlayback(token, devToken)
+    const playback = await probeAppleWebPlayback(token, devToken, deadline)
     if (!playback.ok) {
       return { ok: false, premium: false, status: "dead", latencyMs: playback.latencyMs, detail: playback.detail }
     }
@@ -889,12 +924,14 @@ async function checkAppleMusicAccount(payload: Record<string, unknown>): Promise
 async function rotateDeezerArl(
   payload: Record<string, unknown>,
   entryFingerprint?: string,
+  deadline?: AbortSignal,
 ): Promise<{ arl: string | null; detail: string }> {
   const arl = String(payload.arl ?? "").trim()
   const base = "https://www.deezer.com/ajax/gw-light.php"
   const userRes = await timedFetch(
     `${base}?method=deezer.getUserData&input=3&api_version=1.0&api_token=`,
     { headers: { cookie: `arl=${arl}`, "user-agent": DEEZER_UA } },
+    deadline,
   )
   if (!userRes.res.ok) return { arl: null, detail: `getUserData HTTP ${userRes.res.status}` }
   const userJson = (await userRes.res.json().catch(() => null)) as {
@@ -907,6 +944,7 @@ async function rotateDeezerArl(
   const arlRes = await timedFetch(
     `${base}?method=user.getArl&input=3&api_version=1.0&api_token=${encodeURIComponent(checkForm)}`,
     { headers: { cookie: `sid=${sessionId}`, "user-agent": DEEZER_UA } },
+    deadline,
   )
   if (!arlRes.res.ok) return { arl: null, detail: `getArl HTTP ${arlRes.res.status}` }
   const arlJson = (await arlRes.res.json().catch(() => null)) as { results?: unknown } | null
@@ -926,14 +964,17 @@ async function rotateDeezerArl(
 async function checkDeezerAccount(
   payload: Record<string, unknown>,
   entryFingerprint?: string,
+  deadline?: AbortSignal,
 ): Promise<CheckResult> {
   const arl = String(payload.arl ?? "").trim()
   if (!arl) return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: "missing arl" }
 
   try {
-    const { res, ms } = await timedFetch(DEEZER_GATEWAY, {
-      headers: { cookie: `arl=${arl}`, "user-agent": DEEZER_UA },
-    })
+    const { res, ms } = await timedFetch(
+      DEEZER_GATEWAY,
+      { headers: { cookie: `arl=${arl}`, "user-agent": DEEZER_UA } },
+      deadline,
+    )
     if (!res.ok) {
       return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: `HTTP ${res.status}` }
     }
@@ -968,7 +1009,7 @@ async function checkDeezerAccount(
         : false
     const premium = lossless || Boolean(options.web_hq)
 
-    const rotation = await rotateDeezerArl(payload, entryFingerprint).catch((e) => ({
+    const rotation = await rotateDeezerArl(payload, entryFingerprint, deadline).catch((e) => ({
       arl: null,
       detail: `rotation error: ${reason(e)}`,
     }))
@@ -1020,17 +1061,18 @@ export async function runCheck(
   kind: Kind,
   payload: Record<string, unknown>,
   entryFingerprint?: string,
+  deadline?: AbortSignal,
 ): Promise<CheckResult> {
   // Amazon and Deezer instances publish their own liveness documents, so they are checked
   // against those rather than through the generic reachability rule.
-  if (kind === "api" && service === "deezer") return checkDeezerInstance(payload)
-  if (kind === "api" && service === "amazon-music") return checkAmazonMusicInstance(payload)
-  if (kind === "api") return checkApi(service, payload)
-  if (service === "tidal") return checkTidalAccount(payload, entryFingerprint)
-  if (service === "deezer") return checkDeezerAccount(payload, entryFingerprint)
-  if (service === "apple-music") return checkAppleMusicAccount(payload)
+  if (kind === "api" && service === "deezer") return checkDeezerInstance(payload, deadline)
+  if (kind === "api" && service === "amazon-music") return checkAmazonMusicInstance(payload, deadline)
+  if (kind === "api") return checkApi(service, payload, deadline)
+  if (service === "tidal") return checkTidalAccount(payload, entryFingerprint, deadline)
+  if (service === "deezer") return checkDeezerAccount(payload, entryFingerprint, deadline)
+  if (service === "apple-music") return checkAppleMusicAccount(payload, deadline)
   if (service === "amazon-music") return checkAmazonMusicAccount(payload)
-  return checkQobuzAccount(payload, entryFingerprint)
+  return checkQobuzAccount(payload, entryFingerprint, deadline)
 }
 
 function reason(e: unknown): string {

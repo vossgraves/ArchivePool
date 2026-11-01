@@ -87,19 +87,18 @@ export async function runHealthSweep(force = false) {
     const result = await runCheck(entry.service as Service, entry.kind as Kind, plaintextPayload, entry.fingerprint)
     checked++
 
-    const nextConsecutive = result.ok ? 0 : entry.consecutiveFailures + 1
-    let nextDisabled = entry.disabled
-    if (!result.ok && nextConsecutive >= AUTO_DISABLE_AFTER) {
+    // The entry snapshot predates the probe by up to the whole mapLimit window; the write must
+    // fold in whatever reports landed meanwhile, so the counter increments in place and a failed
+    // check can only add to the disabled state, never undo one. The summary counters below stay
+    // snapshot-based — they are observability, not state.
+    if (!result.ok && entry.consecutiveFailures + 1 >= AUTO_DISABLE_AFTER) {
       if (!entry.disabled) disabled++
-      nextDisabled = true
     } else if (result.ok && !result.premium) {
       // Working but no premium entitlement (free tier / lossy-only instance): disable
       // immediately — the pool only serves premium sources. Applies to every kind; the
       // entry self-heals on a later sweep if the entitlement returns (ok && premium).
       if (!entry.disabled) disabled++
-      nextDisabled = true
     } else if (result.ok && entry.disabled) {
-      nextDisabled = false
       reenabled++
     }
 
@@ -110,8 +109,11 @@ export async function runHealthSweep(force = false) {
         premium: result.premium,
         detail: result.detail,
         latencyMs: result.latencyMs,
-        consecutiveFailures: nextConsecutive,
-        disabled: nextDisabled,
+        consecutiveFailures: result.ok ? 0 : sql`${table.consecutiveFailures} + 1`,
+        disabled: result.ok
+          ? !result.premium
+          : sql`${table.disabled} or (${table.consecutiveFailures} + 1) >= ${AUTO_DISABLE_AFTER}`,
+        ...(result.ok ? { lastOkAt: sql`now()` } : {}),
         checkCount: sql`${table.checkCount} + 1`,
         okCount: sql`${table.okCount} + ${result.ok ? 1 : 0}`,
         lastCheckedAt: new Date(),
@@ -139,7 +141,7 @@ export async function runHealthSweep(force = false) {
  * Ids are globally unique across account_entries/instance_entries (shared sequence), so the
  * table is resolved by trying both.
  */
-export async function checkEntryById(id: number) {
+export async function checkEntryById(id: number, deadline?: AbortSignal) {
   await ensureSchema()
   const [account] = await db.select().from(accountEntries).where(eq(accountEntries.id, id)).limit(1)
   let entry: PoolEntry | undefined = account ? { ...account, kind: "account" } : undefined
@@ -155,41 +157,56 @@ export async function checkEntryById(id: number) {
   const table = entry.kind === "account" ? accountEntries : instanceEntries
   const plaintextPayload = decryptAtRest(entry.payload)
   // Migrate before checking: a Tidal check can rotate its refresh token, so writing the
-  // migrated payload afterwards would clobber the newly issued credential.
+  // migrated payload afterwards could clobber the newly issued credential.
   await db
     .update(table)
     .set({ payload: encryptAtRest(plaintextPayload) })
     .where(eq(table.id, entry.id))
 
-  const result = await runCheck(entry.service as Service, entry.kind as Kind, plaintextPayload, entry.fingerprint)
+  const result = await runCheck(
+    entry.service as Service,
+    entry.kind as Kind,
+    plaintextPayload,
+    entry.fingerprint,
+    deadline,
+  )
 
-  const nextConsecutive = result.ok ? 0 : entry.consecutiveFailures + 1
-  let nextDisabled = entry.disabled
-  if (!result.ok && nextConsecutive >= AUTO_DISABLE_AFTER) nextDisabled = true
-  else if (result.ok && !result.premium) nextDisabled = true // premium-only pool policy
-  else if (result.ok && entry.disabled) nextDisabled = false
+  // Failure accounting must fold in whatever landed between the entry snapshot above and this
+  // write — report-path increments share the same counter — so a failed check bumps
+  // consecutive_failures in place and can only ADD to the disabled state, never undo one a
+  // racing report set. A successful check still overwrites both outright: it is the freshest
+  // truth, and it also stamps last_ok_at, which is what tells reports its verdict outranks
+  // theirs.
+  // The health_log row rides in the same transaction: callers that treat a thrown check as
+  // "nothing persisted" (the report path) cannot be double-charged by a half-written result.
+  const [updated] = await db.transaction(async (tx) => {
+    const rows = await tx
+      .update(table)
+      .set({
+        status: result.status,
+        premium: result.premium,
+        detail: result.detail,
+        latencyMs: result.latencyMs,
+        consecutiveFailures: result.ok ? 0 : sql`${table.consecutiveFailures} + 1`,
+        disabled: result.ok
+          ? !result.premium // alive serves; preview is disabled by premium-only pool policy
+          : sql`${table.disabled} or (${table.consecutiveFailures} + 1) >= ${AUTO_DISABLE_AFTER}`,
+        ...(result.ok ? { lastOkAt: sql`now()` } : {}),
+        checkCount: sql`${table.checkCount} + 1`,
+        okCount: sql`${table.okCount} + ${result.ok ? 1 : 0}`,
+        lastCheckedAt: new Date(),
+      })
+      .where(eq(table.id, entry.id))
+      .returning({ consecutiveFailures: table.consecutiveFailures, disabled: table.disabled })
 
-  await db
-    .update(table)
-    .set({
-      status: result.status,
+    await tx.insert(healthLog).values({
+      entryId: entry.id,
+      ok: result.ok,
       premium: result.premium,
-      detail: result.detail,
       latencyMs: result.latencyMs,
-      consecutiveFailures: nextConsecutive,
-      disabled: nextDisabled,
-      checkCount: sql`${table.checkCount} + 1`,
-      okCount: sql`${table.okCount} + ${result.ok ? 1 : 0}`,
-      lastCheckedAt: new Date(),
+      detail: result.detail,
     })
-    .where(eq(table.id, entry.id))
-
-  await db.insert(healthLog).values({
-    entryId: entry.id,
-    ok: result.ok,
-    premium: result.premium,
-    latencyMs: result.latencyMs,
-    detail: result.detail,
+    return rows
   })
 
   return {
@@ -199,7 +216,7 @@ export async function checkEntryById(id: number) {
     premium: result.premium,
     detail: result.detail,
     latencyMs: result.latencyMs,
-    consecutiveFailures: nextConsecutive,
-    disabled: nextDisabled,
+    consecutiveFailures: updated?.consecutiveFailures ?? 0,
+    disabled: updated?.disabled ?? false,
   }
 }
