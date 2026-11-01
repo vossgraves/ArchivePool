@@ -64,6 +64,10 @@ export const accountEntries = pgTable(
     // doubling to 6h while it keeps arriving) and on transient refresh failures (2 min). A
     // cooling account is never marked dead — the provider's rate limiter is not a verdict.
     refreshCooldownUntil: timestamp("refresh_cooldown_until", { withTimezone: true }),
+    // The abuse hold's CURRENT duration in ms, persisted so it survives the cooldown expiring:
+    // each repeat doubles it (up to 6h), a successful refresh resets it to NULL. Cooldown
+    // expiry alone must not erase the escalation history.
+    refreshBackoffMs: integer("refresh_backoff_ms"),
   },
   (t) => ({
     serviceIdx: index("idx_account_entries_service").on(t.service),

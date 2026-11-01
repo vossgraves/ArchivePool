@@ -7,7 +7,7 @@ import { accountEntries, apiKeyLeases, apiKeyRequests, apiKeys, instanceEntries 
 import { ensureSchema } from "./db/ensure"
 import { CATEGORIES, type Kind, type Service } from "./sources"
 import type { KeyScope } from "./api-keys"
-import { ensureFreshTidalToken } from "./health"
+import { ensureFreshTidalToken, isTidalAccessExpired } from "./health"
 
 export interface CategoryStatus {
   service: Service
@@ -244,15 +244,26 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
   // routinely dead on arrival. Only the rows about to be served are refreshed: the candidate list
   // is the whole pool, and refreshing all of it would put a Tidal round trip per account on every
   // lease request.
+  const tidalExcluded = new Set<number>()
   await Promise.all(
     rows
       .filter((r) => r.service === "tidal")
-      .slice(0, LEASE_PER_CATEGORY_ACCOUNT)
+      // Refresh twice the serve count so a skipped entry can be substituted — still bounded,
+      // unlike refreshing the whole pool per lease.
+      .slice(0, LEASE_PER_CATEGORY_ACCOUNT * 2)
       .map(async (r) => {
         const plain = decryptAtRest(r.payload)
+        const stored = String(plain.token ?? "").trim()
         const fresh = await ensureFreshTidalToken(plain, r.fingerprint).catch(() => null)
-        if (fresh != null && fresh !== String(plain.token ?? "").trim()) {
+        if (fresh != null && fresh !== stored) {
           r.payload = encryptAtRest({ ...plain, token: fresh })
+          return
+        }
+        // A credential that NEEDED a refresh and could not get one (claim lost, cooling,
+        // provider down) must not be served — the stored token is already dead and the app
+        // would just 401 on it. Exclude the entry from THIS lease; the next candidate moves up.
+        if (fresh == null && stored && isTidalAccessExpired(stored)) {
+          tidalExcluded.add(r.id)
         }
       }),
   )
@@ -260,7 +271,9 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
   const leasedIds: number[] = []
   const picked: { id: number; service: Service }[] = []
   const group = (service: Service) => {
-    const rowsForService = rows.filter((r) => r.service === service).slice(0, LEASE_PER_CATEGORY_ACCOUNT)
+    const rowsForService = rows
+      .filter((r) => r.service === service && !tidalExcluded.has(r.id))
+      .slice(0, LEASE_PER_CATEGORY_ACCOUNT)
     for (const r of rowsForService) {
       leasedIds.push(r.id)
       picked.push({ id: r.id, service })

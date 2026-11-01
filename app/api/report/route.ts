@@ -112,7 +112,7 @@ export async function POST(req: NextRequest) {
     disabled: boolean
     premium: boolean
     lastCheckedAt: Date | null
-    lastOkAt: Date | null
+    lastOkAt: string | null // last_ok_at::text — Postgres stores µs; a Date would truncate
   } | null = null
   const entryColumns = (t: typeof accountEntries | typeof instanceEntries) => ({
     id: t.id,
@@ -121,7 +121,9 @@ export async function POST(req: NextRequest) {
     disabled: t.disabled,
     premium: t.premium,
     lastCheckedAt: t.lastCheckedAt,
-    lastOkAt: t.lastOkAt,
+    // Read back as text so the verdict-equality guard binds the stored µs exactly — a JS Date
+    // carries only ms and could never equal the stored value.
+    lastOkAt: sql<string | null>`${t.lastOkAt}::text`,
   })
   if (id) {
     const [account] = await db
@@ -183,7 +185,7 @@ export async function POST(req: NextRequest) {
         status: table.status,
         premium: table.premium,
         lastCheckedAt: table.lastCheckedAt,
-        lastOkAt: table.lastOkAt,
+        lastOkAt: sql<string | null>`${table.lastOkAt}::text`,
       })
       .from(table)
       .where(eq(table.id, entry.id))
@@ -206,9 +208,9 @@ export async function POST(req: NextRequest) {
    * verdict read and the write makes the write a no-op instead of overwriting the win.
    */
   const verifyReport = async (): Promise<{
-    verdict: { ok: boolean; premium: boolean } | null
+    verdict: { ok: boolean; premium: boolean; skipped?: boolean } | null
     probed: boolean
-    lastOkAtSeen: Date | null
+    lastOkAtSeen: string | null
   }> => {
     if (isFresh(entry.lastCheckedAt))
       return { verdict: storedVerdict(entry), probed: false, lastOkAtSeen: entry.lastOkAt }
@@ -251,7 +253,10 @@ export async function POST(req: NextRequest) {
     // access tokens hourly, apps cache them for a day), not that the account died. The live check
     // already records itself and resets a healthy entry, so only a failing one is parked.
     const { verdict: live, probed, lastOkAtSeen } = await verifyReport()
-    if (live == null || !live.ok) {
+    // An inconclusive check (skipped: refresh cooling / claim lost) is not a verdict — the
+    // report alone must not advance failure accounting for it. The app still gets the
+    // replacement below; the sweep re-verifies the entry soon.
+    if ((live == null || !live.ok) && !live?.skipped) {
       // Failure accounting, in one atomic UPDATE ... RETURNING so racing reports on different
       // instances cannot both conclude "below threshold":
       //  - probed + verdict fail → checkEntryById already counted the failure; just park.
@@ -286,7 +291,9 @@ export async function POST(req: NextRequest) {
         .where(
           and(
             eq(table.id, entry.id),
-            sql`(${table.lastOkAt} is not distinct from ${lastOkAtSeen})`,
+            // lastOkAtSeen is last_ok_at::text — binding text::timestamptz preserves the
+            // stored microseconds; a Date param would compare at ms precision and never match.
+            sql`(${table.lastOkAt} is not distinct from ${lastOkAtSeen}::timestamptz)`,
             or(sql`${table.lastOkAt} is null`, sql`${table.lastOkAt} < ${reportStartedAt}`),
           ),
         )
@@ -307,7 +314,13 @@ export async function POST(req: NextRequest) {
         premium: true,
         latencyMs: null,
         detail: `app report: not_premium (rejected — ${
-          live == null ? "live check unavailable" : !live.ok ? "live check failed" : "live check still premium"
+          live == null
+            ? "live check unavailable"
+            : live.skipped
+              ? "live check inconclusive"
+              : !live.ok
+                ? "live check failed"
+                : "live check still premium"
         })`,
       })
       return NextResponse.json(

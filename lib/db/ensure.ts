@@ -166,6 +166,8 @@ const STATEMENTS: string[] = [
   // 2026-11-01: credential-refresh single-flight + backoff (see lib/health.ts refresh helpers).
   `ALTER TABLE account_entries ADD COLUMN IF NOT EXISTS refresh_in_flight_until timestamptz`,
   `ALTER TABLE account_entries ADD COLUMN IF NOT EXISTS refresh_cooldown_until timestamptz`,
+  // Escalating abuse-hold duration; persisted so expiry does not reset the doubling.
+  `ALTER TABLE account_entries ADD COLUMN IF NOT EXISTS refresh_backoff_ms integer`,
   `CREATE TABLE IF NOT EXISTS pool_state (
     key         text PRIMARY KEY,
     value       jsonb NOT NULL DEFAULT '{}',

@@ -85,6 +85,9 @@ export async function runHealthSweep(force = false) {
       .set({ payload: encryptAtRest(plaintextPayload) })
       .where(eq(table.id, entry.id))
     const result = await runCheck(entry.service as Service, entry.kind as Kind, plaintextPayload, entry.fingerprint)
+    // A skipped result means the check never reached a verdict (refresh cooling, claim lost):
+    // nothing persisted — no counter advance, no verdict overwrite, no health_log row.
+    if (result.skipped) return
     checked++
 
     // The entry snapshot predates the probe by up to the whole mapLimit window; the write must
@@ -177,6 +180,23 @@ export async function checkEntryById(id: number, deadline?: AbortSignal) {
   // racing report set. A successful check still overwrites both outright: it is the freshest
   // truth, and it also stamps last_ok_at, which is what tells reports its verdict outranks
   // theirs.
+  // A skipped result means the check never reached a verdict (refresh cooling, claim lost):
+  // no counter advance, no verdict overwrite, no health_log row — it must not count for the
+  // report path's failure accounting either.
+  if (result.skipped) {
+    return {
+      id: entry.id,
+      ok: false,
+      status: result.status,
+      premium: result.premium,
+      detail: result.detail,
+      latencyMs: result.latencyMs,
+      consecutiveFailures: entry.consecutiveFailures ?? 0,
+      disabled: entry.disabled ?? false,
+      skipped: true,
+    }
+  }
+
   // The health_log row rides in the same transaction: callers that treat a thrown check as
   // "nothing persisted" (the report path) cannot be double-charged by a half-written result.
   const [updated] = await db.transaction(async (tx) => {
@@ -218,5 +238,6 @@ export async function checkEntryById(id: number, deadline?: AbortSignal) {
     latencyMs: result.latencyMs,
     consecutiveFailures: updated?.consecutiveFailures ?? 0,
     disabled: updated?.disabled ?? false,
+    skipped: false,
   }
 }

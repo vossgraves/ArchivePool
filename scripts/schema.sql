@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS account_entries (
   last_ok_at           timestamptz,                          -- last check that ran and succeeded
   refresh_in_flight_until timestamptz,                       -- refresh single-flight claim
   refresh_cooldown_until  timestamptz,                       -- refresh backoff (abuse/transient)
+  refresh_backoff_ms    integer,                             -- persisted abuse-hold duration (doubles, resets on success)
   created_at           timestamptz NOT NULL DEFAULT now()
 );
 

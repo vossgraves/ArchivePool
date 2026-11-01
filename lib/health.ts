@@ -14,6 +14,9 @@ export interface CheckResult {
   status: Status
   latencyMs: number
   detail: string
+  // The check never reached a verdict (refresh cooldown, lost refresh claim): persistence and
+  // report accounting must treat it as a no-op — no counter, no verdict, no health_log row.
+  skipped?: boolean
 }
 
 const TIMEOUT_MS = 12_000
@@ -354,7 +357,7 @@ async function checkDeezerInstance(payload: Record<string, unknown>, deadline?: 
  * without verifying the signature, which is safe because the answer only decides which grant to
  * attempt — Tidal is still the thing that accepts or rejects it.
  */
-function isTidalRefreshToken(token: string): boolean {
+export function isTidalRefreshToken(token: string): boolean {
   const payload = token.split(".")[1]
   if (!payload) return false
   try {
@@ -419,6 +422,7 @@ interface RefreshRow {
   payload: Record<string, unknown>
   refreshInFlightUntil: Date | null
   refreshCooldownUntil: Date | null
+  refreshBackoffMs: number | null
 }
 
 const isLive = (t: Date | null) => t != null && new Date(t).getTime() > Date.now()
@@ -429,6 +433,7 @@ async function readRefreshRow(fingerprint: string): Promise<RefreshRow | null> {
       payload: accountEntries.payload,
       refreshInFlightUntil: accountEntries.refreshInFlightUntil,
       refreshCooldownUntil: accountEntries.refreshCooldownUntil,
+      refreshBackoffMs: accountEntries.refreshBackoffMs,
     })
     .from(accountEntries)
     .where(eq(accountEntries.fingerprint, fingerprint))
@@ -437,13 +442,25 @@ async function readRefreshRow(fingerprint: string): Promise<RefreshRow | null> {
   return row ? { ...row, payload: decryptAtRest(row.payload) } : null
 }
 
+/** A won claim plus the row's current (decrypted) credential at claim time. */
+interface RefreshClaim {
+  claim: Date
+  payload: Record<string, unknown>
+}
+
 /**
- * Conditional claim: stamp refresh_in_flight_until iff nobody currently holds it. The deadline
- * is computed here rather than with now() on the DB side: the returned value is compared
- * equality on release, and a Postgres-generated timestamptz has microsecond precision the
- * JavaScript Date round-trip would lose — a claim we could never clear again.
+ * Conditional claim: stamp refresh_in_flight_until iff nobody currently holds it AND no
+ * cooldown is live. Both predicates sit in the same UPDATE's WHERE, so a cooldown written
+ * between the caller's earlier read and this claim cannot be slipped past — the claim is the
+ * authority, not the read. The deadline is computed here rather than with now() on the DB side:
+ * it is compared for equality on release, and a Postgres-generated timestamptz has microsecond
+ * precision the JavaScript Date round-trip would lose — a claim we could never clear again.
+ *
+ * RETURNING the payload matters as much as the claim: Tidal rotates refresh tokens, so the
+ * credential the caller snapshotted may already have been consumed by another instance's
+ * refresh. The refresh POST must always use the value this claim just read.
  */
-async function claimRefresh(fingerprint: string): Promise<Date | null> {
+async function claimRefresh(fingerprint: string): Promise<RefreshClaim | null> {
   const claim = new Date(Date.now() + REFRESH_CLAIM_SECS * 1000)
   const [row] = await db
     .update(accountEntries)
@@ -452,10 +469,12 @@ async function claimRefresh(fingerprint: string): Promise<Date | null> {
       and(
         eq(accountEntries.fingerprint, fingerprint),
         sql`(refresh_in_flight_until is null or refresh_in_flight_until < now())`,
+        sql`(refresh_cooldown_until is null or refresh_cooldown_until <= now())`,
       ),
     )
-    .returning({ claim: accountEntries.refreshInFlightUntil })
-  return row?.claim ?? null
+    .returning({ claim: accountEntries.refreshInFlightUntil, payload: accountEntries.payload })
+  // Column is nullable so drizzle types the returning as Date|null — it was just stamped.
+  return row ? { claim: row.claim ?? claim, payload: decryptAtRest(row.payload) } : null
 }
 
 /**
@@ -470,6 +489,7 @@ async function finishRefresh(
     payload?: Record<string, unknown>
     fingerprint?: string // credential rewrites (Qobuz re-login) swap the dedupe key too
     cooldownUntil?: Date
+    backoffMs?: number | null // persist the abuse-hold duration; a successful refresh resets it
   } = {},
 ): Promise<void> {
   await db
@@ -483,6 +503,11 @@ async function finishRefresh(
         : outcome.payload
           ? { refreshCooldownUntil: null }
           : {}),
+      ...(outcome.backoffMs !== undefined
+        ? { refreshBackoffMs: outcome.backoffMs }
+        : outcome.payload
+          ? { refreshBackoffMs: null }
+          : {}),
     })
     .where(and(eq(accountEntries.fingerprint, fingerprint), eq(accountEntries.refreshInFlightUntil, claim)))
     .catch(() => {
@@ -491,7 +516,7 @@ async function finishRefresh(
 }
 
 type RefreshGate =
-  | { kind: "claim"; claim: Date | null } // caller may POST the refresh
+  | { kind: "claim"; claim: RefreshClaim | null } // caller may POST — with claim.payload when set
   | { kind: "serve"; token: string } // another instance's refresh landed — serve its token
   | { kind: "skip"; detail: string } // cooldown or lost claim — never a dead verdict
 
@@ -516,8 +541,10 @@ async function gateRefresh(
   if (globalBackoff && (await tidalAbuseBackoffActive())) {
     return { kind: "skip", detail: "shared Tidal refresh backoff" }
   }
-  const claim = await claimRefresh(fingerprint)
-  if (claim) return { kind: "claim", claim }
+  // The claim UPDATE re-checks both predicates atomically — a cooldown landing between the read
+  // above and this line still wins, because it is the UPDATE's WHERE that decides.
+  const claimed = await claimRefresh(fingerprint)
+  if (claimed) return { kind: "claim", claim: claimed }
 
   for (let i = 0; i < REFRESH_LOSER_TRIES; i++) {
     await sleep(REFRESH_LOSER_WAIT_MS)
@@ -540,49 +567,78 @@ async function tidalAbuseBackoffActive(): Promise<boolean> {
     .where(eq(poolState.key, GLOBAL_ABUSE_KEY))
     .limit(1)
     .catch(() => [] as { value: Record<string, unknown> }[])
-  const until = row?.value?.globalUntil
-  return typeof until === "string" && new Date(until).getTime() > Date.now()
+  const v = (row?.value ?? {}) as { global_until?: number; globalUntil?: string }
+  const until =
+    typeof v.global_until === "number"
+      ? v.global_until * 1000 // epoch seconds, written by recordTidalAbuse's upsert
+      : typeof v.globalUntil === "string"
+        ? new Date(v.globalUntil).getTime() // legacy shape from the pre-atomic writer
+        : 0
+  return until > Date.now()
 }
 
 /**
- * Bump the shared abuse counter; when the tripwire fires it also sets the global hold. A lost
- * increment under concurrency only delays the tripwire by one event — the counter is a
- * heuristic, not accounting.
+ * Bump the shared abuse counter and, once the tripwire fires, set the global hold — all in ONE
+ * upsert whose CASE arms evaluate against the row's stored window, so concurrent instances can
+ * no longer read-then-write the count away from each other. Values are epoch seconds: the
+ * comparisons stay pure arithmetic, no timestamp parsing anywhere.
  */
 async function recordTidalAbuse(): Promise<void> {
   try {
-    const now = Date.now()
-    const [row] = await db
-      .select({ value: poolState.value })
-      .from(poolState)
-      .where(eq(poolState.key, GLOBAL_ABUSE_KEY))
-      .limit(1)
-    const v = (row?.value ?? {}) as { hits?: number; windowStart?: string; globalUntil?: string }
-    const fresh = !v.windowStart || now - new Date(v.windowStart).getTime() > GLOBAL_ABUSE_WINDOW_SECS * 1000
-    const hits = fresh ? 1 : (v.hits ?? 0) + 1
-    const value = {
-      hits,
-      windowStart: new Date(fresh ? now : new Date(v.windowStart as string).getTime()).toISOString(),
-      globalUntil:
-        hits >= GLOBAL_ABUSE_HITS
-          ? new Date(now + GLOBAL_COOLDOWN_SECS * 1000).toISOString()
-          : (v.globalUntil ?? null),
-    }
-    await db
-      .insert(poolState)
-      .values({ key: GLOBAL_ABUSE_KEY, value, updatedAt: new Date() })
-      .onConflictDoUpdate({ target: poolState.key, set: { value, updatedAt: new Date() } })
+    await db.execute(sql`
+      insert into pool_state (key, value, updated_at)
+      values (
+        ${GLOBAL_ABUSE_KEY},
+        jsonb_build_object(
+          'hits', 1,
+          'window_start', extract(epoch from now()),
+          'global_until', 0
+        ),
+        now()
+      )
+      on conflict (key) do update set
+        value = jsonb_build_object(
+          'hits', case
+            when extract(epoch from now()) - coalesce((pool_state.value->>'window_start')::float, 0)
+                 > ${GLOBAL_ABUSE_WINDOW_SECS}
+              then 1
+            else coalesce((pool_state.value->>'hits')::int, 0) + 1
+          end,
+          'window_start', case
+            when extract(epoch from now()) - coalesce((pool_state.value->>'window_start')::float, 0)
+                 > ${GLOBAL_ABUSE_WINDOW_SECS}
+              then extract(epoch from now())
+            else coalesce((pool_state.value->>'window_start')::float, extract(epoch from now()))
+          end,
+          'global_until', case
+            when (case
+                    when extract(epoch from now()) - coalesce((pool_state.value->>'window_start')::float, 0)
+                         > ${GLOBAL_ABUSE_WINDOW_SECS}
+                      then 1
+                    else coalesce((pool_state.value->>'hits')::int, 0) + 1
+                  end) >= ${GLOBAL_ABUSE_HITS}
+              then extract(epoch from now()) + ${GLOBAL_COOLDOWN_SECS}
+            else coalesce((pool_state.value->>'global_until')::float, 0)
+          end
+        ),
+        updated_at = now()
+    `)
   } catch {
     /* heuristic only — never block a refresh decision on bookkeeping */
   }
 }
 
-/** Exponential abuse cooldown: doubles the REMAINING hold while rejections keep arriving, capped at 6h. */
-function nextAbuseCooldown(current: Date | null): Date {
-  const remaining = current ? Math.max(0, new Date(current).getTime() - Date.now()) / 1000 : 0
-  const secs =
-    remaining > 0 ? Math.min(remaining * 2, REFRESH_ABUSE_COOLDOWN_MAX_SECS) : REFRESH_ABUSE_COOLDOWN_SECS
-  return new Date(Date.now() + secs * 1000)
+/**
+ * Exponential abuse cooldown: the PERSISTED hold doubles while rejections keep arriving —
+ * 15 min, 30, 1h … 6h cap — and survives the cooldown itself expiring, because the duration
+ * lives in refresh_backoff_ms rather than being re-derived from whatever cooldown remains.
+ * A successful refresh writes it back to NULL via finishRefresh.
+ */
+function nextAbuseCooldown(previousMs: number | null): { until: Date; backoffMs: number } {
+  const backoffMs = previousMs
+    ? Math.min(previousMs * 2, REFRESH_ABUSE_COOLDOWN_MAX_SECS * 1000)
+    : REFRESH_ABUSE_COOLDOWN_SECS * 1000
+  return { until: new Date(Date.now() + backoffMs), backoffMs }
 }
 
 /** Refreshes a Tidal access token and writes it back, so later checks use the new one. */
@@ -591,26 +647,31 @@ async function tryRefreshTidalToken(
   entryFingerprint?: string,
   deadline?: AbortSignal,
 ): Promise<{ token: string | null; detail: string; skip?: boolean }> {
-  // Contributors are handed a single value labelled "Token" which is in fact the refresh token,
-  // so fall back to it when no separate refreshToken was supplied. Without this every Tidal
-  // submission failed its live check and was rejected as dead.
-  const refreshToken =
-    String(payload.refreshToken ?? "").trim() || String(payload.token ?? "").trim()
-  if (!refreshToken) return { token: null, detail: "no refresh token" }
-
-  // Single-flight + backoff gate before any POST: concurrent leases must not double-spend a
-  // rotating refresh token, and an answer the endpoint already gave (429/abuse or a 2-minute
-  // network blip) must not be re-asked. A `skip` outcome means "not verified" — callers map it
-  // to pending, never dead.
-  let claim: Date | null = null
+  // Single-flight + backoff gate BEFORE reading the credential: the claim returns the row's
+  // current decrypted payload, and the refresh POST must use THAT — the caller's snapshot may
+  // predate another instance's rotation, which would double-spend the (now invalid) token. A
+  // `skip` outcome means "not verified" — callers map it to pending, never dead.
+  let claim: RefreshClaim | null = null
+  let current = payload
   if (entryFingerprint) {
     const gate = await gateRefresh(entryFingerprint, String(payload.token ?? "").trim(), true)
     if (gate.kind === "serve") return { token: gate.token, detail: "served after another check's refresh" }
     if (gate.kind === "skip") return { token: null, detail: gate.detail, skip: true }
     claim = gate.claim
+    if (claim) current = claim.payload
   }
   const finish = (outcome: Parameters<typeof finishRefresh>[2] = {}) =>
-    entryFingerprint && claim ? finishRefresh(entryFingerprint, claim, outcome) : Promise.resolve()
+    entryFingerprint && claim ? finishRefresh(entryFingerprint, claim.claim, outcome) : Promise.resolve()
+
+  // Contributors are handed a single value labelled "Token" which is in fact the refresh token,
+  // so fall back to it when no separate refreshToken was supplied. Without this every Tidal
+  // submission failed its live check and was rejected as dead.
+  const refreshToken =
+    String(current.refreshToken ?? "").trim() || String(current.token ?? "").trim()
+  if (!refreshToken) {
+    await finish()
+    return { token: null, detail: "no refresh token" }
+  }
 
   // Requesting a superset of a token's granted scopes makes Tidal answer 400 invalid_scope on
   // tokens minted elsewhere. Fall back to the narrower scope rather than calling it dead.
@@ -653,10 +714,14 @@ async function tryRefreshTidalToken(
       const abuseText = `${err.error ?? ""} ${err.error_description ?? ""}`
       if (res.status === 429 || /abuse/i.test(abuseText)) {
         const row = entryFingerprint ? await readRefreshRow(entryFingerprint).catch(() => null) : null
-        const until = nextAbuseCooldown(row?.refreshCooldownUntil ?? null)
-        await finish({ cooldownUntil: until })
+        const next = nextAbuseCooldown(row?.refreshBackoffMs ?? null)
+        await finish({ cooldownUntil: next.until, backoffMs: next.backoffMs })
         await recordTidalAbuse()
-        return { token: null, detail: `refresh rate-limited, cooling until ${until.toISOString()}`, skip: true }
+        return {
+          token: null,
+          detail: `refresh rate-limited, cooling until ${next.until.toISOString()}`,
+          skip: true,
+        }
       }
       // A provider-side failure is transient — cool briefly and let the sweep re-verify soon
       // rather than writing a dead verdict over what may be a fine account.
@@ -694,7 +759,7 @@ async function tryRefreshTidalToken(
     // is unique there.
     if (entryFingerprint) {
       const newPayload = {
-        ...payload,
+        ...current,
         token: newToken,
         // Tidal sometimes rotates the refresh token; keep the new one if provided.
         ...(json.refresh_token ? { refreshToken: json.refresh_token } : {}),
@@ -737,13 +802,15 @@ async function checkTidalAccount(
     if (isTidalRefreshToken(token)) {
       const exchanged = await tryRefreshTidalToken(payload, entryFingerprint, deadline)
       if (!exchanged.token) {
-        // A cooldown/claim skip means the account was never verified — pending, not dead.
+        // A cooldown/claim skip means the account was never verified: not dead, and not even a
+        // verdict — persistence must treat it as a no-op (skipped), not count it as a failure.
         return {
           ok: false,
           premium: false,
           status: exchanged.skip ? "pending" : "dead",
           latencyMs: 0,
           detail: exchanged.detail,
+          skipped: exchanged.skip ?? false,
         }
       }
       token = exchanged.token
@@ -773,6 +840,7 @@ async function checkTidalAccount(
           status: refreshed.skip ? "pending" : "dead",
           latencyMs: ms,
           detail: refreshed.detail,
+          skipped: refreshed.skip ?? false,
         }
       }
     }
@@ -911,19 +979,25 @@ async function renewQobuzToken(
   oldFingerprint?: string,
   deadline?: AbortSignal,
 ): Promise<{ token: string | null; detail: string; skip?: boolean }> {
-  const email = String(payload.username ?? "").trim()
-  const password = String(payload.password ?? "").trim()
-  if (!email || !password) return { token: null, detail: "no stored credential to renew with" }
   if (!oldFingerprint) return { token: null, detail: "no fingerprint to update" }
 
   // Re-login is a credential refresh like Tidal's: single-flight it, or two concurrent checks
-  // both POST user/login and double-write the row.
+  // both POST user/login and double-write the row. When the claim wins, ITS payload is the
+  // credential source — the caller's snapshot can predate another instance's rewrite.
   const gate = await gateRefresh(oldFingerprint, String(payload.token ?? "").trim())
   if (gate.kind === "serve") return { token: gate.token, detail: "renewed by another check" }
   if (gate.kind === "skip") return { token: null, detail: gate.detail, skip: true }
   const claim = gate.claim
+  const current = claim?.payload ?? payload
   const finish = (outcome: Parameters<typeof finishRefresh>[2] = {}) =>
-    claim ? finishRefresh(oldFingerprint, claim, outcome) : Promise.resolve()
+    claim ? finishRefresh(oldFingerprint, claim.claim, outcome) : Promise.resolve()
+
+  const email = String(current.username ?? "").trim()
+  const password = String(current.password ?? "").trim()
+  if (!email || !password) {
+    await finish()
+    return { token: null, detail: "no stored credential to renew with" }
+  }
 
   let login: QobuzLoginResult
   try {
@@ -943,7 +1017,7 @@ async function renewQobuzToken(
   }
 
   const nextPayload: Record<string, unknown> = {
-    ...payload,
+    ...current,
     token: fresh,
     ...(login.countryCode ? { countryCode: login.countryCode } : {}),
   }
@@ -1006,6 +1080,7 @@ async function checkQobuzAccount(
           status: renewed.skip ? "pending" : "dead",
           latencyMs: ms,
           detail: `token rejected (${renewed.detail})`,
+          skipped: renewed.skip ?? false,
         }
       }
     }
@@ -1217,17 +1292,19 @@ async function rotateDeezerArl(
   entryFingerprint?: string,
   deadline?: AbortSignal,
 ): Promise<{ arl: string | null; detail: string }> {
-  const arl = String(payload.arl ?? "").trim()
   const base = "https://www.deezer.com/ajax/gw-light.php"
 
   // Same single-flight as the token refreshers: two concurrent checks must not both run the
   // two-step rotation — the loser ARL is dead the moment the winner writes. No wait needed
   // here: rotation only runs after a check that already passed, so the loser keeps its valid
-  // ARL and simply skips its own rotation.
-  const claim = entryFingerprint ? await claimRefresh(entryFingerprint) : null
-  if (entryFingerprint && !claim) return { arl: null, detail: "rotation in flight elsewhere" }
+  // ARL and simply skips its own rotation. The claimed payload's ARL is the one to rotate —
+  // the caller's snapshot may already be the loser's dead value.
+  const claimed = entryFingerprint ? await claimRefresh(entryFingerprint) : null
+  if (entryFingerprint && !claimed) return { arl: null, detail: "rotation in flight elsewhere" }
+  const current = claimed?.payload ?? payload
+  const arl = String(current.arl ?? "").trim()
   const finish = (outcome: Parameters<typeof finishRefresh>[2] = {}) =>
-    entryFingerprint && claim ? finishRefresh(entryFingerprint, claim, outcome) : Promise.resolve()
+    entryFingerprint && claimed ? finishRefresh(entryFingerprint, claimed.claim, outcome) : Promise.resolve()
 
   try {
     const userRes = await timedFetch(
@@ -1254,13 +1331,13 @@ async function rotateDeezerArl(
     if (!rotated || rotated === arl) return { arl: null, detail: "rotation returned nothing new" }
 
     if (entryFingerprint) {
-      if (claim) {
+      if (claimed) {
         // Persist + release in one guarded UPDATE — a claim that lapsed is not ours to clear.
-        await finish({ payload: { ...payload, arl: rotated } })
+        await finish({ payload: { ...current, arl: rotated } })
       } else {
         await db
           .update(accountEntries)
-          .set({ payload: encryptAtRest({ ...payload, arl: rotated }) })
+          .set({ payload: encryptAtRest({ ...current, arl: rotated }) })
           .where(sql`fingerprint = ${entryFingerprint}`)
           .catch(() => { /* best-effort — a DB hiccup must not fail the health check */ })
       }
