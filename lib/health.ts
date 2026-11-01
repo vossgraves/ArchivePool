@@ -4,7 +4,7 @@ import { and, eq, sql } from "drizzle-orm"
 import { db } from "@/lib/db"
 import { accountEntries, poolState } from "@/lib/db/schema"
 import { decryptAtRest, encryptAtRest } from "@/lib/crypto"
-import { chargeFetch } from "./cf-env"
+import { budgetedFetch, FetchBudgetExhausted } from "./cf-env"
 import { qobuzLogin, scrapeQobuzAppSecret, type QobuzLoginResult } from "./qobuz-oauth"
 import { TIDAL_CLIENT_ID, TIDAL_CLIENT_SECRET } from "./tidal-oauth"
 import { fingerprint, type Kind, type Service, type Status } from "./sources"
@@ -56,8 +56,7 @@ async function ampDevToken(deadline?: AbortSignal): Promise<string | null> {
     return ampTokenCache.token
   }
   try {
-    chargeFetch()
-    const home = await fetch(APPLE_MUSIC_HOME, {
+    const home = await budgetedFetch(APPLE_MUSIC_HOME, {
       headers: { "user-agent": APPLE_UA },
       signal: probeSignal(deadline),
       cache: "no-store",
@@ -69,8 +68,7 @@ async function ampDevToken(deadline?: AbortSignal): Promise<string | null> {
       console.warn("[health] apple dev token: no web-player bundle script found on music.apple.com")
       return ampTokenCache?.token ?? null
     }
-    chargeFetch()
-    const jsRes = await fetch(`https://music.apple.com/${bundle}`, {
+    const jsRes = await budgetedFetch(`https://music.apple.com/${bundle}`, {
       headers: { "user-agent": APPLE_UA },
       signal: probeSignal(deadline),
       cache: "no-store",
@@ -106,8 +104,7 @@ async function timedFetch(
   const signal = deadline ? AbortSignal.any([controller.signal, deadline]) : controller.signal
   const started = Date.now()
   try {
-    chargeFetch()
-    const res = await fetch(url, {
+    const res = await budgetedFetch(url, {
       ...init,
       signal,
       headers: { "user-agent": "ArchiveTune-SourcePool/1.0", ...(init?.headers ?? {}) },
@@ -692,8 +689,7 @@ async function tryRefreshTidalToken(
         grant_type: "refresh_token",
         scope,
       })
-      chargeFetch()
-      const res = await fetch(TIDAL_TOKEN_ENDPOINT, {
+      const res = await budgetedFetch(TIDAL_TOKEN_ENDPOINT, {
         method: "POST",
         headers: {
           "content-type": "application/x-www-form-urlencoded",
@@ -781,7 +777,15 @@ async function tryRefreshTidalToken(
     }
 
     return { token: newToken, detail: "refreshed" }
-  } catch {
+  } catch (e) {
+    // A budget refusal never reached the wire — nothing is known about the provider,
+    // so the claim is released with NO cooldown and the throw propagates for the
+    // sweep to stop the batch. Successful rotations above already kept their new
+    // credentials via finish({ payload }).
+    if (e instanceof FetchBudgetExhausted) {
+      await finish()
+      throw e
+    }
     // A thrown fetch is the network case, not a verdict: brief cooldown and skip the check.
     await finish({ cooldownUntil: new Date(Date.now() + REFRESH_TRANSIENT_COOLDOWN_SECS * 1000) })
     return { token: null, detail: "refresh threw", skip: true }

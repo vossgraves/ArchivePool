@@ -70,9 +70,18 @@ jobs:
               echo "Health sweep complete after $i batch(es)."
               exit 0
             fi
+            prev="$cursor"
             cursor=$(jq -er '.cursor' /tmp/body.txt 2>/dev/null) || cursor=""
             if [ -z "$cursor" ]; then
               echo "batch $i returned no sweep cursor — aborting" >&2
+              exit 1
+            fi
+            # An unchanged cursor is tolerated only when the batch stopped on its
+            # fetch budget — the same position is retried (bounded by the 40-pass
+            # cap). Any other zero-progress batch is a bug worth failing on.
+            if [ "$cursor" = "$prev" ] && [ -n "$prev" ] \
+               && [ "$(jq -r '.budgetExhausted' /tmp/body.txt)" != "true" ]; then
+              echo "batch $i made no progress without budgetExhausted — aborting" >&2
               exit 1
             fi
           done

@@ -97,7 +97,8 @@ curl http://localhost:8787/api/status
   returns a `cursor` keyset so skipped prefixes cannot starve the tail — `remaining`/
   `done` stay truthful; feed slices keyset-paginate on the sorted URL list via
   `batch.nextAfter`. Under both caps sits a hard per-request fetch budget
-  (`chargeFetch`, 40 subrequests on Workers) that trips inside the probe helpers; a
+  (`budgetedFetch`, 40 subrequests on Workers — redirect hops counted one by one) that
+  trips inside the probe helpers; a
   verdict computed after it is discarded, the cursor ends before that row, and
   `budgetExhausted:true` marks the stop. Response bodies are additive: `attempted`,
   `cursor`, `remaining`, `done`, `budgetExhausted`, `batch{…}` — existing

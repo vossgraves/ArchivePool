@@ -18,6 +18,10 @@ const BATCH_CONCURRENCY = 3
 // upstream fetches (session exchange, claim poll) plus its encryption and SQL writes —
 // up to ~4 subrequests a row, so 12 keeps a call under the 50-subrequest ceiling.
 const ATTEMPT_MAX = 12
+// A cursor before every real row in the stalest-first order: pending=1 is the leading
+// rank and ts=0/id=0 precedes any row (ids start at 1). Returned when a batch is cut
+// before its first row so the driver retries the same position instead of a null.
+const SWEEP_START_CURSOR = "1:0:0"
 const STALE_AFTER_MS = 6 * 60 * 60 * 1000
 
 type PoolEntry = {
@@ -281,8 +285,15 @@ export async function runHealthSweep(
   const attempted = consumed
   const remaining = queue.length - consumed
   const skipped = allEntries.length - checked - remaining
+  // Zero rows consumed (a budget cut on the first row): echo the incoming cursor —
+  // or the start sentinel on the first call — so a non-null position always comes back
+  // and the driver retries it rather than aborting on a missing cursor.
   const nextCursor =
-    limit == null ? null : consumed > 0 ? formatCursor(queue[consumed - 1]) : (rawCursor ?? null)
+    limit == null
+      ? null
+      : consumed > 0
+        ? formatCursor(queue[consumed - 1])
+        : rawCursor || SWEEP_START_CURSOR
   return {
     checked,
     skipped,

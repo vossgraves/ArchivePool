@@ -219,10 +219,11 @@ at most min(2N, 12) consumed rows — per call for hosts with a per-request budg
 verdict (refresh cooling, a lost claim), because a bail-out can still spend upstream
 fetches. `cursor` in the response is the keyset of the last consumed row; pass it back as
 `cursor=` so a skipped prefix cannot head every batch and starve the tail. A per-request
-outbound-fetch budget (40 on Workers, unlimited elsewhere) can stop a call earlier — when
-`budgetExhausted` is true the cursor already ends before the cut-off row, so the same loop
-just resumes it with a fresh budget; a verdict computed after the budget tripped is never
-persisted. `attempted`
+outbound-fetch budget (40 on Workers, unlimited elsewhere) can stop a call earlier —
+`budgetedFetch` charges every probe including each redirect hop — when `budgetExhausted`
+is true the cursor already ends before the cut-off row, so the same loop just resumes it
+with a fresh budget; a verdict computed after the budget tripped is never persisted.
+`attempted`
 counts the stale rows consumed, `remaining` the ones still waiting after the cursor;
 `done` is true when `remaining` is 0, and only the finishing call republishes the
 snapshot. The scheduled workflow loops until `done:true`. Called without `batch`, the
@@ -237,7 +238,9 @@ Batched mode for request-budgeted hosts:
 - `?feed=NAME` — `monochrome`, `spotiflac-tidal` or `spotiflac-qobuz`; one feed per call.
 - `&after=URL&limit=N` — keyset slice of that feed's sorted candidate list (limit
   1–10, default 8). The response's `batch` object carries
-  `{ total, after, nextAfter, done }`; repeat with `after=<batch.nextAfter>` until `done`.
+  `{ total, after, nextAfter, done, budgetExhausted }`; repeat with
+  `after=<batch.nextAfter>` until `done` — `budgetExhausted:true` slices resume at the
+  first unfinished candidate (a fetch-budget cut-off is never written as a verdict).
   Keyset (not offset) is deliberate: the live feed is refetched per call, and a >-cursor over
   the sorted set converges even when its membership shifts mid-sweep.
 - `?publish=1` — republish the instance snapshot once every feed has drained (the workflows

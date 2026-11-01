@@ -9,7 +9,7 @@
 // fetch the player page server-side (no CORS) and scrape it.
 
 import { createHash } from "node:crypto"
-import { chargeFetch } from "./cf-env"
+import { budgetedFetch } from "./cf-env"
 
 // Public Qobuz web-player app credentials. These are widely known and used by every
 // open-source Qobuz client (streamrip, qobuz-dl, etc.) — they are NOT private.
@@ -72,8 +72,7 @@ export async function qobuzLogin(
     password,
     app_id: QOBUZ_LOGIN_APP_ID,
   })
-  chargeFetch()
-  const res = await fetch(LOGIN_URL, {
+  const res = await budgetedFetch(LOGIN_URL, {
     method: "POST",
     headers: {
       "content-type": "application/x-www-form-urlencoded",
@@ -127,8 +126,7 @@ export async function qobuzLogin(
 export async function scrapeQobuzAppSecret(appId = QOBUZ_APP_ID, deadline?: AbortSignal): Promise<string | null> {
   const { page, origin } = SECRET_SOURCES[appId] ?? SECRET_SOURCES[QOBUZ_APP_ID]
   try {
-    chargeFetch()
-    const pageRes = await fetch(page, {
+    const pageRes = await budgetedFetch(page, {
       headers: { "user-agent": UA },
       signal: fetchSignal(deadline),
       cache: "no-store",
@@ -155,8 +153,7 @@ export async function scrapeQobuzAppSecret(appId = QOBUZ_APP_ID, deadline?: Abor
     const BUNDLE_SCAN_MAX = 6
     for (const url of scriptUrls.slice(0, BUNDLE_SCAN_MAX)) {
       try {
-        chargeFetch()
-        const jsRes = await fetch(url, {
+        const jsRes = await budgetedFetch(url, {
           headers: { "user-agent": UA },
           signal: fetchSignal(deadline),
           cache: "no-store",
@@ -199,8 +196,7 @@ export async function validateAppSecret(
     `&track_id=${PROBE_TRACK}&format_id=${PROBE_FORMAT}&intent=stream` +
     `&app_id=${encodeURIComponent(appId)}&user_auth_token=${encodeURIComponent(userAuthToken)}`
   try {
-    chargeFetch()
-    const res = await fetch(url, {
+    const res = await budgetedFetch(url, {
       headers: { "x-app-id": appId, "x-user-auth-token": userAuthToken, "user-agent": UA },
       cache: "no-store",
       signal: AbortSignal.timeout(12_000),

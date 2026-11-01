@@ -63,9 +63,23 @@ jobs:
                 feed_done=1
                 break
               fi
-              next=$(jq -er '.batch.nextAfter' /tmp/body.txt 2>/dev/null) || next=""
+              prev="$after"
+              budget=$(jq -r '.batch.budgetExhausted' /tmp/body.txt 2>/dev/null)
+              next=$(jq -r '.batch.nextAfter // empty' /tmp/body.txt 2>/dev/null)
               if [ -z "$next" ]; then
-                echo "Feed $feed returned no nextAfter — aborting its loop" >&2
+                # A fetch-budget cut before the first candidate emits no new cursor —
+                # retry the same position; missing it otherwise is a bug.
+                if [ "$budget" = "true" ]; then
+                  next="$prev"
+                else
+                  echo "Feed $feed returned no nextAfter — aborting its loop" >&2
+                  failed=$((failed + 1)); feed_done=2; break
+                fi
+              fi
+              # Unchanged cursor: tolerated when the slice stopped on its fetch
+              # budget; any other zero-progress slice is a bug worth flagging.
+              if [ "$next" = "$prev" ] && [ -n "$prev" ] && [ "$budget" != "true" ]; then
+                echo "Feed $feed made no progress without budgetExhausted — aborting its loop" >&2
                 failed=$((failed + 1)); feed_done=2; break
               fi
               after=$next

@@ -113,6 +113,45 @@ export function fetchBudgetExceeded(): boolean {
   return ctx != null && (fetchSpend.get(ctx) ?? 0) >= FETCH_BUDGET
 }
 
+const MAX_REDIRECT_HOPS = 5
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
+
+/**
+ * fetch() with the per-request subrequest budget applied — including redirects.
+ * Cloudflare counts every redirect hop as its own subrequest, so redirects are
+ * followed manually (redirect: "manual", ≤5 hops) and each hop is charged instead
+ * of hiding followers inside a single call. Method rules follow the fetch spec:
+ * 303 always rewrites to GET (body dropped); 301/302 rewrite non-GET/HEAD to GET;
+ * 307/308 preserve method and body. Everything else — signal, headers, cache — is
+ * passed through untouched, so every check-path call site can swap to this wrapper
+ * verbatim.
+ */
+export async function budgetedFetch(url: string, init?: RequestInit): Promise<Response> {
+  let current = url
+  let method = (init?.method ?? "GET").toUpperCase()
+  let body = init?.body ?? null
+  for (let hop = 0; ; hop++) {
+    chargeFetch()
+    const res = await fetch(current, { ...init, method, body, redirect: "manual" })
+    if (!REDIRECT_STATUSES.has(res.status) || hop >= MAX_REDIRECT_HOPS) return res
+    const location = res.headers.get("location")
+    if (!location) return res
+    try {
+      await res.body?.cancel()
+    } catch {
+      /* best-effort body discard before the next hop */
+    }
+    current = new URL(location, current).toString()
+    if (
+      res.status === 303 ||
+      ((res.status === 301 || res.status === 302) && method !== "GET" && method !== "HEAD")
+    ) {
+      method = "GET"
+      body = null
+    }
+  }
+}
+
 export function cfWaitUntil(work: Promise<unknown>): void {
   try {
     const full = getCloudflareContext({ async: false }) as unknown as {

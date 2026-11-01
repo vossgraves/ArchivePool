@@ -6,6 +6,7 @@ import { db } from "@/lib/db"
 import { instanceEntries } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
 import { runCheck } from "@/lib/health"
+import { FetchBudgetExhausted, fetchBudgetExceeded } from "@/lib/cf-env"
 import { fingerprint, maskLabel, normalizeUrl, type Service } from "@/lib/sources"
 
 export interface InstanceSyncResult {
@@ -18,7 +19,14 @@ export interface InstanceSyncResult {
   rejected: number // reachable but not premium/hi-res — not added (new) per pool policy
   /** Present only when the call was bounded (opts.limit): keyset cursor for the next
    *  slice — repeat with after=batch.nextAfter until done. */
-  batch?: { total: number; after: string | null; nextAfter: string | null; done: boolean }
+  batch?: {
+    total: number
+    after: string | null
+    nextAfter: string | null
+    done: boolean
+    /** The slice stopped early because the request's outbound-fetch budget was spent. */
+    budgetExhausted?: boolean
+  }
 }
 
 /** Instances checked more recently than this are skipped, so a sweep never hammers live hosts. */
@@ -125,8 +133,13 @@ export async function syncInstanceUrls(
       }
     }
 
-    result.checked++
     const check = await runCheck(service, "api", payload)
+    // Same taint guard as the sweep: a verdict computed after the request's fetch
+    // budget tripped may be a declined fetch flattened into "dead" by a check's own
+    // error handling. Discard it — this candidate counts as unfinished, the batch
+    // stops, and nextAfter already points before it for the next call to resume.
+    if (fetchBudgetExceeded()) throw new FetchBudgetExhausted()
+    result.checked++
 
     if (!check.ok) {
       result.failed++
@@ -213,12 +226,39 @@ export async function syncInstanceUrls(
   }
 
   let next = 0
+  let budgetHit = false
+  // Candidates whose check returned are the consumed prefix; a candidate interrupted by
+  // the fetch budget stays unfinished, and nextAfter must end before it so the next
+  // slice resumes at exactly that URL.
+  const finished = new Array<boolean>(work.length).fill(false)
   const workers = Array.from({ length: Math.min(concurrency, work.length) }, async () => {
-    while (next < work.length) {
-      await checkAndUpsert(work[next++])
+    while (!budgetHit && next < work.length) {
+      const idx = next++
+      try {
+        await checkAndUpsert(work[idx])
+        finished[idx] = true
+      } catch (e) {
+        if (e instanceof FetchBudgetExhausted) {
+          budgetHit = true
+        } else {
+          throw e
+        }
+      }
     }
   })
   await Promise.all(workers)
+
+  if (opts.limit != null) {
+    let consumed = 0
+    while (consumed < work.length && finished[consumed]) consumed++
+    result.batch = {
+      total: allUrls.length,
+      after: opts.after ?? null,
+      nextAfter: consumed > 0 ? work[consumed - 1] : (opts.after ?? null),
+      done: consumed === work.length && from + work.length >= allUrls.length,
+      budgetExhausted: budgetHit,
+    }
+  }
 
   return result
 }

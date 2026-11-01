@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import "server-only"
 import { syncInstanceUrls, type InstanceSyncResult } from "@/lib/instance-sync"
-import { chargeFetch } from "@/lib/cf-env"
+import { budgetedFetch } from "@/lib/cf-env"
 import { normalizeUrl } from "@/lib/sources"
 
 /** Shape returned by https://monochrome.st/instances.json (the project's current home). */
@@ -38,8 +38,7 @@ export async function fetchMonochromeUrls(): Promise<string[]> {
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
   let raw: MonochromeInstances
   try {
-    chargeFetch()
-    const res = await fetch(MONOCHROME_URL, {
+    const res = await budgetedFetch(MONOCHROME_URL, {
       signal: controller.signal,
       headers: { "user-agent": "ArchiveTune-SourcePool/1.0" },
       cache: "no-store",
