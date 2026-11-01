@@ -8,7 +8,7 @@ import {
   FetchBudgetExhausted,
   RowFetchBudgetExhausted,
   fetchBudgetExceeded,
-  fetchBudgetRemaining,
+  fetchHeadroom,
   rowFetchExhausted,
   runWithFetchCeiling,
 } from "@/lib/cf-env"
@@ -262,6 +262,7 @@ export async function runHealthSweep(
     })
 
   let budgetHit = false
+  let headroomHit = false
   // Rows whose attempt RETURNED (verdict persisted or clean no-verdict skip) are the
   // consumed prefix; a row that hit the fetch budget throws and stays unconsumed, so
   // the emitted cursor ends before it — done:false and it leads the next batch.
@@ -276,11 +277,16 @@ export async function runHealthSweep(
       i < queue.length &&
       (limit == null || (checked + inFlight < limit && i < maxAttempts))
     ) {
-      // Start a row only when the request still holds a full per-entry ceiling —
-      // otherwise end the batch before it; it stays unconsumed and leads the next
-      // call's queue (reported via budgetExhausted so the driver keeps retrying).
-      if (fetchBudgetRemaining() < PER_ENTRY_FETCH_MAX) {
-        budgetHit = true
+      // Start a row only when the request still has a full ceiling of head-room —
+      // real spend PLUS other rows' outstanding reservations. Checking head-room and
+      // reserving inside attempt() happen in one synchronous stretch, so concurrent
+      // workers cannot oversubscribe and split the budget into starved slices. A row
+      // that does not fit is a SOFT stop for THIS worker only: it exits, but
+      // in-flight workers keep pulling — a finished row releases its unspent ceiling
+      // and the head-room it returns can admit the next row (unlike a true budget
+      // trip, which is terminal for every worker).
+      if (fetchHeadroom() < PER_ENTRY_FETCH_MAX) {
+        headroomHit = true
         break
       }
       const idx = i++
@@ -335,7 +341,7 @@ export async function runHealthSweep(
     remaining,
     done: remaining === 0,
     cursor: nextCursor,
-    budgetExhausted: budgetHit,
+    budgetExhausted: budgetHit || headroomHit,
   }
 }
 

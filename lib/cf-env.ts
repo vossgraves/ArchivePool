@@ -89,6 +89,11 @@ export class FetchBudgetExhausted extends Error {
 // per request; 40 leaves headroom for the route's own fetches (feed pulls, R2, retries).
 const FETCH_BUDGET = 40
 const fetchSpend = new WeakMap<object, number>()
+// Outstanding per-row reservations: a row holds its whole ceiling against the budget
+// from admission until it finishes, so concurrent starts can never oversubscribe the
+// remaining head-room. Without this, N workers each see a "full" budget and split it —
+// no row reaches its ceiling, none is consumed, and the batch stalls forever.
+const fetchReserved = new WeakMap<object, number>()
 
 /**
  * Charge one outbound fetch to the current request's budget, throwing
@@ -105,6 +110,8 @@ export function chargeFetch(): void {
   if (row) {
     if (row.remaining <= 0) throw new RowFetchBudgetExhausted()
     row.remaining--
+    // One unit of the row's reservation becomes real spend.
+    fetchReserved.set(ctx, (fetchReserved.get(ctx) ?? 0) - 1)
   }
   fetchSpend.set(ctx, used + 1)
 }
@@ -123,9 +130,35 @@ export class RowFetchBudgetExhausted extends Error {
 const rowFetchBudget = new AsyncLocalStorage<{ remaining: number }>()
 
 /** Run [work] with a per-entry fetch ceiling — a row burning past it throws
- *  RowFetchBudgetExhausted. */
+ *  RowFetchBudgetExhausted. The ceiling is RESERVED against the request budget up
+ *  front and the unused remainder released when the row finishes, so an admission
+ *  check plus this call is atomic between awaits: concurrent rows can never split the
+ *  budget into slices that leave every one of them short of its ceiling. */
 export function runWithFetchCeiling<T>(ceiling: number, work: () => Promise<T>): Promise<T> {
-  return rowFetchBudget.run({ remaining: ceiling }, work)
+  const ctx = cfExecutionContext()
+  if (ctx == null) return work()
+  const store = { remaining: ceiling }
+  fetchReserved.set(ctx, (fetchReserved.get(ctx) ?? 0) + ceiling)
+  return rowFetchBudget.run(store, async () => {
+    try {
+      return await work()
+    } finally {
+      // Release the unspent share — the head-room is visible to the next admission.
+      fetchReserved.set(ctx, (fetchReserved.get(ctx) ?? 0) - store.remaining)
+    }
+  })
+}
+
+/** Fetches free for NEW row admissions: budget minus real spend minus outstanding
+ *  reservations. Infinity off Workers. A batch admits a row only when this covers a
+ *  whole ceiling — expensive rows then serialize instead of starving together. */
+export function fetchHeadroom(): number {
+  const ctx = cfExecutionContext()
+  if (ctx == null) return Number.POSITIVE_INFINITY
+  return Math.max(
+    0,
+    FETCH_BUDGET - (fetchSpend.get(ctx) ?? 0) - (fetchReserved.get(ctx) ?? 0),
+  )
 }
 
 /** True once the current per-entry ceiling is spent — a result computed after this
@@ -135,12 +168,6 @@ export function rowFetchExhausted(): boolean {
   return store != null && store.remaining <= 0
 }
 
-/** Fetches still available to this request under the budget — Infinity off Workers. */
-export function fetchBudgetRemaining(): number {
-  const ctx = cfExecutionContext()
-  if (ctx == null) return Number.POSITIVE_INFINITY
-  return Math.max(0, FETCH_BUDGET - (fetchSpend.get(ctx) ?? 0))
-}
 
 /**
  * True once this request's fetch budget is spent. A check whose declining chargeFetch
