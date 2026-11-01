@@ -1,0 +1,17 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  // Redirect-only deployment. No functions, no build — Vercel answers every
+  // request with a 308 to the Cloudflare Worker, preserving path AND query
+  // string (Vercel appends the incoming query automatically).
+  //
+  // Caveat for Natune/ArchiveTune clients: Ktor/OkHttp may not re-POST on a
+  // 308 — cut the app's pool base URL over to the worker directly rather than
+  // relying on this redirect for POST routes (/api/report, /api/qobuz/login).
+  "redirects": [
+    {
+      "source": "/:path*",
+      "destination": "https://archivepool.workers.dev/:path*",
+      "statusCode": 308
+    }
+  ]
+}
