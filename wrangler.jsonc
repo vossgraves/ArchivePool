@@ -25,7 +25,7 @@
       "binding": "HYPERDRIVE",
       // Created with:  wrangler hyperdrive create archivepool-db --connection-string="$DATABASE_URL"
       // then pasted here. The runtime connection string it hands pg is worker-local.
-      "id": "REPLACE_WITH_HYPERDRIVE_ID",
+      "id": "5a4f8ef01faa41c3b4272a79c57f8253",
       // `wrangler dev` talks to this instead of the real Hyperdrive service.
       // IPv4 literal: "localhost" can resolve to ::1 first, where nothing listens.
       "localConnectionString": "postgresql://postgres:postgres@127.0.0.1:5432/archivepool",
