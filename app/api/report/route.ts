@@ -23,6 +23,16 @@ const REPORT_WINDOW_MS = 5 * 60_000
 // A single report can be noise, so auto-disable only once several apps agree.
 const DISABLE_AFTER_REPORTS = 3
 
+// A stored check verdict younger than this stands in for a fresh live check on a report. The
+// thundering herd is real: the few accounts a baked app key holds get re-reported thousands of
+// times a day (every install sharing the key leases the same LRU entries), and re-verifying each
+// report is what actually harms the pool — Tidal starts answering `abuse_detected` to a refresh
+// token exchanged that often, and each verify costs ~5 DB writes plus a health_log row. Inside
+// the window the stored status already says what another probe would: recent and alive means the
+// report is treated exactly as a verify that passed (lease released, replacement offered);
+// recent and dead means the entry is already parked and the park path is a no-op.
+const REPORT_VERIFY_COOLDOWN_MS = 15 * 60_000
+
 const REPORT_TYPES: Record<string, true> = { dead: true, not_premium: true }
 
 /** The real exposure ceiling on this endpoint. See docs/REPORT_ENDPOINT.md. */
@@ -76,22 +86,40 @@ export async function POST(req: NextRequest) {
 
   // Ids are globally unique, fingerprints only per table, so prefer the id. `service` comes
   // from the resolved row: a client must not steer which service a replacement is drawn from.
-  let entry: { id: number; kind: "account" | "api"; service: string } | null = null
+  // The stored verdict columns come along too — inside REPORT_VERIFY_COOLDOWN_MS they stand in
+  // for the live probe a report would otherwise trigger (see below).
+  let entry: {
+    id: number
+    kind: "account" | "api"
+    service: string
+    status: string
+    disabled: boolean
+    premium: boolean
+    lastCheckedAt: Date | null
+  } | null = null
+  const entryColumns = (t: typeof accountEntries | typeof instanceEntries) => ({
+    id: t.id,
+    service: t.service,
+    status: t.status,
+    disabled: t.disabled,
+    premium: t.premium,
+    lastCheckedAt: t.lastCheckedAt,
+  })
   if (id) {
     const [account] = await db
-      .select({ id: accountEntries.id, service: accountEntries.service })
+      .select(entryColumns(accountEntries))
       .from(accountEntries)
       .where(eq(accountEntries.id, id))
       .limit(1)
     if (account) {
-      entry = { id: account.id, kind: "account", service: account.service }
+      entry = { ...account, kind: "account" }
     } else {
       const [instance] = await db
-        .select({ id: instanceEntries.id, service: instanceEntries.service })
+        .select(entryColumns(instanceEntries))
         .from(instanceEntries)
         .where(eq(instanceEntries.id, id))
         .limit(1)
-      if (instance) entry = { id: instance.id, kind: "api", service: instance.service }
+      if (instance) entry = { ...instance, kind: "api" }
     }
   } else if (fingerprint) {
     const kindHint = isKind(body.kind) ? body.kind : null
@@ -103,12 +131,12 @@ export async function POST(req: NextRequest) {
           : [accountEntries, instanceEntries]
     for (const table of tables) {
       const [row] = await db
-        .select({ id: table.id, service: table.service })
+        .select(entryColumns(table))
         .from(table)
         .where(eq(table.fingerprint, fingerprint))
         .limit(1)
       if (row) {
-        entry = { id: row.id, kind: table === accountEntries ? "account" : "api", service: row.service }
+        entry = { ...row, kind: table === accountEntries ? "account" : "api" }
         break
       }
     }
@@ -120,11 +148,25 @@ export async function POST(req: NextRequest) {
 
   const table = entry.kind === "account" ? accountEntries : instanceEntries
 
+  // Verify cooldown (REPORT_VERIFY_COOLDOWN_MS): when the entry was checked moments ago, its
+  // stored verdict stands in for the live probe — one live check per entry per window, no matter
+  // how many installs report it in that time.
+  const recentlyChecked =
+    entry.lastCheckedAt != null &&
+    Date.now() - new Date(entry.lastCheckedAt).getTime() < REPORT_VERIFY_COOLDOWN_MS
+  const verifyReport = async (): Promise<{ ok: boolean; premium: boolean } | null> =>
+    recentlyChecked
+      ? {
+          ok: (entry.status === "alive" || entry.status === "preview") && !entry.disabled,
+          premium: entry.premium,
+        }
+      : await checkEntryById(entry.id).catch(() => null)
+
   if (reportType === "dead") {
     // Verify-before-park: a report usually means the app's cached copy went stale (Tidal kills
     // access tokens hourly, apps cache them for a day), not that the account died. The live check
     // already records itself and resets a healthy entry, so only a failing one is parked.
-    const live = await checkEntryById(entry.id).catch(() => null)
+    const live = await verifyReport()
     if (live == null || !live.ok) {
       await db
         .update(table)
@@ -154,7 +196,7 @@ export async function POST(req: NextRequest) {
     // Reports are keyless and entry ids are small sequential integers, so an unverified report
     // would let one request switch a healthy account off and one address walk the whole pool.
     // The provider's own answer decides entitlement; a wrong report is discarded.
-    const live = await checkEntryById(entry.id).catch(() => null)
+    const live = await verifyReport()
     if (live == null || !live.ok || live.premium) {
       // Also rejected when the check could not decide: a flaky network must not hand the abuse
       // back. Entitlement is judged only from a check that ran and succeeded, and that check has

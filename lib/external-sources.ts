@@ -146,17 +146,30 @@ function qbdlxEntries(parsed: unknown): Record<string, unknown>[] | null {
   return null
 }
 
-export async function fetchQbdlxShared(): Promise<QobuzSharedAccount[] | null> {
+/**
+ * Result of one external feed fetch. The ingest loop used to collapse every failure mode into a
+ * bare null, so a webhook that had been dead for weeks looked identical in the cron response to
+ * one that simply listed nothing — the operator only saw "unreachable or empty" for all of them.
+ * `error` carries the actual reason (HTTP status, TLS failure, changed response shape) so the
+ * run log says *why* a source produced nothing.
+ */
+export interface FeedFetchResult<T> {
+  items: T | null
+  error: string | null
+}
+
+export async function fetchQbdlxShared(): Promise<FeedFetchResult<QobuzSharedAccount[]>> {
   try {
     const res = await fetch(CITEGPT_SHARED_URL, {
       headers: { "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/145.0.0.0 Safari/537.36" },
       cache: "no-store",
       signal: AbortSignal.timeout(20_000),
     })
-    if (!res.ok) return null
+    if (!res.ok) return { items: null, error: `HTTP ${res.status}` }
     const parsed = (await res.json()) as unknown
     const raw = qbdlxEntries(parsed)
-    if (!raw) return null
+    if (!raw) return { items: null, error: "response was neither an array nor an {items:[...]} envelope" }
+    if (raw.length === 0) return { items: null, error: "feed listed 0 entries" }
 
     const fallback = dominantAppPair(raw) ?? { appId: QOBUZ_PROBE_APP_ID, appSecret: QOBUZ_PROBE_APP_SECRET }
     const out: QobuzSharedAccount[] = []
@@ -168,9 +181,10 @@ export async function fetchQbdlxShared(): Promise<QobuzSharedAccount[] | null> {
       const country = String(e.country ?? "").trim() || undefined
       out.push({ token, appId, appSecret, country, note: "qbdlx-shared" })
     }
-    return out
-  } catch {
-    return null
+    if (out.length === 0) return { items: null, error: `${raw.length} entries but none carried a token` }
+    return { items: out, error: null }
+  } catch (e) {
+    return { items: null, error: e instanceof Error ? e.message : "fetch failed" }
   }
 }
 
@@ -184,22 +198,26 @@ export async function fetchQbdlxShared(): Promise<QobuzSharedAccount[] | null> {
  */
 const JINA_READER = "https://r.jina.ai/"
 
-export async function fetchFirehawkRendered(): Promise<{ qobuz: FirehawkQobuzToken[]; deezer: FirehawkDeezerArl[] } | null> {
+export async function fetchFirehawkRendered(): Promise<FeedFetchResult<{ qobuz: FirehawkQobuzToken[]; deezer: FirehawkDeezerArl[] }>> {
   try {
     const res = await fetch(`${JINA_READER}https://rentry.co/firehawk52`, {
       headers: { "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/145.0.0.0 Safari/537.36" },
       cache: "no-store",
       signal: AbortSignal.timeout(45_000),
     })
-    if (!res.ok) return null
+    if (!res.ok) return { items: null, error: `jina reader HTTP ${res.status}` }
     const text = await res.text()
-    if (!/qobuz/i.test(text) && !/deezer/i.test(text)) return null
+    if (!/qobuz/i.test(text) && !/deezer/i.test(text)) {
+      return { items: null, error: "rendered page no longer mentions qobuz/deezer (source moved)" }
+    }
     const qobuz = parseFirehawkQobuzTokens(text)
     const deezer = parseFirehawkDeezerArls(text)
-    if (qobuz.length === 0 && deezer.length === 0) return null
-    return { qobuz, deezer }
-  } catch {
-    return null
+    if (qobuz.length === 0 && deezer.length === 0) {
+      return { items: null, error: "page fetched but no tokens parseable" }
+    }
+    return { items: { qobuz, deezer }, error: null }
+  } catch (e) {
+    return { items: null, error: e instanceof Error ? e.message : "fetch failed" }
   }
 }
 
@@ -231,7 +249,11 @@ export async function ingestExternalSources(
   // 1) Community shared Qobuz accounts (n8n webhook behind qbdlxui). This feed also carries the
   // (app_id, app_secret) pair the community is actually using, which the Firehawk rows below need
   // too: the health check requires all three, so a credential-less row can only ever be rejected.
-  const shared = await fetchQbdlxShared().catch(() => null)
+  const sharedRes = await fetchQbdlxShared().catch((e) => ({
+    items: null,
+    error: e instanceof Error ? e.message : "fetch failed",
+  }))
+  const shared = sharedRes.items
   let dominant: { appId: string; appSecret: string } | null = null
   if (shared && shared.length > 0) {
     for (const a of shared) {
@@ -243,14 +265,22 @@ export async function ingestExternalSources(
     }
     dominant = dominantAppPair(shared.map((a): Record<string, unknown> => ({ app_id: a.appId, app_secret: a.appSecret })))
   } else {
-    errors.push("citegptapi webhook unreachable or empty")
+    errors.push(`citegptapi webhook: ${sharedRes.error ?? "returned no accounts"}`)
   }
 
   // 2) firehawk52 rendered rentry (opportunistic — see comment on the fetcher). Its table lists
   // tokens only, so the same dominant pair backfills them the way that feed backfills its own
   // credential-less rows. With no pair known the rows are skipped rather than ingested as
-  // guaranteed rejects.
-  const firehawk = await fetchFirehawkRendered().catch(() => null)
+  // guaranteed rejects. A failed fetch is reported too: silently returning null is how this
+  // source stayed dead-and-invisible for weeks.
+  const firehawkRes = await fetchFirehawkRendered().catch((e) => ({
+    items: null,
+    error: e instanceof Error ? e.message : "fetch failed",
+  }))
+  const firehawk = firehawkRes.items
+  if (!firehawk) {
+    errors.push(`firehawk52 rendered: ${firehawkRes.error ?? "no tokens listed"}`)
+  }
   if (firehawk) {
     if (dominant) {
       for (const t of firehawk.qobuz) {
