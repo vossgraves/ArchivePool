@@ -137,6 +137,23 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS created_ua text NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_ip text NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_ua text NOT NULL DEFAULT '';
 
+-- GitHub sign-in: numeric OAuth subject, unique when set. Pending username claims
+-- (no API-key proof) wait for admin review.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS github_id bigint;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_github_id ON users (github_id) WHERE github_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS github_claims (
+  id           serial PRIMARY KEY,
+  github_id    bigint NOT NULL,
+  github_login text NOT NULL DEFAULT '',
+  username     text NOT NULL,
+  status       text NOT NULL DEFAULT 'pending',
+  review_note  text NOT NULL DEFAULT '',
+  reviewed_at  timestamptz,
+  reviewed_by  integer REFERENCES users(id) ON DELETE SET NULL,
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_github_claims_status ON github_claims (status);
+
 -- API key requests: subject + reason workflow with admin approval.
 -- Enforces 1 request per IP+UA (see lib/api-keys.ts countRequestsByIpUa).
 CREATE TABLE IF NOT EXISTS api_key_requests (

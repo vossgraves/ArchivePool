@@ -33,7 +33,8 @@
   ],
   "vars": {
     // Keep in sync with .env.example. Secrets (DATABASE_URL fallback, ADMIN_TOKEN_HASH,
-    // CRON_SECRET, SESSION_SECRET, POOL_ENCRYPTION_KEY, POOL_CLIENT_KEY) are set with
+    // CRON_SECRET, SESSION_SECRET, POOL_ENCRYPTION_KEY, POOL_CLIENT_KEY,
+    // GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET) are set with
     // `wrangler secret put <NAME>` — see docs/CLOUDFLARE.md for the exact list.
     "READ_KEYS_ENFORCED": "true",
   },

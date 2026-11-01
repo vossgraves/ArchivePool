@@ -24,6 +24,29 @@ Three distinct credentials exist. They never overlap:
 Keys/tokens are sent as `Authorization: Bearer <secret>`. `x-api-key: <secret>` is also
 accepted for read keys. Query-string keys are **intentionally rejected** — URLs get logged.
 
+### Web sign-in (GitHub OAuth)
+
+Browser sign-in uses GitHub OAuth (password sign-in returns `503 web_login_unavailable`
+on Workers — scrypt cannot fit the free-tier CPU budget — and its error text points here):
+
+- `GET /api/auth/github/start` — state + PKCE verifier in a short-lived signed HttpOnly
+  cookie, then a redirect to `github.com/login/oauth/authorize` (`scope=read:user`).
+- `GET /api/auth/github/callback` — verifies the state cookie, exchanges the code
+  (PKCE), reads the numeric id + login from `/user`, signs in a known `github_id`, or
+  issues a 10-minute signed "pending" cookie and sends the browser to choose a username.
+- `POST /api/auth/github/complete` — `{ "username" }` creates a new account for the
+  pending GitHub identity (username must be free; same rules as sign-up usernames).
+- `POST /api/auth/github/claim` — claims an EXISTING username. With
+  `{ "username", "apiKey" }`, the key's SHA-256 hash must match an `api_keys` row owned
+  by that account — possessing the account's own key is the ownership proof — then
+  `github_id` links to it and the old keys keep working unchanged for apps. With just
+  `{ "username" }` a pending row lands in `github_claims` for admin review
+  (`GET /api/admin/claims`, `POST /api/admin/claims/{id}` with `approve`/`reject`).
+
+Sessions are the same HMAC-signed `atp_session` cookie as before (signed via
+`crypto.subtle` on this path). `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` must be set —
+the routes answer `503 github_auth_unconfigured` otherwise.
+
 Read-key enforcement is controlled by the `READ_KEYS_ENFORCED` env var:
 
 - unset or `"false"` — `/api/sources` and `/api/discovery/*` are open (no key required);
@@ -314,6 +337,12 @@ entry's `fingerprint`.
 ### `POST /api/admin/check-entry` — re-check one entry
 
 Request: `{ "id": 42 }` → `{ "ok": true, "result": { ... } }`. `404` when unknown.
+
+### `GET /api/admin/claims` — pending GitHub username claims
+
+### `POST /api/admin/claims/{id}` — review a claim: `{ action: "approve" }` links the
+claimed `github_id` to the existing account; `{ action: "reject", note }` needs a
+≥10-char note. Audited like key-request reviews.
 
 ### `POST /api/admin/force-check` — full sweep + monochrome sync now
 

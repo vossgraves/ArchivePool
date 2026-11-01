@@ -139,6 +139,24 @@ const STATEMENTS: string[] = [
   `ALTER TABLE instance_entries ADD COLUMN IF NOT EXISTS expires_at timestamptz`,
   `CREATE INDEX IF NOT EXISTS idx_account_entries_expires ON account_entries (expires_at)`,
 
+  // 2026-11-01: GitHub sign-in. github_id links an OAuth subject to an account
+  // (unique when set — NULLs allowed so password-era rows are unaffected); the claims
+  // table holds pending username claims an admin can approve.
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS github_id bigint`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_github_id ON users (github_id) WHERE github_id IS NOT NULL`,
+  `CREATE TABLE IF NOT EXISTS github_claims (
+    id           serial PRIMARY KEY,
+    github_id    bigint NOT NULL,
+    github_login text NOT NULL DEFAULT '',
+    username     text NOT NULL,
+    status       text NOT NULL DEFAULT 'pending',
+    review_note  text NOT NULL DEFAULT '',
+    reviewed_at  timestamptz,
+    reviewed_by  integer REFERENCES users(id) ON DELETE SET NULL,
+    created_at   timestamptz NOT NULL DEFAULT now()
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_github_claims_status ON github_claims (status)`,
+
   // 2026-09-12: named admins and an audit trail.
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'user'`,
   `CREATE TABLE IF NOT EXISTS audit_log (

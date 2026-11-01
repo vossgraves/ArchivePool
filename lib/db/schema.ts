@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import {
+  bigint,
   boolean,
   index,
   integer,
@@ -234,8 +235,36 @@ export const users = pgTable("users", {
   createdUa: text("created_ua").notNull().default(""),
   lastLoginIp: text("last_login_ip").notNull().default(""),
   lastLoginUa: text("last_login_ua").notNull().default(""),
+  // GitHub OAuth subject (numeric id from /user). NULL for password-era accounts and
+  // for legacy accounts not yet claimed. Unique when present — one GitHub per account.
+  githubId: bigint("github_id", { mode: "number" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 })
+
+/**
+ * A pending username claim from the GitHub sign-in flow: the GitHub identity proved
+ * control of an OAuth account but the chosen legacy username could not be proven by an
+ * API key, so an admin reviews and links it. Same shape discipline as api_key_requests.
+ */
+export const githubClaims = pgTable(
+  "github_claims",
+  {
+    id: serial("id").primaryKey(),
+    githubId: bigint("github_id", { mode: "number" }).notNull(),
+    githubLogin: text("github_login").notNull().default(""),
+    // The existing account being claimed — its username string, resolved to a user id
+    // only when the claim is approved.
+    username: text("username").notNull(),
+    status: text("status").notNull().default("pending"), // pending | approved | rejected
+    reviewNote: text("review_note").notNull().default(""),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+    reviewedBy: integer("reviewed_by").references(() => users.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    statusIdx: index("idx_github_claims_status").on(t.status),
+  }),
+)
 
 /** Append-only record of privileged actions. See docs/ADMIN.md. */
 export const auditLog = pgTable(

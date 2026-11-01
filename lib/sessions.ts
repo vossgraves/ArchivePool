@@ -2,6 +2,7 @@
 import "server-only"
 import { createHmac, timingSafeEqual } from "node:crypto"
 import { cookies } from "next/headers"
+import type { NextResponse } from "next/server"
 
 /**
  * Stateless, HMAC-signed session cookies.
@@ -25,6 +26,61 @@ function sessionSecret(): string {
 
 function sign(payload: string): string {
   return createHmac("sha256", sessionSecret()).update(payload).digest("base64url")
+}
+
+function bytesToBase64Url(bytes: ArrayBuffer | Uint8Array): string {
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
+  let bin = ""
+  for (const b of view) bin += String.fromCharCode(b)
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
+}
+
+/**
+ * WebCrypto twin of `sign` — HMAC-SHA-256 over the same payload, same base64url
+ * output, so either signer verifies against the other. OAuth/session writes on the
+ * Workers free tier go through this path so signing costs stay inside crypto.subtle
+ * (native, microseconds) and no node:crypto hash ever runs per request.
+ */
+export async function signWithSessionSecret(payload: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(sessionSecret()),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  )
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload))
+  return bytesToBase64Url(sig)
+}
+
+/** Constant-time verification of a signWithSessionSecret signature. */
+export async function verifyWithSessionSecret(payload: string, signature: string): Promise<boolean> {
+  const expected = await signWithSessionSecret(payload)
+  const a = Buffer.from(signature)
+  const b = Buffer.from(expected)
+  return a.length === b.length && timingSafeEqual(a, b)
+}
+
+/** Session token identical to createSessionToken's, signed via crypto.subtle. */
+export async function createSessionTokenWeb(userId: number): Promise<{ value: string; maxAgeMs: number }> {
+  const expiresAtMs = Date.now() + SESSION_TTL_MS
+  const payload = `${userId}.${expiresAtMs}`
+  return { value: `${payload}.${await signWithSessionSecret(payload)}`, maxAgeMs: SESSION_TTL_MS }
+}
+
+/**
+ * Route-handler variant of setSessionCookie — writes onto the NextResponse being
+ * returned (redirect responses in OAuth callbacks cannot use the cookies() store).
+ */
+export async function applySessionCookie(res: NextResponse, userId: number): Promise<void> {
+  const { value, maxAgeMs } = await createSessionTokenWeb(userId)
+  res.cookies.set(COOKIE_NAME, value, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/",
+    maxAge: Math.floor(maxAgeMs / 1000),
+  })
 }
 
 export function createSessionToken(userId: number): { value: string; maxAgeMs: number } {

@@ -1,46 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import "server-only"
-import { scrypt as scryptCb, randomBytes, timingSafeEqual } from "node:crypto"
-import { promisify } from "node:util"
 import { and, desc, eq, gte } from "drizzle-orm"
 import { db } from "@/lib/db"
 import { users } from "@/lib/db/schema"
 
-const scrypt = promisify(scryptCb) as (
-  password: string | Buffer,
-  salt: string | Buffer,
-  keylen: number,
-  options: { N: number; r: number; p: number },
-) => Promise<Buffer>
-
-// OWASP-recommended scrypt parameters for interactive logins.
-const SCRYPT_N = 16384
-const SCRYPT_R = 8
-const SCRYPT_P = 1
-const KEY_LENGTH = 64
+// scrypt hashing moved to lib/passwords.ts, which the web login routes import lazily
+// — the Workers code path never loads it (see webLoginDisabled in lib/cf-env).
 
 export const USERNAME_PATTERN = /^[a-z0-9_]{3,24}$/
-
-export async function hashPassword(password: string): Promise<string> {
-  const salt = randomBytes(16)
-  const derived = await scrypt(password, salt, KEY_LENGTH, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P })
-  return `${SCRYPT_N}:${SCRYPT_R}:${SCRYPT_P}:${salt.toString("hex")}:${derived.toString("hex")}`
-}
-
-export async function verifyPassword(password: string, stored: string): Promise<boolean> {
-  const parts = stored.split(":")
-  if (parts.length !== 5) return false
-  const [, r, p, saltHex, hashHex] = [parts[0], parts[1], parts[2], parts[3], parts[4]]
-  const n = Number.parseInt(parts[0], 10)
-  const rNum = Number.parseInt(r, 10)
-  const pNum = Number.parseInt(p, 10)
-  if (!Number.isFinite(n) || !Number.isFinite(rNum) || !Number.isFinite(pNum)) return false
-  const salt = Buffer.from(saltHex, "hex")
-  const expected = Buffer.from(hashHex, "hex")
-  if (salt.length === 0 || expected.length === 0) return false
-  const derived = await scrypt(password, salt, expected.length, { N: n, r: rNum, p: pNum })
-  return derived.length === expected.length && timingSafeEqual(derived, expected)
-}
 
 export function validateCredentials(username: string, password: string): string | null {
   if (!USERNAME_PATTERN.test(username)) {
@@ -75,11 +42,21 @@ export async function findUsernameById(userId: number): Promise<string | null> {
   return row.username
 }
 
-export async function createUser(username: string, password: string, ip = "", ua = "") {
-  const passwordHash = await hashPassword(password)
+/**
+ * Insert an account row. Callers supply the password hash — "github" for OAuth-only
+ * accounts (never a valid scrypt string, so password verification can never succeed
+ * for them) or the output of lib/passwords hashPassword for password accounts.
+ */
+export async function createUser(
+  username: string,
+  passwordHash: string,
+  ip = "",
+  ua = "",
+  githubId: number | null = null,
+) {
   const [row] = await db
     .insert(users)
-    .values({ username, passwordHash, createdIp: ip, createdUa: ua, lastLoginIp: ip, lastLoginUa: ua })
+    .values({ username, passwordHash, githubId, createdIp: ip, createdUa: ua, lastLoginIp: ip, lastLoginUa: ua })
     .returning({ id: users.id, username: users.username })
   return row
 }

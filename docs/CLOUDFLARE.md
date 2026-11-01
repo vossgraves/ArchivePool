@@ -44,6 +44,8 @@ pnpm exec wrangler secret put POOL_CLIENT_KEY
 pnpm exec wrangler secret put ADMIN_TOKEN_HASH      # preferred
 # pnpm exec wrangler secret put ADMIN_TOKEN         # legacy fallback — only if no hash
 pnpm exec wrangler secret put CRON_SECRET
+pnpm exec wrangler secret put GITHUB_CLIENT_ID       # Sign in with GitHub — see below
+pnpm exec wrangler secret put GITHUB_CLIENT_SECRET
 # Optional fallbacks/tuning:
 # pnpm exec wrangler secret put DATABASE_URL        # only needed WITHOUT Hyperdrive
 # vars (already in wrangler.jsonc): READ_KEYS_ENFORCED="true"
@@ -52,6 +54,25 @@ pnpm exec wrangler secret put CRON_SECRET
 
 `BLOB_READ_WRITE_TOKEN` is **not** needed on Workers — the snapshot goes to R2.
 `VERCEL_OIDC_TOKEN` is Vercel-only — not needed.
+
+### GitHub OAuth App (web sign-in)
+
+Web accounts sign in with GitHub instead of a password (scrypt cannot run inside the
+free 10 ms CPU budget). Create one OAuth App under
+https://github.com/settings/developers → "New OAuth App":
+
+- **Homepage URL:** `https://<worker host>` (e.g. `https://archivepool.workers.dev`
+  or your custom domain).
+- **Authorization callback URL:** `https://<worker host>/api/auth/github/callback`.
+- Scope is the built-in `read:user` — nothing else to grant.
+
+Then set the app's Client ID and generated Client Secret as the two
+`wrangler secret put` values above. The flow costs two outbound fetches and a few
+`crypto.subtle` HMAC/SHA-256 ops per callback — well inside the free request budget.
+Legacy accounts claim their old username with an existing API key
+(`POST /api/auth/github/claim`) or an admin-approved `github_claims` row; new users
+just pick a free username. Deployments that keep password login (non-Workers) get the
+same GitHub button alongside the password form.
 
 ## Deploy
 
@@ -75,7 +96,8 @@ are needed; they already loop `?batch=` calls until `done`.
 
 ```bash
 # .dev.vars holds the same secret names for `wrangler dev` (gitignored):
-#   SESSION_SECRET=…, POOL_ENCRYPTION_KEY=…, POOL_CLIENT_KEY=…, ADMIN_TOKEN_HASH=…, CRON_SECRET=…
+#   SESSION_SECRET=…, POOL_ENCRYPTION_KEY=…, POOL_CLIENT_KEY=…, ADMIN_TOKEN_HASH=…, CRON_SECRET=…,
+#   GITHUB_CLIENT_ID=…, GITHUB_CLIENT_SECRET=…
 # Hyperdrive in dev: wrangler.jsonc's localConnectionString points at localhost:5432 —
 # set it to a local Postgres (or the Neon string for a read-only check).
 pnpm preview:cf     # build + wrangler dev
@@ -111,14 +133,16 @@ curl http://localhost:8787/api/status
 
 ## Known limits on the free tier
 
-- **Web login/signup are disabled on Workers — by design.** `scrypt(N=16384)`
+- **Web password login/signup are disabled on Workers — by design.** `scrypt(N=16384)`
   intentionally burns ~30–80 ms of CPU per verify — that is the brute-force defense, and
   the stored hashes cannot be verified cheaper, so on Workers `/api/auth/login` and
-  `/api/auth/signup` fail fast: `503 {"error":"web_login_unavailable"}`
-  (`webLoginDisabled()` in `lib/cf-env.ts`; scrypt itself is untouched). Admin-token
-  (`sha256`) and session-cookie (`hmac`) auth are unaffected, and the dashboard pages
-  simply surface the 503. To restore web login, move to Workers Paid ($5/mo, 30 s CPU)
-  and set the `CF_WEB_LOGIN_ENABLED` var to `"true"` — no code change.
+  `/api/auth/signup` fail fast: `503 {"error":"web_login_unavailable"}` pointing at
+  GitHub sign-in (`webLoginDisabled()` in `lib/cf-env.ts`; scrypt itself is untouched
+  and lives in `lib/passwords.ts`, lazy-imported so the Workers path never loads it).
+  Browser sign-in uses GitHub OAuth (see above); admin-token (`sha256`) and
+  session-cookie (`hmac`) auth are unaffected. To restore password login, move to
+  Workers Paid ($5/mo, 30 s CPU) and set the `CF_WEB_LOGIN_ENABLED` var to `"true"` —
+  no code change.
 - **First request on a cold isolate** pays one TCP+SCRAM handshake per new pool
   connection (a few ms CPU) — Hyperdrive keeps this rare by pooling upstream.
 - **`use_count`/`last_login` best-effort writes** ride `ctx.waitUntil` on Workers —

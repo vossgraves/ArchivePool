@@ -2,7 +2,7 @@
 import { NextResponse, type NextRequest } from "next/server"
 import { cfWaitUntil, webLoginDisabled } from "@/lib/cf-env"
 import { setSessionCookie } from "@/lib/sessions"
-import { findUserByUsername, updateLastLogin, verifyPassword } from "@/lib/users"
+import { findUserByUsername, updateLastLogin } from "@/lib/users"
 import { clientIp, rateLimit, tooManyRequests } from "@/lib/rate-limit"
 
 export const dynamic = "force-dynamic"
@@ -23,7 +23,7 @@ export async function POST(req: NextRequest) {
       {
         error: "web_login_unavailable",
         detail:
-          "Web accounts are disabled on this deployment — the free-tier CPU budget cannot run the password hash. Use bearer-token read keys and the reporting API instead.",
+          "Password sign-in is unavailable on this deployment — use Sign in with GitHub instead (/api/auth/github/start), or bearer read keys programmatically.",
       },
       { status: 503, headers: { "cache-control": "private, no-store" } },
     )
@@ -48,6 +48,9 @@ export async function POST(req: NextRequest) {
   if (!perIp.ok) return tooManyRequests(perIp.retryAfterSec, "login")
 
   const user = await findUserByUsername(username)
+  // Lazy-imported: the scrypt module never loads on the Workers path (it early-returns
+  // above), keeping the ~30-80 ms hash — and its code — out of free-tier requests.
+  const { verifyPassword } = await import("@/lib/passwords")
   // Uniform error for unknown user / wrong password / disabled account so the
   // response cannot be used to enumerate registered usernames.
   if (!user || user.disabled || !(await verifyPassword(password, user.passwordHash))) {

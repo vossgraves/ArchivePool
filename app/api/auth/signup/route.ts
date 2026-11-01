@@ -2,7 +2,7 @@
 import { NextResponse, type NextRequest } from "next/server"
 import { webLoginDisabled } from "@/lib/cf-env"
 import { setSessionCookie } from "@/lib/sessions"
-import { countRecentUsersByIpUa, createUser, findUserByUsername, validateCredentials } from "@/lib/users"
+import { USERNAME_PATTERN, countRecentUsersByIpUa, createUser, findUserByUsername } from "@/lib/users"
 
 export const dynamic = "force-dynamic"
 
@@ -12,7 +12,7 @@ export async function POST(req: NextRequest) {
       {
         error: "web_login_unavailable",
         detail:
-          "Web accounts are disabled on this deployment — the free-tier CPU budget cannot run the password hash.",
+          "Password sign-up is unavailable on this deployment — use Sign in with GitHub instead (/api/auth/github/start), which also covers legacy username claims.",
       },
       { status: 503, headers: { "cache-control": "private, no-store" } },
     )
@@ -27,7 +27,12 @@ export async function POST(req: NextRequest) {
   const username = body.username?.trim().toLowerCase() ?? ""
   const password = body.password ?? ""
 
-  const problem = validateCredentials(username, password)
+  const problem =
+    !USERNAME_PATTERN.test(username)
+      ? "Username must be 3-24 characters: lowercase letters, digits, underscores."
+      : password.length < 8 || password.length > 128
+        ? "Password must be 8-128 characters."
+        : null
   if (problem) {
     return NextResponse.json({ error: "invalid_input", detail: problem }, { status: 400 })
   }
@@ -52,7 +57,9 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const user = await createUser(username, password, ip, ua)
+  // Lazy-imported for the same reason as the login route's verifyPassword.
+  const { hashPassword } = await import("@/lib/passwords")
+  const user = await createUser(username, await hashPassword(password), ip, ua)
   await setSessionCookie(user.id)
   return NextResponse.json({ username: user.username })
 }
