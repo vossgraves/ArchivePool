@@ -4,7 +4,7 @@ import { and, eq, sql } from "drizzle-orm"
 import { db } from "@/lib/db"
 import { accountEntries, poolState } from "@/lib/db/schema"
 import { decryptAtRest, encryptAtRest } from "@/lib/crypto"
-import { budgetedFetch, FetchBudgetExhausted } from "./cf-env"
+import { budgetedFetch, FetchBudgetExhausted, RowFetchBudgetExhausted } from "./cf-env"
 import { qobuzLogin, scrapeQobuzAppSecret, type QobuzLoginResult } from "./qobuz-oauth"
 import { TIDAL_CLIENT_ID, TIDAL_CLIENT_SECRET } from "./tidal-oauth"
 import { fingerprint, type Kind, type Service, type Status } from "./sources"
@@ -782,7 +782,7 @@ async function tryRefreshTidalToken(
     // so the claim is released with NO cooldown and the throw propagates for the
     // sweep to stop the batch. Successful rotations above already kept their new
     // credentials via finish({ payload }).
-    if (e instanceof FetchBudgetExhausted) {
+    if (e instanceof FetchBudgetExhausted || e instanceof RowFetchBudgetExhausted) {
       await finish()
       throw e
     }

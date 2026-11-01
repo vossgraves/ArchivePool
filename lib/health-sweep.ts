@@ -4,7 +4,14 @@ import { atRestEncryptionEnabled, decryptAtRest, encryptAtRest } from "@/lib/cry
 import { db } from "@/lib/db"
 import { accountEntries, healthLog, instanceEntries } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
-import { FetchBudgetExhausted, fetchBudgetExceeded } from "@/lib/cf-env"
+import {
+  FetchBudgetExhausted,
+  RowFetchBudgetExhausted,
+  fetchBudgetExceeded,
+  fetchBudgetRemaining,
+  rowFetchExhausted,
+  runWithFetchCeiling,
+} from "@/lib/cf-env"
 import { runCheck } from "@/lib/health"
 import type { Kind, Service } from "@/lib/sources"
 
@@ -18,6 +25,12 @@ const BATCH_CONCURRENCY = 3
 // upstream fetches (session exchange, claim poll) plus its encryption and SQL writes —
 // up to ~4 subrequests a row, so 12 keeps a call under the 50-subrequest ceiling.
 const ATTEMPT_MAX = 12
+// A single row may not burn the whole request budget: pathological entries (Qobuz
+// secret-heal loops, long redirect chains) get a per-entry fetch ceiling. A batch only
+// STARTS a row when a full ceiling still fits the remaining request budget; a row that
+// hits the ceiling is an explicit no-verdict skip (starved) — consumed, so the cursor
+// still advances past it and it can never starve the queue.
+const PER_ENTRY_FETCH_MAX = 24
 // A cursor before every real row in the stalest-first order: pending=1 is the leading
 // rank and ts=0/id=0 precedes any row (ids start at 1). Returned when a batch is cut
 // before its first row so the driver retries the same position instead of a null.
@@ -78,6 +91,9 @@ export interface HealthSweepSummary {
   checked: number
   /** Rows that got no verdict this call — fresh entries plus no-verdict skips. */
   skipped: number
+  /** Entries that burned through their per-entry fetch ceiling — consumed as a
+   *  no-verdict skip (no dead verdict, no cooldown) so the cursor still advances. */
+  starved: number
   disabled: number
   reenabled: number
   /** Stale rows consumed this call (checked + skipped-without-verdict). */
@@ -167,6 +183,7 @@ export async function runHealthSweep(
   let i = 0
   let inFlight = 0
   let checked = 0
+  let starved = 0
   let disabled = 0
   let reenabled = 0
 
@@ -178,7 +195,8 @@ export async function runHealthSweep(
   // can neither starve the tail nor fake `done`. The hard floor under both caps is the
   // fetch budget itself (chargeFetch in lib/cf-env): ~40 real subrequests per request,
   // enforced at the socket, not estimated.
-  const attempt = async (entry: (typeof stale)[number]) => {
+  const attempt = async (entry: (typeof stale)[number]) =>
+    runWithFetchCeiling(PER_ENTRY_FETCH_MAX, async () => {
     const table = entry.kind === "account" ? accountEntries : instanceEntries
     const plaintextPayload = decryptAtRest(entry.payload)
     // Migrate rows written by older deployments before checking. A Tidal check may rotate its
@@ -193,6 +211,9 @@ export async function runHealthSweep(
     // error handling. Discard it — this row counts as NOT consumed and the batch
     // stops, so the cursor ends before it and it is retried with a fresh budget.
     if (fetchBudgetExceeded()) throw new FetchBudgetExhausted()
+    // Same guard for the per-entry ceiling: a result computed past it is unreliable —
+    // report the row starved and advance the cursor instead of trusting a verdict.
+    if (rowFetchExhausted()) throw new RowFetchBudgetExhausted()
     // A skipped result means the check never reached a verdict (refresh cooling, claim lost):
     // nothing persisted — no counter advance, no verdict overwrite, no health_log row.
     if (result.skipped) return
@@ -238,7 +259,7 @@ export async function runHealthSweep(
       latencyMs: result.latencyMs,
       detail: result.detail,
     })
-  }
+    })
 
   let budgetHit = false
   // Rows whose attempt RETURNED (verdict persisted or clean no-verdict skip) are the
@@ -255,6 +276,13 @@ export async function runHealthSweep(
       i < queue.length &&
       (limit == null || (checked + inFlight < limit && i < maxAttempts))
     ) {
+      // Start a row only when the request still holds a full per-entry ceiling —
+      // otherwise end the batch before it; it stays unconsumed and leads the next
+      // call's queue (reported via budgetExhausted so the driver keeps retrying).
+      if (fetchBudgetRemaining() < PER_ENTRY_FETCH_MAX) {
+        budgetHit = true
+        break
+      }
       const idx = i++
       const entry = queue[idx]
       inFlight++
@@ -264,6 +292,9 @@ export async function runHealthSweep(
       } catch (e) {
         if (e instanceof FetchBudgetExhausted) {
           budgetHit = true
+        } else if (e instanceof RowFetchBudgetExhausted) {
+          starved++ // no verdict, no cooldown — but consumed, so the cursor moves on
+          finished[idx] = true
         } else {
           throw e
         }
@@ -297,6 +328,7 @@ export async function runHealthSweep(
   return {
     checked,
     skipped,
+    starved,
     disabled,
     reenabled,
     attempted,

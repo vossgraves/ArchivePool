@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import "server-only"
+import { AsyncLocalStorage } from "node:async_hooks"
 import { getCloudflareContext } from "@opennextjs/cloudflare"
 
 /**
@@ -100,7 +101,45 @@ export function chargeFetch(): void {
   if (ctx == null) return
   const used = fetchSpend.get(ctx) ?? 0
   if (used >= FETCH_BUDGET) throw new FetchBudgetExhausted()
+  const row = rowFetchBudget.getStore()
+  if (row) {
+    if (row.remaining <= 0) throw new RowFetchBudgetExhausted()
+    row.remaining--
+  }
   fetchSpend.set(ctx, used + 1)
+}
+
+/** Thrown when one entry's check burns past its per-entry fetch ceiling. */
+export class RowFetchBudgetExhausted extends Error {
+  constructor() {
+    super("per-entry fetch ceiling exhausted")
+    this.name = "RowFetchBudgetExhausted"
+  }
+}
+
+// Per-entry fetch ceiling, scoped to one attempt's async context — concurrent rows on
+// the same request isolate their counters through AsyncLocalStorage (nodejs_compat is
+// on for this worker; anywhere a context is absent the ceiling simply does not apply).
+const rowFetchBudget = new AsyncLocalStorage<{ remaining: number }>()
+
+/** Run [work] with a per-entry fetch ceiling — a row burning past it throws
+ *  RowFetchBudgetExhausted. */
+export function runWithFetchCeiling<T>(ceiling: number, work: () => Promise<T>): Promise<T> {
+  return rowFetchBudget.run({ remaining: ceiling }, work)
+}
+
+/** True once the current per-entry ceiling is spent — a result computed after this
+ *  point is tainted (a check's own catch may have flattened the throw into a verdict). */
+export function rowFetchExhausted(): boolean {
+  const store = rowFetchBudget.getStore()
+  return store != null && store.remaining <= 0
+}
+
+/** Fetches still available to this request under the budget — Infinity off Workers. */
+export function fetchBudgetRemaining(): number {
+  const ctx = cfExecutionContext()
+  if (ctx == null) return Number.POSITIVE_INFINITY
+  return Math.max(0, FETCH_BUDGET - (fetchSpend.get(ctx) ?? 0))
 }
 
 /**
@@ -116,6 +155,37 @@ export function fetchBudgetExceeded(): boolean {
 const MAX_REDIRECT_HOPS = 5
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
 
+// Credential headers that must never follow a redirect onto another origin. The
+// explicit denylist covers the canonical names; the pattern catches this app's
+// provider-specific tokens (media-user-token, x-user-auth-token, x-*-token,
+// *-user-token, and friends).
+const HEADER_DENYLIST = new Set(["authorization", "proxy-authorization", "cookie"])
+const CREDENTIAL_HEADER = /token|auth|cookie/i
+
+function stripCredentialHeaders(src: HeadersInit | undefined): Headers {
+  const out = new Headers()
+  new Headers(src ?? undefined).forEach((value, name) => {
+    if (!HEADER_DENYLIST.has(name) && !CREDENTIAL_HEADER.test(name)) out.set(name, value)
+  })
+  return out
+}
+
+// Module-load self-check: every credential name the pool actually sends must be caught
+// by the denylist or the pattern — extend both together or redirects leak tokens
+// cross-origin.
+for (const name of [
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+  "media-user-token",
+  "x-user-auth-token",
+  "x-user-token",
+] as const) {
+  if (!HEADER_DENYLIST.has(name) && !CREDENTIAL_HEADER.test(name)) {
+    throw new Error(`budgetedFetch credential denylist does not cover "${name}"`)
+  }
+}
+
 /**
  * fetch() with the per-request subrequest budget applied — including redirects.
  * Cloudflare counts every redirect hop as its own subrequest, so redirects are
@@ -130,9 +200,17 @@ export async function budgetedFetch(url: string, init?: RequestInit): Promise<Re
   let current = url
   let method = (init?.method ?? "GET").toUpperCase()
   let body = init?.body ?? null
+  const firstOrigin = new URL(url).origin
   for (let hop = 0; ; hop++) {
     chargeFetch()
-    const res = await fetch(current, { ...init, method, body, redirect: "manual" })
+    // A hop to a DIFFERENT origin than the original request drops every credential
+    // header — a redirect to attacker-controlled infrastructure must not inherit the
+    // caller's Authorization/Cookie/provider tokens.
+    const headers =
+      new URL(current).origin === firstOrigin
+        ? init?.headers
+        : stripCredentialHeaders(init?.headers)
+    const res = await fetch(current, { ...init, method, body, headers, redirect: "manual" })
     if (!REDIRECT_STATUSES.has(res.status) || hop >= MAX_REDIRECT_HOPS) return res
     const location = res.headers.get("location")
     if (!location) return res

@@ -210,7 +210,7 @@ Runs one health sweep and republishes the instance snapshot. Used by the GitHub 
 workflow in this repo every 6 hours.
 
 ```json
-{ "ok": true, "checked": 0, "skipped": 0, "disabled": 0, "reenabled": 0, "remaining": 0, "done": true, "ranAt": "..." }
+{ "ok": true, "checked": 0, "skipped": 0, "starved": 0, "disabled": 0, "reenabled": 0, "remaining": 0, "done": true, "ranAt": "..." }
 ```
 
 Optional `?batch=N&cursor=C` (N: 1–10, default 8) runs at most N real checks — and
@@ -223,6 +223,10 @@ outbound-fetch budget (40 on Workers, unlimited elsewhere) can stop a call earli
 `budgetedFetch` charges every probe including each redirect hop — when `budgetExhausted`
 is true the cursor already ends before the cut-off row, so the same loop just resumes it
 with a fresh budget; a verdict computed after the budget tripped is never persisted.
+Each row additionally has a 24-fetch ceiling: a batch only starts a row when the
+request still holds a full ceiling, and a row that burns through it is reported as a
+consumed no-verdict skip under `starved` (no dead verdict, no cooldown) — the cursor
+moves past it, so one pathological entry can never starve the queue.
 `attempted`
 counts the stale rows consumed, `remaining` the ones still waiting after the cursor;
 `done` is true when `remaining` is 0, and only the finishing call republishes the
