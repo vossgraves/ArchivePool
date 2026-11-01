@@ -9,13 +9,15 @@ import { runCheck } from "@/lib/health"
 import { fingerprint, maskLabel, normalizeUrl, type Service } from "@/lib/sources"
 
 export interface InstanceSyncResult {
-  fetched: number // unique URLs handed in
+  fetched: number // unique URLs handed in (the whole candidate list, before any slicing)
   skipped: number // already in pool and recently checked (by fingerprint)
   checked: number // actually health-checked this run
   added: number // passed check, newly inserted
   updated: number // already existed, status updated
   failed: number // health check did not pass
   rejected: number // reachable but not premium/hi-res — not added (new) per pool policy
+  /** Present only when the call was bounded (opts.limit): where the next slice starts. */
+  batch?: { total: number; offset: number; nextOffset: number; done: boolean }
 }
 
 /** Instances checked more recently than this are skipped, so a sweep never hammers live hosts. */
@@ -47,20 +49,27 @@ const DEFAULT_CONCURRENCY = 5
  * @param opts.note        optional origin marker stored on new payloads (encrypted at rest)
  * @param opts.recheckWindowMs  skip alive entries checked more recently than this
  * @param opts.concurrency number of instances health-checked in parallel
+ * @param opts.offset/opts.limit  bound this call to a slice of the sorted candidate list.
+ *   Hosts with per-request ceilings (Workers free tier) page through the same
+ *   deterministic list across calls; leave unset everywhere else.
  */
 export async function syncInstanceUrls(
   service: Service,
   urls: string[],
-  opts: { note?: string; recheckWindowMs?: number; concurrency?: number } = {},
+  opts: { note?: string; recheckWindowMs?: number; concurrency?: number; offset?: number; limit?: number } = {},
 ): Promise<InstanceSyncResult> {
   await ensureSchema()
 
   const recheckWindowMs = opts.recheckWindowMs ?? DEFAULT_RECHECK_WINDOW_MS
   const concurrency = opts.concurrency ?? DEFAULT_CONCURRENCY
 
+  // Sorted so a bounded run slices a list that is identical on every call — the
+  // scheduler pages through candidates by offset, and feed order is arbitrary.
   const allUrls = Array.from(
     new Set(urls.map((u) => normalizeUrl(u)).filter((u) => u.startsWith("http"))),
-  )
+  ).sort()
+  const offset = Math.max(0, opts.offset ?? 0)
+  const work = opts.limit == null ? allUrls : allUrls.slice(offset, offset + Math.max(1, opts.limit))
 
   const result: InstanceSyncResult = {
     fetched: allUrls.length,
@@ -192,12 +201,17 @@ export async function syncInstanceUrls(
   }
 
   let next = 0
-  const workers = Array.from({ length: Math.min(concurrency, allUrls.length) }, async () => {
-    while (next < allUrls.length) {
-      await checkAndUpsert(allUrls[next++])
+  const workers = Array.from({ length: Math.min(concurrency, work.length) }, async () => {
+    while (next < work.length) {
+      await checkAndUpsert(work[next++])
     }
   })
   await Promise.all(workers)
+
+  if (opts.limit != null) {
+    const nextOffset = offset + work.length
+    result.batch = { total: allUrls.length, offset, nextOffset, done: nextOffset >= allUrls.length }
+  }
 
   return result
 }

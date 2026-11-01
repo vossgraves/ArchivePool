@@ -1,17 +1,17 @@
 name: Monochrome instance sync cron
 
 # Pings the deployed site's /api/cron/monochrome endpoint every 12 hours. The endpoint fetches
-# monochrome.st/instances.json, health-checks any new Tidal instances, and adds passing ones to
-# the pool. Host-agnostic: it just curls a URL, so it works on Vercel, Fly, a VPS, or anywhere.
+# each instance feed (monochrome.st, the SpotiFLAC lists), health-checks candidates, and adds
+# passing ones to the pool. Host-agnostic: it just curls a URL, so it works on Vercel,
+# Cloudflare Workers, Fly, a VPS, or anywhere else.
 #
-# This is the scheduler even on Vercel. vercel.json crons are capped at once per DAY on the
-# Hobby plan -- and a more frequent expression there makes the deployment itself fail. Keep this
-# workflow as the real schedule; only move to a native vercel.json cron on Pro, and delete this
-# file if you do, so the sync does not run twice.
+# This is the scheduler even on serverless hosts — see health-cron.yml for why platform crons
+# are not used. Only move to a native platform cron where the request budget allows, and
+# delete this file if you do, so the sync does not run twice.
 #
 # Required repo secrets (Settings -> Secrets and variables -> Actions):
-#   HEALTH_URL   - Base URL of the deployed site, e.g. https://archivepool.vercel.app
-#   CRON_SECRET  - Same value as the CRON_SECRET env var on the deployed site.
+#   HEALTH_URL   - Base URL of the deployed site, e.g. https://archivepool.workers.dev
+#   CRON_SECRET  - Same value as the CRON_SECRET secret on the deployed site.
 
 on:
   schedule:
@@ -23,7 +23,7 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Sync monochrome instances
+      - name: Sync instance feeds (batched)
         env:
           HEALTH_URL: ${{ secrets.HEALTH_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
@@ -33,14 +33,53 @@ jobs:
             exit 1
           fi
           base="${HEALTH_URL%/}"
-          echo "Pinging $base/api/cron/monochrome"
+          # Each feed is paged in bounded slices for the same reason the health sweep is
+          # batched: a sync's live probes exceed the per-request ceilings on the Workers
+          # free tier, so the endpoint checks up to 8 candidates per call and reports
+          # batch.done while candidates remain. One feed failing must not starve the
+          # others — a dead feed is logged and skipped, and the run only goes red when
+          # every feed failed.
+          failed=0
+          for feed in monochrome spotiflac-tidal spotiflac-qobuz; do
+            offset=0
+            feed_done=0
+            for i in $(seq 1 25); do
+              code=$(curl -sS -o /tmp/body.txt -w "%{http_code}" \
+                -H "Authorization: Bearer $CRON_SECRET" \
+                "$base/api/cron/monochrome?feed=$feed&offset=$offset&limit=8")
+              echo "$feed slice @$offset: HTTP $code"
+              cat /tmp/body.txt
+              echo
+              case "$code" in
+                2*) ;;
+                *) echo "Feed $feed failed with HTTP $code" >&2
+                   failed=$((failed + 1)); feed_done=2; break ;;
+              esac
+              if grep -q '"done":true' /tmp/body.txt; then
+                feed_done=1
+                break
+              fi
+              next=$(grep -o '"nextOffset":[0-9]*' /tmp/body.txt | head -1 | cut -d: -f2)
+              if [ -z "$next" ]; then
+                echo "Feed $feed returned no nextOffset — aborting its loop" >&2
+                failed=$((failed + 1)); feed_done=2; break
+              fi
+              offset=$next
+            done
+            [ "$feed_done" -eq 0 ] && { echo "Feed $feed did not finish within 25 slices" >&2; failed=$((failed + 1)); }
+          done
+          if [ "$failed" -ge 3 ]; then
+            echo "All instance feeds failed" >&2
+            exit 1
+          fi
+          echo "Publishing instance snapshot"
           code=$(curl -sS -o /tmp/body.txt -w "%{http_code}" \
             -H "Authorization: Bearer $CRON_SECRET" \
-            "$base/api/cron/monochrome")
-          echo "HTTP $code"
+            "$base/api/cron/monochrome?publish=1")
+          echo "publish: HTTP $code"
           cat /tmp/body.txt
           echo
           case "$code" in
             2*) exit 0 ;;
-            *) echo "Monochrome sync failed with HTTP $code" >&2; exit 1 ;;
+            *) echo "Snapshot publish failed with HTTP $code" >&2; exit 1 ;;
           esac

@@ -18,7 +18,7 @@ export async function POST(req: NextRequest) {
   if (!actor) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
 
   const [sweepResult, monoResult] = await Promise.all([
-    runHealthSweep(true),
+    runHealthSweep({ force: true }),
     syncMonochromeInstances(),
   ])
 

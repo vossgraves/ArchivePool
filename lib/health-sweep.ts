@@ -51,7 +51,34 @@ async function allPoolEntries(): Promise<PoolEntry[]> {
   ]
 }
 
-export async function runHealthSweep(force = false) {
+export interface HealthSweepOptions {
+  /** Re-check every non-removed entry, ignoring the stale window. */
+  force?: boolean
+  /**
+   * Cap on entries checked this call. Hosts with per-request ceilings (the Workers
+   * free tier: 50 subrequests, ~10 ms CPU) run the sweep as consecutive batches —
+   * each call takes the stalest entries and stamps them fresh, so the next call
+   * picks up where this one stopped and no cursor has to be carried anywhere.
+   * Omit on hosts without those ceilings (Vercel, Railway, a one-off admin run).
+   */
+  limit?: number
+}
+
+export interface HealthSweepSummary {
+  checked: number
+  skipped: number
+  disabled: number
+  reenabled: number
+  /** Stale entries still waiting after this call — always 0 for an unbatched sweep. */
+  remaining: number
+  /** False while a batch-driving caller must invoke the sweep again to finish it. */
+  done: boolean
+}
+
+export async function runHealthSweep(
+  options: HealthSweepOptions | boolean = {},
+): Promise<HealthSweepSummary> {
+  const { force = false, limit } = typeof options === "boolean" ? { force: options } : options
   await ensureSchema()
   const allEntries = await allPoolEntries()
   if (allEntries.some((entry) => entry.kind === "account") && !atRestEncryptionEnabled()) {
@@ -61,7 +88,7 @@ export async function runHealthSweep(force = false) {
   const now = Date.now()
   // Entries parked in `pending` by app `dead` reports are neither servable nor dead, so they are
   // re-verified promptly instead of waiting out the 6h stale window.
-  const entries = force
+  const stale = force
     ? allEntries
     : allEntries.filter(
         (e) =>
@@ -70,7 +97,20 @@ export async function runHealthSweep(force = false) {
           now - new Date(e.lastCheckedAt).getTime() > STALE_AFTER_MS,
       )
 
-  const skipped = allEntries.length - entries.length
+  // Deterministic order, stalest first, so every batch makes progress the next call can rely on:
+  // a checked row's lastCheckedAt turns fresh and drops it out of this set entirely. Parked
+  // entries lead — a report-demoted row has no usable verdict until it is re-verified.
+  stale.sort(
+    (a, b) =>
+      Number(b.status === "pending") - Number(a.status === "pending") ||
+      (a.lastCheckedAt ? new Date(a.lastCheckedAt).getTime() : 0) -
+        (b.lastCheckedAt ? new Date(b.lastCheckedAt).getTime() : 0) ||
+      a.id - b.id,
+  )
+
+  const entries = limit == null ? stale : stale.slice(0, Math.max(0, limit))
+  const skipped = allEntries.length - stale.length
+  const remaining = stale.length - entries.length
   let checked = 0
   let disabled = 0
   let reenabled = 0
@@ -133,7 +173,7 @@ export async function runHealthSweep(force = false) {
   })
 
   await db.execute(sql`delete from health_log where checked_at < now() - interval '30 days'`)
-  return { checked, skipped, disabled, reenabled }
+  return { checked, skipped, disabled, reenabled, remaining, done: remaining === 0 }
 }
 
 /**

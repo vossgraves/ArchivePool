@@ -210,12 +210,28 @@ Runs one health sweep and republishes the instance snapshot. Used by the GitHub 
 workflow in this repo every 6 hours.
 
 ```json
-{ "ok": true, "checked": 0, "skipped": 0, "disabled": 0, "reenabled": 0, "ranAt": "..." }
+{ "ok": true, "checked": 0, "skipped": 0, "disabled": 0, "reenabled": 0, "remaining": 0, "done": true, "ranAt": "..." }
 ```
+
+Optional `?batch=N` (1–10, default 8) checks at most N stalest entries per call for hosts
+with a per-request budget (Cloudflare Workers free tier). Batches take the stalest entries
+first — a checked row is fresh again, so the next call continues where this one stopped.
+`remaining` counts the stale entries still waiting; `done` is true when it reaches 0, and
+only the finishing call republishes the snapshot. The scheduled workflow loops until
+`done:true`. Called without `batch`, the whole sweep still runs in one request.
 
 ### `GET /api/cron/monochrome`
 
 Runs the monochrome (Tidal/Qobuz proxy) instance sync without the full sweep.
+
+Batched mode for request-budgeted hosts:
+
+- `?feed=NAME` — `monochrome`, `spotiflac-tidal` or `spotiflac-qobuz`; one feed per call.
+- `&offset=K&limit=N` — slice of that feed's sorted candidate list (limit 1–10, default 8).
+  The response's `batch` object carries `{ total, offset, nextOffset, done }`; repeat with
+  `offset=nextOffset` until `done`.
+- `?publish=1` — republish the instance snapshot once every feed has drained (the workflows
+  call it after their feed loops). No parameters: the whole sync still runs in one request.
 
 ### `GET /api/cron/purge-dead`
 
