@@ -4,6 +4,7 @@ import { and, eq, sql } from "drizzle-orm"
 import { db } from "@/lib/db"
 import { accountEntries, poolState } from "@/lib/db/schema"
 import { decryptAtRest, encryptAtRest } from "@/lib/crypto"
+import { chargeFetch } from "./cf-env"
 import { qobuzLogin, scrapeQobuzAppSecret, type QobuzLoginResult } from "./qobuz-oauth"
 import { TIDAL_CLIENT_ID, TIDAL_CLIENT_SECRET } from "./tidal-oauth"
 import { fingerprint, type Kind, type Service, type Status } from "./sources"
@@ -55,6 +56,7 @@ async function ampDevToken(deadline?: AbortSignal): Promise<string | null> {
     return ampTokenCache.token
   }
   try {
+    chargeFetch()
     const home = await fetch(APPLE_MUSIC_HOME, {
       headers: { "user-agent": APPLE_UA },
       signal: probeSignal(deadline),
@@ -67,6 +69,7 @@ async function ampDevToken(deadline?: AbortSignal): Promise<string | null> {
       console.warn("[health] apple dev token: no web-player bundle script found on music.apple.com")
       return ampTokenCache?.token ?? null
     }
+    chargeFetch()
     const jsRes = await fetch(`https://music.apple.com/${bundle}`, {
       headers: { "user-agent": APPLE_UA },
       signal: probeSignal(deadline),
@@ -103,6 +106,7 @@ async function timedFetch(
   const signal = deadline ? AbortSignal.any([controller.signal, deadline]) : controller.signal
   const started = Date.now()
   try {
+    chargeFetch()
     const res = await fetch(url, {
       ...init,
       signal,
@@ -688,6 +692,7 @@ async function tryRefreshTidalToken(
         grant_type: "refresh_token",
         scope,
       })
+      chargeFetch()
       const res = await fetch(TIDAL_TOKEN_ENDPOINT, {
         method: "POST",
         headers: {

@@ -218,7 +218,11 @@ at most min(2N, 12) consumed rows — per call for hosts with a per-request budg
 (Cloudflare Workers free tier). Consumed counts rows whose check is skipped without a
 verdict (refresh cooling, a lost claim), because a bail-out can still spend upstream
 fetches. `cursor` in the response is the keyset of the last consumed row; pass it back as
-`cursor=` so a skipped prefix cannot head every batch and starve the tail. `attempted`
+`cursor=` so a skipped prefix cannot head every batch and starve the tail. A per-request
+outbound-fetch budget (40 on Workers, unlimited elsewhere) can stop a call earlier — when
+`budgetExhausted` is true the cursor already ends before the cut-off row, so the same loop
+just resumes it with a fresh budget; a verdict computed after the budget tripped is never
+persisted. `attempted`
 counts the stale rows consumed, `remaining` the ones still waiting after the cursor;
 `done` is true when `remaining` is 0, and only the finishing call republishes the
 snapshot. The scheduled workflow loops until `done:true`. Called without `batch`, the

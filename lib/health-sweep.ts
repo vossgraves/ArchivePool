@@ -4,6 +4,7 @@ import { atRestEncryptionEnabled, decryptAtRest, encryptAtRest } from "@/lib/cry
 import { db } from "@/lib/db"
 import { accountEntries, healthLog, instanceEntries } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
+import { FetchBudgetExhausted, fetchBudgetExceeded } from "@/lib/cf-env"
 import { runCheck } from "@/lib/health"
 import type { Kind, Service } from "@/lib/sources"
 
@@ -83,6 +84,8 @@ export interface HealthSweepSummary {
   done: boolean
   /** Keyset of the last row this call consumed — pass back as `?cursor=`. Null unbatched. */
   cursor: string | null
+  /** The call stopped early because the request's outbound-fetch budget was spent. */
+  budgetExhausted: boolean
 }
 
 /** Position of a row in the stalest-first order — same key the sort applies. */
@@ -110,7 +113,11 @@ function parseCursor(raw: string | undefined): SweepCursor | null {
 
 function afterCursor(e: PoolEntry, c: SweepCursor): boolean {
   const k = cursorKey(e)
-  return k.pending > c.pending || (k.pending === c.pending && (k.ts > c.ts || (k.ts === c.ts && k.id > c.id)))
+  // The order is pending DESC (parked rows first), then lastCheckedAt ASC, then id
+  // ASC — so "after the cursor" means a LOWER pending rank, or equal rank with a
+  // greater ts, or equal ts with a greater id. (No test harness exists in this
+  // repo; keep this comparator structurally identical to the sort above.)
+  return k.pending < c.pending || (k.pending === c.pending && (k.ts > c.ts || (k.ts === c.ts && k.id > c.id)))
 }
 
 export async function runHealthSweep(
@@ -160,10 +167,13 @@ export async function runHealthSweep(
   let reenabled = 0
 
   // Drain the keyset-filtered list until `limit` verdicts are written, `maxAttempts`
-  // rows are consumed, or it ends. A row whose check is skipped without a verdict (refresh
-  // cooling, claim lost) persists nothing and stays stale; consuming it counts toward the
-  // attempt cap so skips cannot spend unbounded subrequests, and the returned cursor moves
-  // the next call past it — a skipped prefix can neither starve the tail nor fake `done`.
+  // rows are consumed, the per-request fetch budget trips, or it ends. A row whose check
+  // is skipped without a verdict (refresh cooling, claim lost) persists nothing and stays
+  // stale; consuming it counts toward the attempt cap so skips cannot spend unbounded
+  // subrequests, and the returned cursor moves the next call past it — a skipped prefix
+  // can neither starve the tail nor fake `done`. The hard floor under both caps is the
+  // fetch budget itself (chargeFetch in lib/cf-env): ~40 real subrequests per request,
+  // enforced at the socket, not estimated.
   const attempt = async (entry: (typeof stale)[number]) => {
     const table = entry.kind === "account" ? accountEntries : instanceEntries
     const plaintextPayload = decryptAtRest(entry.payload)
@@ -174,6 +184,11 @@ export async function runHealthSweep(
       .set({ payload: encryptAtRest(plaintextPayload) })
       .where(eq(table.id, entry.id))
     const result = await runCheck(entry.service as Service, entry.kind as Kind, plaintextPayload, entry.fingerprint)
+    // A verdict computed after the request's fetch budget tripped is unreliable: the
+    // declining chargeFetch may have been flattened into a "dead" by a check's own
+    // error handling. Discard it — this row counts as NOT consumed and the batch
+    // stops, so the cursor ends before it and it is retried with a fresh budget.
+    if (fetchBudgetExceeded()) throw new FetchBudgetExhausted()
     // A skipped result means the check never reached a verdict (refresh cooling, claim lost):
     // nothing persisted — no counter advance, no verdict overwrite, no health_log row.
     if (result.skipped) return
@@ -221,16 +236,33 @@ export async function runHealthSweep(
     })
   }
 
+  let budgetHit = false
+  // Rows whose attempt RETURNED (verdict persisted or clean no-verdict skip) are the
+  // consumed prefix; a row that hit the fetch budget throws and stays unconsumed, so
+  // the emitted cursor ends before it — done:false and it leads the next batch.
+  const finished = new Array<boolean>(queue.length).fill(false)
   const concurrency = limit == null ? CONCURRENCY : Math.min(CONCURRENCY, BATCH_CONCURRENCY)
   // Total consumption is capped too — a skipped row is still an attempt, and attempts are
   // what spend subrequests (fetches inside a check before it can return skipped).
   const maxAttempts = limit == null ? Number.POSITIVE_INFINITY : Math.min(limit * 2, ATTEMPT_MAX)
   const workers = Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
-    while (i < queue.length && (limit == null || (checked + inFlight < limit && i < maxAttempts))) {
-      const entry = queue[i++]
+    while (
+      !budgetHit &&
+      i < queue.length &&
+      (limit == null || (checked + inFlight < limit && i < maxAttempts))
+    ) {
+      const idx = i++
+      const entry = queue[idx]
       inFlight++
       try {
         await attempt(entry)
+        finished[idx] = true
+      } catch (e) {
+        if (e instanceof FetchBudgetExhausted) {
+          budgetHit = true
+        } else {
+          throw e
+        }
       } finally {
         inFlight--
       }
@@ -242,11 +274,15 @@ export async function runHealthSweep(
   // `attempted` = stale rows this call consumed (checked + no-verdict skips); `remaining` =
   // stale rows it never reached. `skipped` reports every row that got no verdict this call —
   // fresh rows plus no-verdict skips — matching what the callers read it as.
-  const attempted = i
-  const remaining = queue.length - attempted
+  // The consumed prefix ends before the first row whose attempt never returned —
+  // a fetch-budget cut-off guarantees at least one such row exists when it tripped.
+  let consumed = 0
+  while (consumed < queue.length && finished[consumed]) consumed++
+  const attempted = consumed
+  const remaining = queue.length - consumed
   const skipped = allEntries.length - checked - remaining
   const nextCursor =
-    limit == null ? null : i > 0 ? formatCursor(queue[i - 1]) : (rawCursor ?? null)
+    limit == null ? null : consumed > 0 ? formatCursor(queue[consumed - 1]) : (rawCursor ?? null)
   return {
     checked,
     skipped,
@@ -256,6 +292,7 @@ export async function runHealthSweep(
     remaining,
     done: remaining === 0,
     cursor: nextCursor,
+    budgetExhausted: budgetHit,
   }
 }
 

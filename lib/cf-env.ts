@@ -70,6 +70,49 @@ export function webLoginDisabled(): boolean {
   return cfBindings() != null && process.env.CF_WEB_LOGIN_ENABLED !== "true"
 }
 
+/**
+ * Thrown when a request is about to spend one fetch past its outbound-subrequest
+ * budget. It is a control-flow signal, not a verdict: check helpers that swallow it
+ * inside their own error handling return an unreliable result, which callers (the
+ * sweep) must detect via fetchBudgetExceeded() rather than persist.
+ */
+export class FetchBudgetExhausted extends Error {
+  constructor() {
+    super("outbound fetch budget exhausted for this request")
+    this.name = "FetchBudgetExhausted"
+  }
+}
+
+// Per-request spend, keyed on the ExecutionContext — the same lifetime key the pg pool
+// uses, so every request gets its own budget. Workers free tier allows 50 subrequests
+// per request; 40 leaves headroom for the route's own fetches (feed pulls, R2, retries).
+const FETCH_BUDGET = 40
+const fetchSpend = new WeakMap<object, number>()
+
+/**
+ * Charge one outbound fetch to the current request's budget, throwing
+ * FetchBudgetExhausted once the next fetch would cross it. A no-op off Workers —
+ * and anywhere a request context is absent — so callers can charge unconditionally
+ * before every fetch.
+ */
+export function chargeFetch(): void {
+  const ctx = cfExecutionContext()
+  if (ctx == null) return
+  const used = fetchSpend.get(ctx) ?? 0
+  if (used >= FETCH_BUDGET) throw new FetchBudgetExhausted()
+  fetchSpend.set(ctx, used + 1)
+}
+
+/**
+ * True once this request's fetch budget is spent. A check whose declining chargeFetch
+ * was flattened into a result by its own catch still returns — callers must treat any
+ * verdict produced after this point as unreliable rather than persist it.
+ */
+export function fetchBudgetExceeded(): boolean {
+  const ctx = cfExecutionContext()
+  return ctx != null && (fetchSpend.get(ctx) ?? 0) >= FETCH_BUDGET
+}
+
 export function cfWaitUntil(work: Promise<unknown>): void {
   try {
     const full = getCloudflareContext({ async: false }) as unknown as {

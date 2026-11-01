@@ -96,8 +96,12 @@ curl http://localhost:8787/api/status
   until N verdicts or 12 consumed rows (no-verdict skips still spend subrequests) and
   returns a `cursor` keyset so skipped prefixes cannot starve the tail — `remaining`/
   `done` stay truthful; feed slices keyset-paginate on the sorted URL list via
-  `batch.nextAfter`. Response bodies are additive: `attempted`, `cursor`, `remaining`,
-  `done`, `batch{…}` — existing single-shot calls still work.
+  `batch.nextAfter`. Under both caps sits a hard per-request fetch budget
+  (`chargeFetch`, 40 subrequests on Workers) that trips inside the probe helpers; a
+  verdict computed after it is discarded, the cursor ends before that row, and
+  `budgetExhausted:true` marks the stop. Response bodies are additive: `attempted`,
+  `cursor`, `remaining`, `done`, `budgetExhausted`, `batch{…}` — existing
+  single-shot calls still work.
 - **Purge cron** — unchanged (pure SQL, no subrequests).
 - **Response shapes** — all public feeds identical; `s-maxage`/`swr` headers are
   still emitted. `workers.dev` subdomains don't CDN-cache worker responses, so

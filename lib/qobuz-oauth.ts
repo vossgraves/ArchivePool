@@ -9,6 +9,7 @@
 // fetch the player page server-side (no CORS) and scrape it.
 
 import { createHash } from "node:crypto"
+import { chargeFetch } from "./cf-env"
 
 // Public Qobuz web-player app credentials. These are widely known and used by every
 // open-source Qobuz client (streamrip, qobuz-dl, etc.) — they are NOT private.
@@ -71,6 +72,7 @@ export async function qobuzLogin(
     password,
     app_id: QOBUZ_LOGIN_APP_ID,
   })
+  chargeFetch()
   const res = await fetch(LOGIN_URL, {
     method: "POST",
     headers: {
@@ -125,6 +127,7 @@ export async function qobuzLogin(
 export async function scrapeQobuzAppSecret(appId = QOBUZ_APP_ID, deadline?: AbortSignal): Promise<string | null> {
   const { page, origin } = SECRET_SOURCES[appId] ?? SECRET_SOURCES[QOBUZ_APP_ID]
   try {
+    chargeFetch()
     const pageRes = await fetch(page, {
       headers: { "user-agent": UA },
       signal: fetchSignal(deadline),
@@ -146,8 +149,13 @@ export async function scrapeQobuzAppSecret(appId = QOBUZ_APP_ID, deadline?: Abor
     // The secret appears in patterns like: app_secret:"<hex32>" or seed:"<hex32>".
     const secretRe = /(?:app_secret|secret|seed)\s*[:=]\s*"([a-f0-9]{32})"/i
 
-    for (const url of scriptUrls) {
+    // Bound the scrape: the player page lists dozens of bundles, and each is a
+    // subrequest the health sweep now budgets. The app bundle carrying the secret
+    // is always among the first few <script> tags.
+    const BUNDLE_SCAN_MAX = 6
+    for (const url of scriptUrls.slice(0, BUNDLE_SCAN_MAX)) {
       try {
+        chargeFetch()
         const jsRes = await fetch(url, {
           headers: { "user-agent": UA },
           signal: fetchSignal(deadline),
@@ -191,6 +199,7 @@ export async function validateAppSecret(
     `&track_id=${PROBE_TRACK}&format_id=${PROBE_FORMAT}&intent=stream` +
     `&app_id=${encodeURIComponent(appId)}&user_auth_token=${encodeURIComponent(userAuthToken)}`
   try {
+    chargeFetch()
     const res = await fetch(url, {
       headers: { "x-app-id": appId, "x-user-auth-token": userAuthToken, "user-agent": UA },
       cache: "no-store",
