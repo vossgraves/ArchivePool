@@ -1,12 +1,20 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import "server-only"
-import { and, desc, eq } from "drizzle-orm"
+import { and, desc, eq, isNull, or } from "drizzle-orm"
 import { db } from "@/lib/db"
 import { ensureSchema } from "@/lib/db/ensure"
 import { apiKeys, githubClaims, users } from "@/lib/db/schema"
 import { hashKey } from "@/lib/api-keys"
 import { budgetedFetch } from "@/lib/cf-env"
-import { signWithSessionSecret, verifyWithSessionSecret } from "@/lib/sessions"
+import {
+  OAUTH_COOKIE_MAX_AGE_SEC,
+  packOauthCookie,
+  packPendingCookie,
+  readOauthCookie,
+  readPendingCookie,
+  type PendingIdentity,
+} from "@/lib/github-cookies"
+import { signWithSessionSecret } from "@/lib/hmac-cookie"
 
 /**
  * GitHub OAuth sign-in — the web-auth path that fits a Workers free request
@@ -20,13 +28,17 @@ import { signWithSessionSecret, verifyWithSessionSecret } from "@/lib/sessions"
  *                              "pending" cookie that carries the verified identity
  *   /api/auth/github/complete  choose a NEW username -> create account
  *   /api/auth/github/claim     take an EXISTING username -> prove with one of its
- *                              API keys (sha256 lookup), or file a pending claim
- *                              for admin review (/api/admin/claims)
+ *                              active API keys (sha256 lookup) or a revoked key /
+ *                              no key -> pending github_claims row for admin review
+ *
+ * Both cookies are purpose-tagged inside their signed body ("gh-oauth-v1" vs
+ * "gh-pending-v1") and every numeric field passes a canonical regex — a cookie
+ * minted for one step can never be re-presented as the other.
  */
 
 export const GITHUB_OAUTH_COOKIE = "atp_gh_oauth"
 export const GITHUB_PENDING_COOKIE = "atp_gh_pending"
-const OAUTH_COOKIE_MAX_AGE_SEC = 10 * 60
+export { OAUTH_COOKIE_MAX_AGE_SEC }
 export const GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 export const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 export const GITHUB_USER_URL = "https://api.github.com/user"
@@ -49,33 +61,15 @@ function randomUrlSafe(bytes: number): string {
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
 }
 
-function encodeField(value: string): string {
-  return encodeURIComponent(value)
-}
-function decodeField(value: string): string {
-  return decodeURIComponent(value)
-}
-
-// ---------- OAuth transaction cookie: <state>.<verifier>.<expMs>.<hmac> ----------
+// ---------- OAuth transaction cookie ----------
 
 export async function issueOauthCookie(): Promise<{ cookieValue: string; state: string; verifier: string }> {
   const state = randomUrlSafe(16)
   const verifier = randomUrlSafe(32)
-  const exp = Date.now() + OAUTH_COOKIE_MAX_AGE_SEC * 1000
-  const sig = await signWithSessionSecret(`${state}.${verifier}.${exp}`)
-  return { cookieValue: `${state}.${verifier}.${exp}.${sig}`, state, verifier }
+  return { cookieValue: await packOauthCookie(state, verifier), state, verifier }
 }
 
-export async function readOauthCookie(value: string | undefined): Promise<{ state: string; verifier: string } | null> {
-  if (!value) return null
-  const parts = value.split(".")
-  if (parts.length !== 4) return null
-  const [state, verifier, expRaw, sig] = parts
-  const exp = Number.parseInt(expRaw, 10)
-  if (!Number.isFinite(exp) || exp <= Date.now()) return null
-  if (!(await verifyWithSessionSecret(`${state}.${verifier}.${expRaw}`, sig))) return null
-  return { state, verifier }
-}
+export { readOauthCookie }
 
 export function authorizeUrl(origin: string, state: string, challenge: string): string {
   const url = new URL(GITHUB_AUTHORIZE_URL)
@@ -129,26 +123,14 @@ export async function fetchGithubUser(token: string): Promise<GithubIdentity> {
   return { id: data.id, login: data.login }
 }
 
-// ---------- Pending-identity cookie: <githubId>.<login>.<expMs>.<hmac> ----------
-// login is URI-encoded so it can never collide with the field separators.
+// ---------- Pending-identity cookie ----------
 
 export async function issuePendingCookie(identity: GithubIdentity): Promise<string> {
-  const exp = Date.now() + OAUTH_COOKIE_MAX_AGE_SEC * 1000
-  const body = `${identity.id}.${encodeField(identity.login)}.${exp}`
-  return `${body}.${await signWithSessionSecret(body)}`
+  return packPendingCookie(identity.id, identity.login)
 }
 
-export async function readPendingCookie(value: string | undefined): Promise<GithubIdentity | null> {
-  if (!value) return null
-  const parts = value.split(".")
-  if (parts.length !== 4) return null
-  const [idRaw, loginRaw, expRaw, sig] = parts
-  const githubId = Number.parseInt(idRaw, 10)
-  const exp = Number.parseInt(expRaw, 10)
-  if (!Number.isFinite(githubId) || githubId <= 0 || !Number.isFinite(exp) || exp <= Date.now()) return null
-  if (!(await verifyWithSessionSecret(`${idRaw}.${loginRaw}.${expRaw}`, sig))) return null
-  return { id: githubId, login: decodeField(loginRaw) }
-}
+export type { PendingIdentity }
+export { readPendingCookie }
 
 // ---------- users / claims ----------
 
@@ -157,36 +139,46 @@ export async function findUserByGithubId(githubId: number) {
   return row ?? null
 }
 
-/** Attach a GitHub subject to an existing account. Returns the updated user. */
+/**
+ * Attach a GitHub subject to an existing account — ATOMICALLY: the UPDATE only
+ * lands while the row's github_id is still NULL (or already this same id), so two
+ * concurrent claimants cannot both win. Null = the row was claimed in between.
+ */
 export async function linkGithubToUser(userId: number, githubId: number) {
   const [row] = await db
     .update(users)
     .set({ githubId })
-    .where(eq(users.id, userId))
+    .where(
+      and(eq(users.id, userId), or(isNull(users.githubId), eq(users.githubId, githubId))),
+    )
     .returning({ id: users.id, username: users.username })
   return row ?? null
 }
 
 /**
- * Claim proof: the requester pastes one of the claimed account's existing API keys.
+ * Claim proof lookup: the requester pastes one of the claimed account's API keys.
  * api_keys stores only the SHA-256 hex of each key, so the check is a single cheap
  * hash + row lookup — no scrypt, no key plaintext ever touches this endpoint.
- * Deleted keys prove nothing; revoked keys still identify their owner, so they count.
+ * Returns the key row's revocation state, or null when no such key belongs to that
+ * account (deleted rows prove nothing and are excluded here).
  */
-export async function apiKeyProvesOwnership(claimedUserId: number, candidateKey: string): Promise<boolean> {
+export async function findOwnedApiKey(
+  claimedUserId: number,
+  candidateKey: string,
+): Promise<{ revoked: boolean } | null> {
   const keyHash = hashKey(candidateKey.trim())
   const [row] = await db
-    .select({ id: apiKeys.id })
+    .select({ revoked: apiKeys.revoked })
     .from(apiKeys)
     .where(and(eq(apiKeys.keyHash, keyHash), eq(apiKeys.userId, claimedUserId), eq(apiKeys.deleted, false)))
     .limit(1)
-  return Boolean(row)
+  return row ?? null
 }
 
-export async function createGithubClaim(githubId: number, githubLogin: string, username: string) {
+export async function createGithubClaim(githubId: number, githubLogin: string, username: string, provenance = "") {
   const [row] = await db
     .insert(githubClaims)
-    .values({ githubId, githubLogin, username })
+    .values({ githubId, githubLogin, username, reviewNote: provenance })
     .returning({ id: githubClaims.id })
   return row
 }
@@ -201,7 +193,13 @@ export async function listPendingClaims() {
     .limit(200)
 }
 
-/** Approve a pending claim: links the GitHub id to the named account. */
+/**
+ * Approve a pending claim — inside one transaction, with the same atomic link
+ * predicate as the self-service path: the UPDATE only lands while the account is
+ * still unlinked (or already holds this github_id). Also refuses when that
+ * github_id is already attached to a DIFFERENT account; the partial-unique index
+ * remains the final backstop and its violation maps to "already_linked".
+ */
 export async function approveGithubClaim(claimId: number, reviewerId: number | null) {
   await ensureSchema()
   const result = await db.transaction(async (tx) => {
@@ -213,8 +211,20 @@ export async function approveGithubClaim(claimId: number, reviewerId: number | n
     if (!claim) return null
     const [target] = await tx.select().from(users).where(eq(users.username, claim.username)).limit(1)
     if (!target) return { error: "user_gone" as const }
-    if (target.githubId != null && target.githubId !== claim.githubId) return { error: "already_linked" as const }
-    await tx.update(users).set({ githubId: claim.githubId }).where(eq(users.id, target.id))
+    const [holder] = await tx
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.githubId, claim.githubId))
+      .limit(1)
+    if (holder && holder.id !== target.id) return { error: "already_linked" as const }
+    const [linked] = await tx
+      .update(users)
+      .set({ githubId: claim.githubId })
+      .where(
+        and(eq(users.id, target.id), or(isNull(users.githubId), eq(users.githubId, claim.githubId))),
+      )
+      .returning({ id: users.id })
+    if (!linked) return { error: "already_linked" as const }
     const [done] = await tx
       .update(githubClaims)
       .set({ status: "approved", reviewedAt: new Date(), reviewedBy: reviewerId })

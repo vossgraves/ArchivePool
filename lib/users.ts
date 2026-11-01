@@ -2,6 +2,7 @@
 import "server-only"
 import { and, desc, eq, gte } from "drizzle-orm"
 import { db } from "@/lib/db"
+import { ensureSchema } from "@/lib/db/ensure"
 import { users } from "@/lib/db/schema"
 
 // scrypt hashing moved to lib/passwords.ts, which the web login routes import lazily
@@ -20,6 +21,7 @@ export function validateCredentials(username: string, password: string): string 
 }
 
 export async function findUserByUsername(username: string) {
+  await ensureSchema()
   const [row] = await db
     .select()
     .from(users)
@@ -33,6 +35,7 @@ export async function findUserByUsername(username: string) {
  * Used where only the id is at hand (server actions) and a public credit name is needed.
  */
 export async function findUsernameById(userId: number): Promise<string | null> {
+  await ensureSchema()
   const [row] = await db
     .select({ username: users.username, disabled: users.disabled })
     .from(users)
@@ -54,6 +57,7 @@ export async function createUser(
   ua = "",
   githubId: number | null = null,
 ) {
+  await ensureSchema()
   const [row] = await db
     .insert(users)
     .values({ username, passwordHash, githubId, createdIp: ip, createdUa: ua, lastLoginIp: ip, lastLoginUa: ua })
@@ -62,11 +66,13 @@ export async function createUser(
 }
 
 export async function updateLastLogin(userId: number, ip: string, ua: string) {
+  await ensureSchema()
   await db.update(users).set({ lastLoginIp: ip, lastLoginUa: ua }).where(eq(users.id, userId))
 }
 
 export async function countRecentUsersByIpUa(ip: string, ua: string, hours = 24): Promise<number> {
   if (!ip || !ua) return 0
+  await ensureSchema()
   const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000)
   const rows = await db
     .select({ id: users.id })
@@ -76,6 +82,7 @@ export async function countRecentUsersByIpUa(ip: string, ua: string, hours = 24)
 }
 
 export async function isAdminUser(userId: number): Promise<boolean> {
+  await ensureSchema()
   const [row] = await db
     .select({ role: users.role, disabled: users.disabled })
     .from(users)
@@ -85,6 +92,7 @@ export async function isAdminUser(userId: number): Promise<boolean> {
 }
 
 export async function setUserRole(userId: number, role: "user" | "admin") {
+  await ensureSchema()
   const [row] = await db
     .update(users)
     .set({ role })
@@ -95,6 +103,7 @@ export async function setUserRole(userId: number, role: "user" | "admin") {
 
 /** Account list for the admin panel. Never selects password_hash. */
 export async function listUsersForAdmin() {
+  await ensureSchema()
   return db
     .select({
       id: users.id,

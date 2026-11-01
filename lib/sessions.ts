@@ -3,6 +3,9 @@ import "server-only"
 import { createHmac, timingSafeEqual } from "node:crypto"
 import { cookies } from "next/headers"
 import type { NextResponse } from "next/server"
+import { signWithSessionSecret } from "@/lib/hmac-cookie"
+
+export { signWithSessionSecret, verifyWithSessionSecret } from "@/lib/hmac-cookie"
 
 /**
  * Stateless, HMAC-signed session cookies.
@@ -28,38 +31,9 @@ function sign(payload: string): string {
   return createHmac("sha256", sessionSecret()).update(payload).digest("base64url")
 }
 
-function bytesToBase64Url(bytes: ArrayBuffer | Uint8Array): string {
-  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
-  let bin = ""
-  for (const b of view) bin += String.fromCharCode(b)
-  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
-}
-
-/**
- * WebCrypto twin of `sign` — HMAC-SHA-256 over the same payload, same base64url
- * output, so either signer verifies against the other. OAuth/session writes on the
- * Workers free tier go through this path so signing costs stay inside crypto.subtle
- * (native, microseconds) and no node:crypto hash ever runs per request.
- */
-export async function signWithSessionSecret(payload: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(sessionSecret()),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  )
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload))
-  return bytesToBase64Url(sig)
-}
-
-/** Constant-time verification of a signWithSessionSecret signature. */
-export async function verifyWithSessionSecret(payload: string, signature: string): Promise<boolean> {
-  const expected = await signWithSessionSecret(payload)
-  const a = Buffer.from(signature)
-  const b = Buffer.from(expected)
-  return a.length === b.length && timingSafeEqual(a, b)
-}
+// HMAC helpers live in lib/hmac-cookie.ts (re-exported above): crypto.subtle
+// signing, same base64url wire format as the node:crypto `sign` here, so either
+// signer verifies the other's cookies.
 
 /** Session token identical to createSessionToken's, signed via crypto.subtle. */
 export async function createSessionTokenWeb(userId: number): Promise<{ value: string; maxAgeMs: number }> {
