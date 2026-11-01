@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Package health is the live-check and ingestion stack: lib/health.ts (per-service probes),
 // lib/health-sweep.ts (full sweep, single re-check, auto-disable), lib/ingest.ts (admission-gated
-// upsert), lib/instance-sync.ts plus the monochrome/SpotiFLAC adapters and lib/external-sources.ts.
+// upsert), lib/instance-sync.ts plus the monochrome/SpotiFLAC adapters.
 //
 // Pool policy, identical across every path: only a source that is BOTH reachable AND premium is
 // admitted. Anything else is rejected at the door, and an existing entry that stops being premium is

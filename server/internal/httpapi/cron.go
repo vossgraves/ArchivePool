@@ -18,22 +18,12 @@ func logf(format string, args ...any) { log.Printf(format, args...) }
 // isoPtr renders a nullable timestamp column as the TS does.
 func isoPtr(v any) *string { return db.AnyISOPtr(v) }
 
-// handleCronHealth is GET /api/cron/health: pull community token feeds, sweep, republish.
+// handleCronHealth is GET /api/cron/health: sweep, republish.
 func (s *Server) handleCronHealth(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if !auth.IsCronAuthorized(r) {
 		writeJSON(w, http.StatusUnauthorized, errBody{Error: "unauthorized"}, nil)
 		return
-	}
-
-	// Pull community token feeds and ingest entries not already pooled. Errors are isolated: an
-	// unreachable feed must never block the health sweep. Ingestion is bounded, so the 6-hourly
-	// schedule only health-checks genuinely NEW credentials.
-	external, err := health.IngestExternalSources(ctx, s.DB, 10)
-	if err != nil {
-		external = health.ExternalIngestSummary{
-			Errors: []string{db.ErrorMessage(err)},
-		}
 	}
 
 	summary, err := health.RunHealthSweep(ctx, s.DB, false)
@@ -55,17 +45,15 @@ func (s *Server) handleCronHealth(w http.ResponseWriter, r *http.Request) {
 	cache.Invalidate("discovery:")
 
 	writeJSON(w, http.StatusOK, struct {
-		OK        bool                         `json:"ok"`
-		External  health.ExternalIngestSummary `json:"external"`
-		Checked   int                          `json:"checked"`
-		Skipped   int                          `json:"skipped"`
-		Disabled  int                          `json:"disabled"`
-		Reenabled int                          `json:"reenabled"`
-		Locked    bool                         `json:"locked,omitempty"`
-		RanAt     string                       `json:"ranAt"`
+		OK        bool   `json:"ok"`
+		Checked   int    `json:"checked"`
+		Skipped   int    `json:"skipped"`
+		Disabled  int    `json:"disabled"`
+		Reenabled int    `json:"reenabled"`
+		Locked    bool   `json:"locked,omitempty"`
+		RanAt     string `json:"ranAt"`
 	}{
 		OK:        true,
-		External:  external,
 		Checked:   summary.Checked,
 		Skipped:   summary.Skipped,
 		Disabled:  summary.Disabled,
