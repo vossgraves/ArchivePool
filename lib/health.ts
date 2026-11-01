@@ -433,7 +433,8 @@ async function readRefreshRow(fingerprint: string): Promise<RefreshRow | null> {
     .from(accountEntries)
     .where(eq(accountEntries.fingerprint, fingerprint))
     .limit(1)
-  return row ?? null
+  // Stored credentials are field-encrypted — decrypt before the serve-compare reads token.
+  return row ? { ...row, payload: decryptAtRest(row.payload) } : null
 }
 
 /**
