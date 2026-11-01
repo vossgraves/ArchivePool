@@ -153,6 +153,10 @@ const STATEMENTS: string[] = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log (created_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log (action, created_at DESC)`,
+
+  // 2026-11-01: per-entry verify lease for report-driven checks (see app/api/report).
+  `ALTER TABLE account_entries ADD COLUMN IF NOT EXISTS verify_lease_until timestamptz`,
+  `ALTER TABLE instance_entries ADD COLUMN IF NOT EXISTS verify_lease_until timestamptz`,
 ]
 
 const globalForMigrations = globalThis as unknown as { __poolSchemaEnsured?: Promise<void> }

@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS account_entries (
   removed              boolean NOT NULL DEFAULT false,       -- hard-removed by admin
   last_checked_at      timestamptz,
   last_leased_at       timestamptz,                          -- least-recently-leased rotation
+  verify_lease_until   timestamptz,                          -- report-path verify anti-stampede
   created_at           timestamptz NOT NULL DEFAULT now()
 );
 
@@ -58,6 +59,7 @@ CREATE TABLE IF NOT EXISTS instance_entries (
   removed              boolean NOT NULL DEFAULT false,
   last_checked_at      timestamptz,
   last_leased_at       timestamptz,
+  verify_lease_until   timestamptz,
   created_at           timestamptz NOT NULL DEFAULT now()
 );
 

@@ -574,9 +574,9 @@ async function readHistory(entryIds?: number[]): Promise<HistoryRow[]> {
         : sql`h.entry_id in ${entryIds}`
   const result = await db.execute(sql`
     with entries as (
-      select id, service, 'account' as kind from account_entries
+      select id, service, 'account' as kind from account_entries where removed = false
       union all
-      select id, service, 'api' as kind from instance_entries
+      select id, service, 'api' as kind from instance_entries where removed = false
     )
     select e.service as service,
            e.kind as kind,

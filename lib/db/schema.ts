@@ -40,6 +40,9 @@ const entryColumns = {
   lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
   // Drives least-recently-leased rotation, so no one entry absorbs all traffic and gets banned.
   lastLeasedAt: timestamp("last_leased_at", { withTimezone: true }),
+  // Per-entry verify lease claimed by /api/report before paying for a live check: without it,
+  // concurrent serverless instances all see a stale verdict and all probe the provider at once.
+  verifyLeaseUntil: timestamp("verify_lease_until", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }
 

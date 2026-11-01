@@ -150,12 +150,19 @@ function qbdlxEntries(parsed: unknown): Record<string, unknown>[] | null {
  * Result of one external feed fetch. The ingest loop used to collapse every failure mode into a
  * bare null, so a webhook that had been dead for weeks looked identical in the cron response to
  * one that simply listed nothing — the operator only saw "unreachable or empty" for all of them.
- * `error` carries the actual reason (HTTP status, TLS failure, changed response shape) so the
- * run log says *why* a source produced nothing.
+ * `error` says *why* a source produced nothing, from a fixed vocabulary only: an upstream host's
+ * raw TLS/DNS/parser messages are operator noise (and can carry URL internals) — the cron
+ * response that ends up in workflow logs gets a category, not a stack trace.
  */
 export interface FeedFetchResult<T> {
   items: T | null
   error: string | null
+}
+
+/** Failure categories a caller may surface verbatim — no raw exception text, ever. */
+export function feedFetchError(e: unknown): string {
+  if (e instanceof Error && (e.name === "AbortError" || e.name === "TimeoutError")) return "timeout"
+  return "unreachable"
 }
 
 export async function fetchQbdlxShared(): Promise<FeedFetchResult<QobuzSharedAccount[]>> {
@@ -166,9 +173,14 @@ export async function fetchQbdlxShared(): Promise<FeedFetchResult<QobuzSharedAcc
       signal: AbortSignal.timeout(20_000),
     })
     if (!res.ok) return { items: null, error: `HTTP ${res.status}` }
-    const parsed = (await res.json()) as unknown
+    let parsed: unknown
+    try {
+      parsed = await res.json()
+    } catch {
+      return { items: null, error: "invalid JSON" }
+    }
     const raw = qbdlxEntries(parsed)
-    if (!raw) return { items: null, error: "response was neither an array nor an {items:[...]} envelope" }
+    if (!raw) return { items: null, error: "unexpected response shape" }
     if (raw.length === 0) return { items: null, error: "feed listed 0 entries" }
 
     const fallback = dominantAppPair(raw) ?? { appId: QOBUZ_PROBE_APP_ID, appSecret: QOBUZ_PROBE_APP_SECRET }
@@ -181,10 +193,10 @@ export async function fetchQbdlxShared(): Promise<FeedFetchResult<QobuzSharedAcc
       const country = String(e.country ?? "").trim() || undefined
       out.push({ token, appId, appSecret, country, note: "qbdlx-shared" })
     }
-    if (out.length === 0) return { items: null, error: `${raw.length} entries but none carried a token` }
+    if (out.length === 0) return { items: null, error: "no usable tokens in feed" }
     return { items: out, error: null }
   } catch (e) {
-    return { items: null, error: e instanceof Error ? e.message : "fetch failed" }
+    return { items: null, error: feedFetchError(e) }
   }
 }
 
@@ -205,10 +217,10 @@ export async function fetchFirehawkRendered(): Promise<FeedFetchResult<{ qobuz: 
       cache: "no-store",
       signal: AbortSignal.timeout(45_000),
     })
-    if (!res.ok) return { items: null, error: `jina reader HTTP ${res.status}` }
+    if (!res.ok) return { items: null, error: `HTTP ${res.status}` }
     const text = await res.text()
     if (!/qobuz/i.test(text) && !/deezer/i.test(text)) {
-      return { items: null, error: "rendered page no longer mentions qobuz/deezer (source moved)" }
+      return { items: null, error: "page no longer lists tokens (source moved)" }
     }
     const qobuz = parseFirehawkQobuzTokens(text)
     const deezer = parseFirehawkDeezerArls(text)
@@ -217,7 +229,7 @@ export async function fetchFirehawkRendered(): Promise<FeedFetchResult<{ qobuz: 
     }
     return { items: { qobuz, deezer }, error: null }
   } catch (e) {
-    return { items: null, error: e instanceof Error ? e.message : "fetch failed" }
+    return { items: null, error: feedFetchError(e) }
   }
 }
 
@@ -251,7 +263,7 @@ export async function ingestExternalSources(
   // too: the health check requires all three, so a credential-less row can only ever be rejected.
   const sharedRes = await fetchQbdlxShared().catch((e) => ({
     items: null,
-    error: e instanceof Error ? e.message : "fetch failed",
+    error: feedFetchError(e),
   }))
   const shared = sharedRes.items
   let dominant: { appId: string; appSecret: string } | null = null
@@ -275,7 +287,7 @@ export async function ingestExternalSources(
   // source stayed dead-and-invisible for weeks.
   const firehawkRes = await fetchFirehawkRendered().catch((e) => ({
     items: null,
-    error: e instanceof Error ? e.message : "fetch failed",
+    error: feedFetchError(e),
   }))
   const firehawk = firehawkRes.items
   if (!firehawk) {

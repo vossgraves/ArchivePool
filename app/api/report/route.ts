@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { NextResponse, type NextRequest } from "next/server"
-import { eq, sql } from "drizzle-orm"
+import { and, eq, sql } from "drizzle-orm"
 import { identifyReadKey, readKeyFromRequest } from "@/lib/api-keys"
 import { clientEncryptionEnabled, deriveClientKey } from "@/lib/crypto"
 import { db } from "@/lib/db"
@@ -32,6 +32,11 @@ const DISABLE_AFTER_REPORTS = 3
 // report is treated exactly as a verify that passed (lease released, replacement offered);
 // recent and dead means the entry is already parked and the park path is a no-op.
 const REPORT_VERIFY_COOLDOWN_MS = 15 * 60_000
+
+// How long a claimed verify holds before another instance may retry — just long enough to cover
+// one probe (12s health timeout plus refresh chains). If the claimant dies mid-probe, reports
+// keep answering from the stored verdict until this lapses; they never pile onto the provider.
+const VERIFY_LEASE_SECS = 120
 
 const REPORT_TYPES: Record<string, true> = { dead: true, not_premium: true }
 
@@ -148,47 +153,95 @@ export async function POST(req: NextRequest) {
 
   const table = entry.kind === "account" ? accountEntries : instanceEntries
 
-  // Verify cooldown (REPORT_VERIFY_COOLDOWN_MS): when the entry was checked moments ago, its
-  // stored verdict stands in for the live probe — one live check per entry per window, no matter
-  // how many installs report it in that time.
-  const recentlyChecked =
-    entry.lastCheckedAt != null &&
-    Date.now() - new Date(entry.lastCheckedAt).getTime() < REPORT_VERIFY_COOLDOWN_MS
-  const verifyReport = async (): Promise<{ ok: boolean; premium: boolean } | null> =>
-    recentlyChecked
-      ? {
-          ok: (entry.status === "alive" || entry.status === "preview") && !entry.disabled,
-          premium: entry.premium,
-        }
-      : await checkEntryById(entry.id).catch(() => null)
+  // A stored verdict is the entry's last *check* outcome, kept separate from serving policy:
+  // 'alive'/'preview' mean the probe succeeded (premium flag tells entitlement), 'dead' means it
+  // failed, 'pending' that none has decided yet. `disabled` is deliberately NOT folded in — a
+  // working-but-lossy entry is disabled by policy while its check verdict stays ok, and a report
+  // about it must resolve exactly as the live probe would (see docs/REPORT_ENDPOINT.md).
+  const storedVerdict = (row: { status: string; premium: boolean }) => ({
+    ok: row.status === "alive" || row.status === "preview",
+    premium: row.premium,
+  })
+  const isFresh = (checkedAt: Date | null | undefined) =>
+    checkedAt != null && Date.now() - new Date(checkedAt).getTime() < REPORT_VERIFY_COOLDOWN_MS
+  const readVerdictRow = async () => {
+    const [row] = await db
+      .select({ status: table.status, premium: table.premium, lastCheckedAt: table.lastCheckedAt })
+      .from(table)
+      .where(eq(table.id, entry.id))
+      .limit(1)
+    return row ?? null
+  }
+
+  /**
+   * Resolve what a live check would say without paying for one when it is not needed:
+   *  - the verdict is still inside REPORT_VERIFY_COOLDOWN_MS → the stored row answers.
+   *  - it is stale → claim the per-entry verify lease first (an atomic UPDATE ... RETURNING that
+   *    succeeds only when no other instance holds it), then re-read: another instance's probe may
+   *    have landed between our first read and the claim, or be in flight right now — either way
+   *    the stored verdict is what non-claimants and racers use. Only the claimant whose re-read
+   *    is still stale runs the real provider probe.
+   * `probed` reports whether a real check ran this call, which the dead-report path needs for
+   * failure accounting: a probe that ran already recorded its own result inside checkEntryById.
+   */
+  const verifyReport = async (): Promise<{ verdict: { ok: boolean; premium: boolean } | null; probed: boolean }> => {
+    if (isFresh(entry.lastCheckedAt)) return { verdict: storedVerdict(entry), probed: false }
+
+    const [claimed] = await db
+      .update(table)
+      .set({ verifyLeaseUntil: sql`now() + make_interval(secs => ${VERIFY_LEASE_SECS})` })
+      .where(
+        and(
+          eq(table.id, entry.id),
+          sql`(${table.verifyLeaseUntil} is null or ${table.verifyLeaseUntil} < now())`,
+        ),
+      )
+      .returning({ id: table.id })
+
+    const fresh = await readVerdictRow()
+
+    if (!claimed) {
+      // Another instance is verifying (or its probe just landed): use whatever is on record now.
+      return { verdict: fresh ? storedVerdict(fresh) : storedVerdict(entry), probed: false }
+    }
+
+    // We hold the lease. If the re-read is fresh, that verdict is as good as probing again —
+    // and one fewer upstream call is the point of the cooldown.
+    if (fresh && isFresh(fresh.lastCheckedAt)) return { verdict: storedVerdict(fresh), probed: false }
+
+    const verdict = await checkEntryById(entry.id).catch(() => null)
+    return { verdict, probed: true }
+  }
 
   if (reportType === "dead") {
     // Verify-before-park: a report usually means the app's cached copy went stale (Tidal kills
     // access tokens hourly, apps cache them for a day), not that the account died. The live check
     // already records itself and resets a healthy entry, so only a failing one is parked.
-    const live = await verifyReport()
+    const { verdict: live, probed } = await verifyReport()
     if (live == null || !live.ok) {
-      await db
+      // Failure accounting, in one atomic UPDATE ... RETURNING so racing reports on different
+      // instances cannot both conclude "below threshold":
+      //  - probed + verdict fail → checkEntryById already counted the failure; just park.
+      //  - probed + null         → the check could not run, so the report itself is the failure
+      //                            (and the only check signal — checkCount too, as before).
+      //  - not probed            → the stored verdict came off the record; the report is the
+      //                            qualifying signal DISABLE_AFTER_REPORTS watches.
+      const reportCounts = !probed || live == null
+      const [updated] = await db
         .update(table)
         .set({
           status: "pending", // demoted: not handed out fresh until the sweep re-verifies
-          // A check that could not run recorded nothing, so the report itself is the failure.
-          ...(live == null
+          ...(reportCounts
             ? {
                 consecutiveFailures: sql`${table.consecutiveFailures} + 1`,
-                checkCount: sql`${table.checkCount} + 1`,
+                ...(live == null ? { checkCount: sql`${table.checkCount} + 1` } : {}),
               }
             : {}),
         })
         .where(eq(table.id, entry.id))
+        .returning({ consecutiveFailures: table.consecutiveFailures })
 
-      const [current] = await db
-        .select({ consecutiveFailures: table.consecutiveFailures })
-        .from(table)
-        .where(eq(table.id, entry.id))
-        .limit(1)
-
-      if ((current?.consecutiveFailures ?? 0) >= DISABLE_AFTER_REPORTS) {
+      if ((updated?.consecutiveFailures ?? 0) >= DISABLE_AFTER_REPORTS) {
         await db.update(table).set({ disabled: true }).where(eq(table.id, entry.id))
       }
     }
@@ -196,7 +249,7 @@ export async function POST(req: NextRequest) {
     // Reports are keyless and entry ids are small sequential integers, so an unverified report
     // would let one request switch a healthy account off and one address walk the whole pool.
     // The provider's own answer decides entitlement; a wrong report is discarded.
-    const live = await verifyReport()
+    const { verdict: live } = await verifyReport()
     if (live == null || !live.ok || live.premium) {
       // Also rejected when the check could not decide: a flaky network must not hand the abuse
       // back. Entitlement is judged only from a check that ran and succeeded, and that check has
