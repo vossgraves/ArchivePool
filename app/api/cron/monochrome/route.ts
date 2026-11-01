@@ -28,7 +28,8 @@ export const maxDuration = 60
  *   GET /api/cron/monochrome                    — whole sync in one request. The mode the
  *     workflows use on hosts without a per-request ceiling (Vercel, Railway).
  *
- *   GET /api/cron/monochrome?feed=NAME&offset=K&limit=N — one bounded slice of one feed.
+ *   GET /api/cron/monochrome?feed=NAME&after=URL&limit=N — one bounded slice of one feed,
+ *     keyset-paginated on the sorted candidate list (batch.nextAfter is the next `after`).
  *   GET /api/cron/monochrome?publish=1          — republish the snapshot after all feeds drain.
  *     On the Workers free tier a full sync's live probes would blow the 50-subrequest /
  *     ~10 ms-CPU budget, so the workflow pages every feed to `done` and then publishes once.
@@ -79,11 +80,14 @@ export async function GET(req: NextRequest) {
       )
     }
     const urls = await spec.urls()
-    const offset = clampInt(params.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER)
+    // Keyset pagination on the sorted candidate list: `after` is the batch.nextAfter the
+    // previous call returned — the list may be refetched between calls, but a >-cursor over
+    // it still converges, unlike a bare offset.
+    const after = params.get("after") || undefined
     const limit = clampInt(params.get("limit"), BATCH_DEFAULT, 1, BATCH_MAX)
     const result = await syncInstanceUrls(spec.service, urls, {
       note: spec.note,
-      offset,
+      after,
       limit,
     })
     return NextResponse.json({ ok: true, feed, ...result, ranAt: new Date().toISOString() })

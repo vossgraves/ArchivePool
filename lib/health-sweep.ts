@@ -9,18 +9,10 @@ import type { Kind, Service } from "@/lib/sources"
 
 const AUTO_DISABLE_AFTER = 5
 const CONCURRENCY = 6
+// Batched sweeps run leaner fan-out: the in-flight overshoot past `limit` (≤ workers−1
+// checks) then stays well inside a host's per-request subrequest ceiling.
+const BATCH_CONCURRENCY = 3
 const STALE_AFTER_MS = 6 * 60 * 60 * 1000
-
-async function mapLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<void>) {
-  let i = 0
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (i < items.length) {
-      const idx = i++
-      await fn(items[idx])
-    }
-  })
-  await Promise.all(workers)
-}
 
 type PoolEntry = {
   id: number
@@ -55,20 +47,25 @@ export interface HealthSweepOptions {
   /** Re-check every non-removed entry, ignoring the stale window. */
   force?: boolean
   /**
-   * Cap on entries checked this call. Hosts with per-request ceilings (the Workers
-   * free tier: 50 subrequests, ~10 ms CPU) run the sweep as consecutive batches —
-   * each call takes the stalest entries and stamps them fresh, so the next call
-   * picks up where this one stopped and no cursor has to be carried anywhere.
-   * Omit on hosts without those ceilings (Vercel, Railway, a one-off admin run).
+   * Cap on real checks this call. Hosts with per-request ceilings (the Workers
+   * free tier: 50 subrequests, ~10 ms CPU) run the sweep as consecutive calls —
+   * each drains the stalest-first list until `limit` verdicts are written or it
+   * ends, passing over rows skipped without a verdict inside the call, so the
+   * next call picks up where this one stopped and no cursor has to be carried
+   * anywhere. Omit on hosts without those ceilings (Vercel, Railway, a one-off
+   * admin run).
    */
   limit?: number
 }
 
 export interface HealthSweepSummary {
   checked: number
+  /** Rows that got no verdict this call — fresh entries plus no-verdict skips. */
   skipped: number
   disabled: number
   reenabled: number
+  /** Stale rows consumed this call (checked + skipped-without-verdict). */
+  attempted: number
   /** Stale entries still waiting after this call — always 0 for an unbatched sweep. */
   remaining: number
   /** False while a batch-driving caller must invoke the sweep again to finish it. */
@@ -108,14 +105,19 @@ export async function runHealthSweep(
       a.id - b.id,
   )
 
-  const entries = limit == null ? stale : stale.slice(0, Math.max(0, limit))
-  const skipped = allEntries.length - stale.length
-  const remaining = stale.length - entries.length
+  let i = 0
+  let inFlight = 0
   let checked = 0
   let disabled = 0
   let reenabled = 0
 
-  await mapLimit(entries, CONCURRENCY, async (entry) => {
+  // Drain the sorted list until `limit` checks have actually run — or it ends. A row whose
+  // check is skipped without a verdict (refresh cooling, claim lost) persists nothing and
+  // stays stale; consuming it inside THIS call both passes it over for now and guarantees
+  // convergence: each call either clears `limit` stale rows or exhausts the list, and an
+  // all-skipped pass still ends with remaining = 0. No cursor is carried between calls —
+  // the attempted prefix is derivable from the stale order itself.
+  const attempt = async (entry: (typeof stale)[number]) => {
     const table = entry.kind === "account" ? accountEntries : instanceEntries
     const plaintextPayload = decryptAtRest(entry.payload)
     // Migrate rows written by older deployments before checking. A Tidal check may rotate its
@@ -170,10 +172,30 @@ export async function runHealthSweep(
       latencyMs: result.latencyMs,
       detail: result.detail,
     })
+  }
+
+  const concurrency = limit == null ? CONCURRENCY : Math.min(CONCURRENCY, BATCH_CONCURRENCY)
+  const workers = Array.from({ length: Math.min(concurrency, stale.length) }, async () => {
+    while (i < stale.length && (limit == null || checked + inFlight < limit)) {
+      const entry = stale[i++]
+      inFlight++
+      try {
+        await attempt(entry)
+      } finally {
+        inFlight--
+      }
+    }
   })
+  await Promise.all(workers)
 
   await db.execute(sql`delete from health_log where checked_at < now() - interval '30 days'`)
-  return { checked, skipped, disabled, reenabled, remaining, done: remaining === 0 }
+  // `attempted` = stale rows this call consumed (checked + no-verdict skips); `remaining` =
+  // stale rows it never reached. `skipped` reports every row that got no verdict this call —
+  // fresh rows plus no-verdict skips — matching what the callers read it as.
+  const attempted = i
+  const remaining = stale.length - attempted
+  const skipped = allEntries.length - checked - remaining
+  return { checked, skipped, disabled, reenabled, attempted, remaining, done: remaining === 0 }
 }
 
 /**

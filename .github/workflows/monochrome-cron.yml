@@ -36,18 +36,22 @@ jobs:
           # Each feed is paged in bounded slices for the same reason the health sweep is
           # batched: a sync's live probes exceed the per-request ceilings on the Workers
           # free tier, so the endpoint checks up to 8 candidates per call and reports
-          # batch.done while candidates remain. One feed failing must not starve the
+          # batch.done while candidates remain; slices keyset-paginate on the sorted URL
+          # list (batch.nextAfter), so a refetched feed cannot shift rows past a bare offset.
+          # One feed failing must not starve the
           # others — a dead feed is logged and skipped, and the run only goes red when
           # every feed failed.
           failed=0
           for feed in monochrome spotiflac-tidal spotiflac-qobuz; do
-            offset=0
+            after=""
             feed_done=0
             for i in $(seq 1 25); do
-              code=$(curl -sS -o /tmp/body.txt -w "%{http_code}" \
+              code=$(curl -sS -o /tmp/body.txt -w "%{http_code}" -G \
                 -H "Authorization: Bearer $CRON_SECRET" \
-                "$base/api/cron/monochrome?feed=$feed&offset=$offset&limit=8")
-              echo "$feed slice @$offset: HTTP $code"
+                --data-urlencode "feed=$feed" --data-urlencode "limit=8" \
+                --data-urlencode "after=$after" \
+                "$base/api/cron/monochrome")
+              echo "$feed slice after '$after': HTTP $code"
               cat /tmp/body.txt
               echo
               case "$code" in
@@ -59,12 +63,12 @@ jobs:
                 feed_done=1
                 break
               fi
-              next=$(grep -o '"nextOffset":[0-9]*' /tmp/body.txt | head -1 | cut -d: -f2)
+              next=$(grep -o '"nextAfter":"[^"]*"' /tmp/body.txt | head -1 | sed 's/.*:"//;s/"$//')
               if [ -z "$next" ]; then
-                echo "Feed $feed returned no nextOffset — aborting its loop" >&2
+                echo "Feed $feed returned no nextAfter — aborting its loop" >&2
                 failed=$((failed + 1)); feed_done=2; break
               fi
-              offset=$next
+              after=$next
             done
             [ "$feed_done" -eq 0 ] && { echo "Feed $feed did not finish within 25 slices" >&2; failed=$((failed + 1)); }
           done

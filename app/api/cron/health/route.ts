@@ -16,8 +16,11 @@ export const maxDuration = 60
  *   GET /api/cron/health?batch=N        → checks up to N stale entries
  *   repeat until the body has "done":true
  *
- * Each batch takes the stalest rows first and stamps them fresh, so no cursor or
- * offset is needed — convergence falls out of the health writes themselves. The
+ * Each call drains the stalest-first list until N checks have actually run (or it
+ * ends), so rows whose check is skipped without a verdict — refresh cooling, a lost
+ * claim — are passed over inside the same request instead of monopolizing every
+ * batch. No cursor or offset is needed: the attempted prefix is derivable from the
+ * stale order itself. The
  * snapshot publish and the "status" invalidation ride the batch that finishes, so
  * the feed is never republished mid-sweep.
  *

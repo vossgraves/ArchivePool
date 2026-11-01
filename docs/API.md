@@ -213,12 +213,14 @@ workflow in this repo every 6 hours.
 { "ok": true, "checked": 0, "skipped": 0, "disabled": 0, "reenabled": 0, "remaining": 0, "done": true, "ranAt": "..." }
 ```
 
-Optional `?batch=N` (1–10, default 8) checks at most N stalest entries per call for hosts
-with a per-request budget (Cloudflare Workers free tier). Batches take the stalest entries
-first — a checked row is fresh again, so the next call continues where this one stopped.
-`remaining` counts the stale entries still waiting; `done` is true when it reaches 0, and
-only the finishing call republishes the snapshot. The scheduled workflow loops until
-`done:true`. Called without `batch`, the whole sweep still runs in one request.
+Optional `?batch=N` (1–10, default 8) runs at most N real checks per call for hosts
+with a per-request budget (Cloudflare Workers free tier). Each call drains the stalest-first
+list until N checks ran or it ends — a row whose check is skipped without a verdict
+(refresh cooling, a lost claim) is passed over inside the call, not left to head the next
+batch. `attempted` counts the stale rows consumed, `remaining` the ones still waiting;
+`done` is true when `remaining` is 0, and only the finishing call republishes the
+snapshot. The scheduled workflow loops until `done:true`. Called without `batch`, the
+whole sweep still runs in one request.
 
 ### `GET /api/cron/monochrome`
 
@@ -227,9 +229,11 @@ Runs the monochrome (Tidal/Qobuz proxy) instance sync without the full sweep.
 Batched mode for request-budgeted hosts:
 
 - `?feed=NAME` — `monochrome`, `spotiflac-tidal` or `spotiflac-qobuz`; one feed per call.
-- `&offset=K&limit=N` — slice of that feed's sorted candidate list (limit 1–10, default 8).
-  The response's `batch` object carries `{ total, offset, nextOffset, done }`; repeat with
-  `offset=nextOffset` until `done`.
+- `&after=URL&limit=N` — keyset slice of that feed's sorted candidate list (limit
+  1–10, default 8). The response's `batch` object carries
+  `{ total, after, nextAfter, done }`; repeat with `after=<batch.nextAfter>` until `done`.
+  Keyset (not offset) is deliberate: the live feed is refetched per call, and a >-cursor over
+  the sorted set converges even when its membership shifts mid-sweep.
 - `?publish=1` — republish the instance snapshot once every feed has drained (the workflows
   call it after their feed loops). No parameters: the whole sync still runs in one request.
 
