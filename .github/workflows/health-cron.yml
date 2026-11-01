@@ -45,16 +45,20 @@ jobs:
           base="${HEALTH_URL%/}"
           # The sweep runs in bounded batches: request-budgeted hosts (Workers free
           # tier — ~50 subrequests / ~10 ms CPU per request) cannot run a full sweep
-          # in one call, so the endpoint checks up to 8 stale entries per call and
-          # reports done=false while stale entries remain. On hosts without those
+          # in one call, so each call runs up to 8 checks (12 consumed rows max —
+          # no-verdict skips still spend subrequests) and returns a keyset cursor
+          # that is passed back the next call, so skipped prefixes cannot starve
+          # the tail. On hosts without those
           # limits the same loop simply finishes on the first pass. 40 passes
           # (320 checks) is far beyond the pool's size — hitting it means a batch
           # stopped making progress, which is a bug worth failing loudly for.
+          cursor=""
           for i in $(seq 1 40); do
-            code=$(curl -sS -o /tmp/body.txt -w "%{http_code}" \
+            code=$(curl -sS -o /tmp/body.txt -w "%{http_code}" -G \
               -H "Authorization: Bearer $CRON_SECRET" \
-              "$base/api/cron/health?batch=8")
-            echo "batch $i: HTTP $code"
+              --data-urlencode "batch=8" --data-urlencode "cursor=$cursor" \
+              "$base/api/cron/health")
+            echo "batch $i (cursor='$cursor'): HTTP $code"
             cat /tmp/body.txt
             echo
             # Fail the job on non-2xx so a broken deploy shows up as a red run.
@@ -62,9 +66,14 @@ jobs:
               2*) ;;
               *) echo "Health sweep failed with HTTP $code" >&2; exit 1 ;;
             esac
-            if grep -q '"done":true' /tmp/body.txt; then
+            if [ "$(jq -r '.done' /tmp/body.txt)" = "true" ]; then
               echo "Health sweep complete after $i batch(es)."
               exit 0
+            fi
+            cursor=$(jq -er '.cursor' /tmp/body.txt 2>/dev/null) || cursor=""
+            if [ -z "$cursor" ]; then
+              echo "batch $i returned no sweep cursor — aborting" >&2
+              exit 1
             fi
           done
           echo "Health sweep did not finish within 40 batches" >&2

@@ -91,12 +91,13 @@ curl http://localhost:8787/api/status
   24 h TTL and `snapshotCacheControl()` rules (`lib/edge-snapshot.ts`). The
   `@vercel/blob` path remains for Vercel deploys.
 - **Sweep / instance sync** — unchanged logic; only sliced so a single request
-  stays inside free-tier CPU/subrequest budgets (`app/api/cron/health?batch=N`,
+  stays inside free-tier CPU/subrequest budgets (`app/api/cron/health?batch=N&cursor=…`,
   `app/api/cron/monochrome?feed=…&after=…&limit=N`). The sweep drains its stale list
-  until N real checks ran — rows skipped without a verdict (refresh cooling) are passed
-  over inside the call, so `remaining`/`done` stay truthful; feed slices keyset-paginate
-  on the sorted URL list via `batch.nextAfter`. Response bodies are additive:
-  `attempted`, `remaining`, `done`, `batch{…}` — existing single-shot calls still work.
+  until N verdicts or 12 consumed rows (no-verdict skips still spend subrequests) and
+  returns a `cursor` keyset so skipped prefixes cannot starve the tail — `remaining`/
+  `done` stay truthful; feed slices keyset-paginate on the sorted URL list via
+  `batch.nextAfter`. Response bodies are additive: `attempted`, `cursor`, `remaining`,
+  `done`, `batch{…}` — existing single-shot calls still work.
 - **Purge cron** — unchanged (pure SQL, no subrequests).
 - **Response shapes** — all public feeds identical; `s-maxage`/`swr` headers are
   still emitted. `workers.dev` subdomains don't CDN-cache worker responses, so

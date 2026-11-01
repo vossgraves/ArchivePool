@@ -16,11 +16,11 @@ export const maxDuration = 60
  *   GET /api/cron/health?batch=N        → checks up to N stale entries
  *   repeat until the body has "done":true
  *
- * Each call drains the stalest-first list until N checks have actually run (or it
- * ends), so rows whose check is skipped without a verdict — refresh cooling, a lost
- * claim — are passed over inside the same request instead of monopolizing every
- * batch. No cursor or offset is needed: the attempted prefix is derivable from the
- * stale order itself. The
+ * Each call drains the stalest-first list until N verdicts are written, 12 rows are
+ * consumed, or it ends — consumed counts skips too, because a check that bails inside
+ * refresh cooling can still have spent upstream fetches. The body returns `cursor`, the
+ * keyset of the last consumed row; pass it back as `&cursor=` so a skipped prefix cannot
+ * head every batch and starve the tail. The
  * snapshot publish and the "status" invalidation ride the batch that finishes, so
  * the feed is never republished mid-sweep.
  *
@@ -41,7 +41,11 @@ export async function GET(req: NextRequest) {
   if (!authorized(req)) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
 
   const batch = req.nextUrl.searchParams.get("batch")
-  const summary = await runHealthSweep(batch == null ? {} : { limit: batchLimit(batch) })
+  const summary = await runHealthSweep(
+    batch == null
+      ? {}
+      : { limit: batchLimit(batch), cursor: req.nextUrl.searchParams.get("cursor") ?? undefined },
+  )
 
   // The board's figures just changed; drop the cached copy so the next reader sees this sweep
   // rather than waiting out the TTL.

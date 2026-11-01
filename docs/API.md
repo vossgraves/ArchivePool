@@ -213,11 +213,13 @@ workflow in this repo every 6 hours.
 { "ok": true, "checked": 0, "skipped": 0, "disabled": 0, "reenabled": 0, "remaining": 0, "done": true, "ranAt": "..." }
 ```
 
-Optional `?batch=N` (1–10, default 8) runs at most N real checks per call for hosts
-with a per-request budget (Cloudflare Workers free tier). Each call drains the stalest-first
-list until N checks ran or it ends — a row whose check is skipped without a verdict
-(refresh cooling, a lost claim) is passed over inside the call, not left to head the next
-batch. `attempted` counts the stale rows consumed, `remaining` the ones still waiting;
+Optional `?batch=N&cursor=C` (N: 1–10, default 8) runs at most N real checks — and
+at most min(2N, 12) consumed rows — per call for hosts with a per-request budget
+(Cloudflare Workers free tier). Consumed counts rows whose check is skipped without a
+verdict (refresh cooling, a lost claim), because a bail-out can still spend upstream
+fetches. `cursor` in the response is the keyset of the last consumed row; pass it back as
+`cursor=` so a skipped prefix cannot head every batch and starve the tail. `attempted`
+counts the stale rows consumed, `remaining` the ones still waiting after the cursor;
 `done` is true when `remaining` is 0, and only the finishing call republishes the
 snapshot. The scheduled workflow loops until `done:true`. Called without `batch`, the
 whole sweep still runs in one request.

@@ -12,6 +12,11 @@ const CONCURRENCY = 6
 // Batched sweeps run leaner fan-out: the in-flight overshoot past `limit` (≤ workers−1
 // checks) then stays well inside a host's per-request subrequest ceiling.
 const BATCH_CONCURRENCY = 3
+// Hard cap on rows CONSUMED per batched call (real checks + no-verdict skips). Skips are
+// not free: a check that bails inside a refresh/cooldown path can already have spent
+// upstream fetches (session exchange, claim poll) plus its encryption and SQL writes —
+// up to ~4 subrequests a row, so 12 keeps a call under the 50-subrequest ceiling.
+const ATTEMPT_MAX = 12
 const STALE_AFTER_MS = 6 * 60 * 60 * 1000
 
 type PoolEntry = {
@@ -56,6 +61,12 @@ export interface HealthSweepOptions {
    * admin run).
    */
   limit?: number
+  /**
+   * Keyset cursor ("pending:lastCheckedAtMs:id") a previous batched call returned —
+   * continue the sweep strictly after that row in the stalest-first order. Unparseable
+   * values are ignored: the call restarts at the head, which still converges.
+   */
+  cursor?: string
 }
 
 export interface HealthSweepSummary {
@@ -70,12 +81,43 @@ export interface HealthSweepSummary {
   remaining: number
   /** False while a batch-driving caller must invoke the sweep again to finish it. */
   done: boolean
+  /** Keyset of the last row this call consumed — pass back as `?cursor=`. Null unbatched. */
+  cursor: string | null
+}
+
+/** Position of a row in the stalest-first order — same key the sort applies. */
+type SweepCursor = { pending: number; ts: number; id: number }
+
+function cursorKey(e: PoolEntry): SweepCursor {
+  return {
+    pending: e.status === "pending" ? 1 : 0,
+    ts: e.lastCheckedAt ? new Date(e.lastCheckedAt).getTime() : 0,
+    id: e.id,
+  }
+}
+
+function formatCursor(e: PoolEntry): string {
+  const k = cursorKey(e)
+  return `${k.pending}:${k.ts}:${k.id}`
+}
+
+function parseCursor(raw: string | undefined): SweepCursor | null {
+  if (!raw) return null
+  const m = /^([01]):(\d+):(\d+)$/.exec(raw)
+  if (!m) return null
+  return { pending: Number(m[1]), ts: Number(m[2]), id: Number(m[3]) }
+}
+
+function afterCursor(e: PoolEntry, c: SweepCursor): boolean {
+  const k = cursorKey(e)
+  return k.pending > c.pending || (k.pending === c.pending && (k.ts > c.ts || (k.ts === c.ts && k.id > c.id)))
 }
 
 export async function runHealthSweep(
   options: HealthSweepOptions | boolean = {},
 ): Promise<HealthSweepSummary> {
-  const { force = false, limit } = typeof options === "boolean" ? { force: options } : options
+  const { force = false, limit, cursor: rawCursor } =
+    typeof options === "boolean" ? { force: options, cursor: undefined } : options
   await ensureSchema()
   const allEntries = await allPoolEntries()
   if (allEntries.some((entry) => entry.kind === "account") && !atRestEncryptionEnabled()) {
@@ -105,18 +147,23 @@ export async function runHealthSweep(
       a.id - b.id,
   )
 
+  // Keyset into the same ordering: rows a previous batch consumed sit before the cursor —
+  // checked rows are fresh and gone anyway, but rows skipped without a verdict are still
+  // stale; filtering them here stops a skipped prefix from heading every later batch.
+  const cursor = parseCursor(rawCursor)
+  const queue = cursor == null ? stale : stale.filter((e) => afterCursor(e, cursor))
+
   let i = 0
   let inFlight = 0
   let checked = 0
   let disabled = 0
   let reenabled = 0
 
-  // Drain the sorted list until `limit` checks have actually run — or it ends. A row whose
-  // check is skipped without a verdict (refresh cooling, claim lost) persists nothing and
-  // stays stale; consuming it inside THIS call both passes it over for now and guarantees
-  // convergence: each call either clears `limit` stale rows or exhausts the list, and an
-  // all-skipped pass still ends with remaining = 0. No cursor is carried between calls —
-  // the attempted prefix is derivable from the stale order itself.
+  // Drain the keyset-filtered list until `limit` verdicts are written, `maxAttempts`
+  // rows are consumed, or it ends. A row whose check is skipped without a verdict (refresh
+  // cooling, claim lost) persists nothing and stays stale; consuming it counts toward the
+  // attempt cap so skips cannot spend unbounded subrequests, and the returned cursor moves
+  // the next call past it — a skipped prefix can neither starve the tail nor fake `done`.
   const attempt = async (entry: (typeof stale)[number]) => {
     const table = entry.kind === "account" ? accountEntries : instanceEntries
     const plaintextPayload = decryptAtRest(entry.payload)
@@ -175,9 +222,12 @@ export async function runHealthSweep(
   }
 
   const concurrency = limit == null ? CONCURRENCY : Math.min(CONCURRENCY, BATCH_CONCURRENCY)
-  const workers = Array.from({ length: Math.min(concurrency, stale.length) }, async () => {
-    while (i < stale.length && (limit == null || checked + inFlight < limit)) {
-      const entry = stale[i++]
+  // Total consumption is capped too — a skipped row is still an attempt, and attempts are
+  // what spend subrequests (fetches inside a check before it can return skipped).
+  const maxAttempts = limit == null ? Number.POSITIVE_INFINITY : Math.min(limit * 2, ATTEMPT_MAX)
+  const workers = Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
+    while (i < queue.length && (limit == null || (checked + inFlight < limit && i < maxAttempts))) {
+      const entry = queue[i++]
       inFlight++
       try {
         await attempt(entry)
@@ -193,9 +243,20 @@ export async function runHealthSweep(
   // stale rows it never reached. `skipped` reports every row that got no verdict this call —
   // fresh rows plus no-verdict skips — matching what the callers read it as.
   const attempted = i
-  const remaining = stale.length - attempted
+  const remaining = queue.length - attempted
   const skipped = allEntries.length - checked - remaining
-  return { checked, skipped, disabled, reenabled, attempted, remaining, done: remaining === 0 }
+  const nextCursor =
+    limit == null ? null : i > 0 ? formatCursor(queue[i - 1]) : (rawCursor ?? null)
+  return {
+    checked,
+    skipped,
+    disabled,
+    reenabled,
+    attempted,
+    remaining,
+    done: remaining === 0,
+    cursor: nextCursor,
+  }
 }
 
 /**

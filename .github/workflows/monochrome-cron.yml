@@ -59,11 +59,11 @@ jobs:
                 *) echo "Feed $feed failed with HTTP $code" >&2
                    failed=$((failed + 1)); feed_done=2; break ;;
               esac
-              if grep -q '"done":true' /tmp/body.txt; then
+              if [ "$(jq -r '.batch.done' /tmp/body.txt)" = "true" ]; then
                 feed_done=1
                 break
               fi
-              next=$(grep -o '"nextAfter":"[^"]*"' /tmp/body.txt | head -1 | sed 's/.*:"//;s/"$//')
+              next=$(jq -er '.batch.nextAfter' /tmp/body.txt 2>/dev/null) || next=""
               if [ -z "$next" ]; then
                 echo "Feed $feed returned no nextAfter — aborting its loop" >&2
                 failed=$((failed + 1)); feed_done=2; break
