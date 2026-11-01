@@ -244,14 +244,17 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
   // routinely dead on arrival. Only the rows about to be served are refreshed: the candidate list
   // is the whole pool, and refreshing all of it would put a Tidal round trip per account on every
   // lease request.
+  const tidalChecked = new Set<number>()
   const tidalExcluded = new Set<number>()
   await Promise.all(
     rows
       .filter((r) => r.service === "tidal")
       // Refresh twice the serve count so a skipped entry can be substituted — still bounded,
-      // unlike refreshing the whole pool per lease.
+      // unlike refreshing the whole pool per lease. Selection below serves ONLY from this
+      // checked set — an unchecked candidate may be holding an expired token.
       .slice(0, LEASE_PER_CATEGORY_ACCOUNT * 2)
       .map(async (r) => {
+        tidalChecked.add(r.id)
         const plain = decryptAtRest(r.payload)
         const stored = String(plain.token ?? "").trim()
         const fresh = await ensureFreshTidalToken(plain, r.fingerprint).catch(() => null)
@@ -271,8 +274,14 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
   const leasedIds: number[] = []
   const picked: { id: number; service: Service }[] = []
   const group = (service: Service) => {
+    // Tidal entries are eligible ONLY if they went through the freshness check above and
+    // were not excluded by it — a fallback from the unchecked tail could serve a dead token.
     const rowsForService = rows
-      .filter((r) => r.service === service && !tidalExcluded.has(r.id))
+      .filter(
+        (r) =>
+          r.service === service &&
+          (service !== "tidal" || (tidalChecked.has(r.id) && !tidalExcluded.has(r.id))),
+      )
       .slice(0, LEASE_PER_CATEGORY_ACCOUNT)
     for (const r of rowsForService) {
       leasedIds.push(r.id)
