@@ -10,7 +10,7 @@
   "redirects": [
     {
       "source": "/:path*",
-      "destination": "https://archivepool.workers.dev/:path*",
+      "destination": "https://archivepool.codmplayer1234.workers.dev/:path*",
       "statusCode": 308
     }
   ]
