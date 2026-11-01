@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+import path from "node:path"
+
 /** @type {import('next').NextConfig} */
 
 /**
@@ -55,6 +57,22 @@ const nextConfig = {
   async headers() {
     return [{ source: "/:path*", headers: securityHeaders }]
   },
+}
+
+// Cloudflare build only (deploy:cf/build:cf set CF_BUILD=1): every
+// import("@/lib/passwords") — login/signup's lazy scrypt module — is
+// rewritten to lib/passwords.stub.ts, so scrypt and its node:crypto chunk
+// never ship in the Worker bundle. The Vercel build leaves the real module
+// untouched; Turbopack's resolveAlias matches the raw specifier before
+// tsconfig-paths expansion, so it cannot be shadowed by the "@" prefix alias.
+if (process.env.CF_BUILD === "1") {
+  nextConfig.turbopack = {
+    ...(nextConfig.turbopack ?? {}),
+    resolveAlias: {
+      ...(nextConfig.turbopack?.resolveAlias ?? {}),
+      "@/lib/passwords": "./lib/passwords.stub.ts",
+    },
+  }
 }
 
 export default nextConfig
