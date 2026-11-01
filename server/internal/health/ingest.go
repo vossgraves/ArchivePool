@@ -11,7 +11,7 @@ import (
 	"archivepool/server/internal/pool"
 )
 
-// IngestResult is what the manual form, the OAuth flows and the external ingester all report.
+// IngestResult is what the manual form and the OAuth flows report.
 type IngestResult struct {
 	OK      bool   `json:"ok"`
 	Saved   bool   `json:"saved"`

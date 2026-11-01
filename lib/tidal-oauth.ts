@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+import { budgetedFetch } from "./cf-env"
 // Tidal OAuth "device authorization" flow. This is the same grant used by TVs, the CLI, and
 // open-source Tidal tooling: the user is shown a short code and a link.tidal.com URL, logs in on
 // any device, and the server polls until Tidal issues tokens. No redirect URI is required, so it
@@ -45,7 +46,7 @@ export type PollOutcome =
 /** Kick off a device authorization. Returns the code + link to show the user. */
 export async function startDeviceAuth(): Promise<DeviceStart> {
   const body = new URLSearchParams({ client_id: TIDAL_CLIENT_ID, scope: SCOPE })
-  const res = await fetch(DEVICE_AUTH_ENDPOINT, {
+  const res = await budgetedFetch(DEVICE_AUTH_ENDPOINT, {
     method: "POST",
     headers: {
       "content-type": "application/x-www-form-urlencoded",
@@ -89,7 +90,7 @@ export async function pollDeviceToken(deviceCode: string): Promise<PollOutcome> 
     grant_type: "urn:ietf:params:oauth:grant-type:device_code",
     scope: SCOPE,
   })
-  const res = await fetch(TOKEN_ENDPOINT, {
+  const res = await budgetedFetch(TOKEN_ENDPOINT, {
     method: "POST",
     headers: {
       "content-type": "application/x-www-form-urlencoded",

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { NextResponse, type NextRequest } from "next/server"
 import { identifyReadKey } from "@/lib/api-keys"
-import { SNAPSHOT_CACHE_CONTROL, readInstanceSnapshot } from "@/lib/edge-snapshot"
+import { readInstanceSnapshot, snapshotCacheControl } from "@/lib/edge-snapshot"
 import { getDiscovery } from "@/lib/queries"
 import { clientIp, rateLimit } from "@/lib/rate-limit"
 import { DISCOVERY_TTL_MS, cached } from "@/lib/ttl-cache"
@@ -38,7 +38,7 @@ export async function GET(req: NextRequest) {
     )
     if (snapshot) {
       return NextResponse.json(snapshot, {
-        headers: { "cache-control": SNAPSHOT_CACHE_CONTROL },
+        headers: { "cache-control": snapshotCacheControl() },
       })
     }
 

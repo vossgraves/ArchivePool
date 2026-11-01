@@ -1,17 +1,18 @@
 name: Health check cron
 
 # Pings the deployed site's /api/cron/health endpoint on a schedule. Host-agnostic: it just
-# curls a URL, so it works on Vercel, Fly, a VPS, or anywhere else.
+# curls a URL, so it works on Vercel, Cloudflare Workers, Fly, a VPS, or anywhere else.
 #
-# This is the scheduler even on Vercel. vercel.json crons are capped at once per DAY on the
-# Hobby plan -- and a more frequent expression there makes the deployment itself fail -- which
-# is far too coarse for a pool health sweep. Keep this workflow as the real schedule; only move
-# to a native vercel.json cron on Pro, and delete this file if you do, so the sweep does not
+# This is the scheduler even on serverless hosts. Vercel Cron on Hobby is capped at once per
+# DAY (far too coarse for a pool health sweep), and Workers Cron on the free tier shares the
+# same 10 ms-CPU/50-subrequest budget as a fetch request, so an HTTP-driven sweep is the only
+# shape that runs everywhere. Keep this workflow as the real schedule; only move to a native
+# platform cron where the budget allows, and delete this file if you do, so the sweep does not
 # run twice.
 #
 # Required repo secrets (Settings -> Secrets and variables -> Actions):
-#   HEALTH_URL   - Base URL of the deployed site, e.g. https://archivepool.vercel.app
-#   CRON_SECRET  - Same value as the CRON_SECRET env var on the deployed site.
+#   HEALTH_URL   - Base URL of the deployed site, e.g. https://archivepool.workers.dev
+#   CRON_SECRET  - Same value as the CRON_SECRET secret on the deployed site.
 
 on:
   schedule:
@@ -31,7 +32,7 @@ jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger health sweep
+      - name: Trigger health sweep (batched)
         env:
           HEALTH_URL: ${{ secrets.HEALTH_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
@@ -42,15 +43,47 @@ jobs:
           fi
           # Strip any trailing slash so we don't produce a double slash.
           base="${HEALTH_URL%/}"
-          echo "Pinging $base/api/cron/health"
-          code=$(curl -sS -o /tmp/body.txt -w "%{http_code}" \
-            -H "Authorization: Bearer $CRON_SECRET" \
-            "$base/api/cron/health")
-          echo "HTTP $code"
-          cat /tmp/body.txt
-          echo
-          # Fail the job on non-2xx so a broken deploy shows up as a red run.
-          case "$code" in
-            2*) exit 0 ;;
-            *) echo "Health sweep failed with HTTP $code" >&2; exit 1 ;;
-          esac
+          # The sweep runs in bounded batches: request-budgeted hosts (Workers free
+          # tier — ~50 subrequests / ~10 ms CPU per request) cannot run a full sweep
+          # in one call, so each call runs up to 8 checks (12 consumed rows max —
+          # no-verdict skips still spend subrequests) and returns a keyset cursor
+          # that is passed back the next call, so skipped prefixes cannot starve
+          # the tail. On hosts without those
+          # limits the same loop simply finishes on the first pass. 40 passes
+          # (320 checks) is far beyond the pool's size — hitting it means a batch
+          # stopped making progress, which is a bug worth failing loudly for.
+          cursor=""
+          for i in $(seq 1 40); do
+            code=$(curl -sS -o /tmp/body.txt -w "%{http_code}" -G \
+              -H "Authorization: Bearer $CRON_SECRET" \
+              --data-urlencode "batch=8" --data-urlencode "cursor=$cursor" \
+              "$base/api/cron/health")
+            echo "batch $i (cursor='$cursor'): HTTP $code"
+            cat /tmp/body.txt
+            echo
+            # Fail the job on non-2xx so a broken deploy shows up as a red run.
+            case "$code" in
+              2*) ;;
+              *) echo "Health sweep failed with HTTP $code" >&2; exit 1 ;;
+            esac
+            if [ "$(jq -r '.done' /tmp/body.txt)" = "true" ]; then
+              echo "Health sweep complete after $i batch(es)."
+              exit 0
+            fi
+            prev="$cursor"
+            cursor=$(jq -er '.cursor' /tmp/body.txt 2>/dev/null) || cursor=""
+            if [ -z "$cursor" ]; then
+              echo "batch $i returned no sweep cursor — aborting" >&2
+              exit 1
+            fi
+            # An unchanged cursor is tolerated only when the batch stopped on its
+            # fetch budget — the same position is retried (bounded by the 40-pass
+            # cap). Any other zero-progress batch is a bug worth failing on.
+            if [ "$cursor" = "$prev" ] && [ -n "$prev" ] \
+               && [ "$(jq -r '.budgetExhausted' /tmp/body.txt)" != "true" ]; then
+              echo "batch $i made no progress without budgetExhausted — aborting" >&2
+              exit 1
+            fi
+          done
+          echo "Health sweep did not finish within 40 batches" >&2
+          exit 1

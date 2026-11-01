@@ -1,0 +1,48 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "archivepool",
+  "main": ".open-next/worker.js",
+  // Keep >= the compatibility date @opennextjs/cloudflare@1.20.x was built against.
+  "compatibility_date": "2025-10-11",
+  "compatibility_flags": [
+    "nodejs_compat",
+    // Upstream health probes must never reach private/loopback addresses; the
+    // submit form and instance feeds accept contributor-supplied base URLs.
+    "global_fetch_strictly_public",
+  ],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS",
+  },
+  "kv_namespaces": [
+    {
+      // Workers KV, not R2: the snapshot is a few KB rewritten a few times a day,
+      // well inside KV's free tier (R2 needs a payment method to activate).
+      "binding": "POOL_SNAPSHOTS",
+      "id": "55052226236e4a69b298655e82110508",
+    },
+  ],
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      // Created with:  wrangler hyperdrive create archivepool-db --connection-string="$DATABASE_URL"
+      // then pasted here. The runtime connection string it hands pg is worker-local.
+      "id": "5a4f8ef01faa41c3b4272a79c57f8253",
+      // `wrangler dev` talks to this instead of the real Hyperdrive service.
+      // IPv4 literal: "localhost" can resolve to ::1 first, where nothing listens.
+      "localConnectionString": "postgresql://postgres:postgres@127.0.0.1:5432/archivepool",
+    },
+  ],
+  "vars": {
+    // Keep in sync with .env.example. Secrets (DATABASE_URL fallback, ADMIN_TOKEN_HASH,
+    // CRON_SECRET, SESSION_SECRET, POOL_ENCRYPTION_KEY, POOL_CLIENT_KEY,
+    // GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET) are set with
+    // `wrangler secret put <NAME>` — see docs/CLOUDFLARE.md for the exact list.
+    "READ_KEYS_ENFORCED": "true",
+  },
+  "observability": {
+    "enabled": true,
+  },
+  // Instance snapshots are only ever written under this one pathname; the bucket is
+  // private — the worker reads it back through the binding, nothing is public.
+}

@@ -32,7 +32,7 @@ import { syncInstanceUrls, type InstanceSyncResult } from "@/lib/instance-sync"
  * users how to obtain their own Deezer ARL / Spotify sp_dc / Amazon auth, i.e. it still publishes
  * no credentials.
  */
-const SPOTIFLAC_TIDAL_INSTANCES: string[] = [
+export const SPOTIFLAC_TIDAL_INSTANCES: string[] = [
   "https://triton.squid.wtf",
   "https://wolf.qqdl.site",
   "https://maus.qqdl.site",
@@ -54,7 +54,7 @@ const SPOTIFLAC_TIDAL_INSTANCES: string[] = [
  * inventory at deepwiki.com/afkarxyz/SpotiFLAC. Base URLs only — the health check appends its own
  * paths, and a host listed under the wrong service simply fails the check and is never pooled.
  */
-const SPOTIFLAC_QOBUZ_INSTANCES: string[] = [
+export const SPOTIFLAC_QOBUZ_INSTANCES: string[] = [
   "https://dab.yeet.su",
   "https://dabmusic.xyz",
   "https://jumo-dl.pages.dev",

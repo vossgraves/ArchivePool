@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { sql } from "drizzle-orm"
 import { atRestEncryptionEnabled, encryptAtRest } from "@/lib/crypto"
-import { db } from "@/lib/db"
+import { databaseConfigured, db } from "@/lib/db"
 import { accountEntries, instanceEntries } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
 import { runCheck, type CheckResult } from "@/lib/health"
@@ -96,6 +96,7 @@ export async function ingestSource(
       okCount: result.ok ? 1 : 0,
       consecutiveFailures: result.ok ? 0 : 1,
       lastCheckedAt: new Date(),
+      ...(result.ok ? { lastOkAt: sql`now()` } : {}),
       removed: false,
       disabled: false,
       contributor,
@@ -113,6 +114,10 @@ export async function ingestSource(
         checkCount: sql`${table.checkCount} + 1`,
         okCount: sql`${table.okCount} + ${result.ok ? 1 : 0}`,
         consecutiveFailures: result.ok ? 0 : sql`${table.consecutiveFailures} + 1`,
+        // The report path's last_ok_at guard keys on every successful check, and a passing
+        // resubmission is exactly that — stamp it here so a queued dead-report cannot park an
+        // entry the contributor just proved works.
+        ...(result.ok ? { lastOkAt: sql`now()` } : {}),
         lastCheckedAt: new Date(),
         removed: false,
         // Credit sticks to whoever contributed the entry first. A re-submission that revives a
@@ -138,8 +143,8 @@ export async function ingestSource(
  */
 export function describeSaveError(e: unknown): string {
   const msg = (e instanceof Error ? e.message : String(e ?? "")).toLowerCase()
-  if (!process.env.DATABASE_URL) {
-    return "The server has no DATABASE_URL set. Add your database connection string in the host's environment variables."
+  if (!databaseConfigured()) {
+    return "The server has no database configured. Add DATABASE_URL (or the Hyperdrive binding, on Workers) in the host's environment."
   }
   for (const table of ["account_entries", "instance_entries", "source_entries"]) {
     if (msg.includes(`relation "${table}" does not exist`) || (msg.includes(table) && msg.includes("does not exist"))) {

@@ -2,6 +2,10 @@
 import "server-only"
 import { createHmac, timingSafeEqual } from "node:crypto"
 import { cookies } from "next/headers"
+import type { NextResponse } from "next/server"
+import { signWithSessionSecret } from "@/lib/hmac-cookie"
+
+export { signWithSessionSecret, verifyWithSessionSecret } from "@/lib/hmac-cookie"
 
 /**
  * Stateless, HMAC-signed session cookies.
@@ -25,6 +29,32 @@ function sessionSecret(): string {
 
 function sign(payload: string): string {
   return createHmac("sha256", sessionSecret()).update(payload).digest("base64url")
+}
+
+// HMAC helpers live in lib/hmac-cookie.ts (re-exported above): crypto.subtle
+// signing, same base64url wire format as the node:crypto `sign` here, so either
+// signer verifies the other's cookies.
+
+/** Session token identical to createSessionToken's, signed via crypto.subtle. */
+export async function createSessionTokenWeb(userId: number): Promise<{ value: string; maxAgeMs: number }> {
+  const expiresAtMs = Date.now() + SESSION_TTL_MS
+  const payload = `${userId}.${expiresAtMs}`
+  return { value: `${payload}.${await signWithSessionSecret(payload)}`, maxAgeMs: SESSION_TTL_MS }
+}
+
+/**
+ * Route-handler variant of setSessionCookie — writes onto the NextResponse being
+ * returned (redirect responses in OAuth callbacks cannot use the cookies() store).
+ */
+export async function applySessionCookie(res: NextResponse, userId: number): Promise<void> {
+  const { value, maxAgeMs } = await createSessionTokenWeb(userId)
+  res.cookies.set(COOKIE_NAME, value, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/",
+    maxAge: Math.floor(maxAgeMs / 1000),
+  })
 }
 
 export function createSessionToken(userId: number): { value: string; maxAgeMs: number } {

@@ -139,6 +139,24 @@ const STATEMENTS: string[] = [
   `ALTER TABLE instance_entries ADD COLUMN IF NOT EXISTS expires_at timestamptz`,
   `CREATE INDEX IF NOT EXISTS idx_account_entries_expires ON account_entries (expires_at)`,
 
+  // 2026-11-01: GitHub sign-in. github_id links an OAuth subject to an account
+  // (unique when set — NULLs allowed so password-era rows are unaffected); the claims
+  // table holds pending username claims an admin can approve.
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS github_id bigint`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_github_id ON users (github_id) WHERE github_id IS NOT NULL`,
+  `CREATE TABLE IF NOT EXISTS github_claims (
+    id           serial PRIMARY KEY,
+    github_id    bigint NOT NULL,
+    github_login text NOT NULL DEFAULT '',
+    username     text NOT NULL,
+    status       text NOT NULL DEFAULT 'pending',
+    review_note  text NOT NULL DEFAULT '',
+    reviewed_at  timestamptz,
+    reviewed_by  integer REFERENCES users(id) ON DELETE SET NULL,
+    created_at   timestamptz NOT NULL DEFAULT now()
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_github_claims_status ON github_claims (status)`,
+
   // 2026-09-12: named admins and an audit trail.
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'user'`,
   `CREATE TABLE IF NOT EXISTS audit_log (
@@ -153,6 +171,26 @@ const STATEMENTS: string[] = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log (created_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log (action, created_at DESC)`,
+
+  // 2026-11-01: per-entry verify lease for report-driven checks (see app/api/report).
+  `ALTER TABLE account_entries ADD COLUMN IF NOT EXISTS verify_lease_until timestamptz`,
+  `ALTER TABLE instance_entries ADD COLUMN IF NOT EXISTS verify_lease_until timestamptz`,
+
+  // 2026-11-01: last successful-check timestamp — the report path's park/failure UPDATEs are
+  // no-ops when a success newer than the report landed (see app/api/report).
+  `ALTER TABLE account_entries ADD COLUMN IF NOT EXISTS last_ok_at timestamptz`,
+  `ALTER TABLE instance_entries ADD COLUMN IF NOT EXISTS last_ok_at timestamptz`,
+
+  // 2026-11-01: credential-refresh single-flight + backoff (see lib/health.ts refresh helpers).
+  `ALTER TABLE account_entries ADD COLUMN IF NOT EXISTS refresh_in_flight_until timestamptz`,
+  `ALTER TABLE account_entries ADD COLUMN IF NOT EXISTS refresh_cooldown_until timestamptz`,
+  // Escalating abuse-hold duration; persisted so expiry does not reset the doubling.
+  `ALTER TABLE account_entries ADD COLUMN IF NOT EXISTS refresh_backoff_ms integer`,
+  `CREATE TABLE IF NOT EXISTS pool_state (
+    key         text PRIMARY KEY,
+    value       jsonb NOT NULL DEFAULT '{}',
+    updated_at  timestamptz NOT NULL DEFAULT now()
+  )`,
 ]
 
 const globalForMigrations = globalThis as unknown as { __poolSchemaEnsured?: Promise<void> }

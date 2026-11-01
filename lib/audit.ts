@@ -14,6 +14,8 @@ export type AuditAction =
   | "key.delete"
   | "request.approve"
   | "request.reject"
+  | "claim.approve"
+  | "claim.reject"
   | "entry.remove"
   | "entry.force_check"
   | "entry.purge_dead"

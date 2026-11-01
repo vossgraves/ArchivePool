@@ -276,34 +276,3 @@ func TestCheckAppleMusicAccountRejectsNonToken(t *testing.T) {
 		t.Fatalf("a malformed token must be dead without probing: %#v", result)
 	}
 }
-
-// TestDominantAppPair guards the fallback the external ingest depends on: the Firehawk rentry lists
-// Qobuz tokens with no credentials, so those rows are only ingestible with a pair borrowed from the
-// community feed, and the most-used pair is the one worth borrowing.
-func TestDominantAppPair(t *testing.T) {
-	appID, secret := dominantAppPair([]map[string]any{
-		{"app_id": "1", "app_secret": "aaa"},
-		{"app_id": "2", "app_secret": "bbb"},
-		{"app_id": "1", "app_secret": "aaa"},
-		{"token": "t"},
-		{"app_id": "  ", "app_secret": "aaa"},
-	})
-	if appID != "1" || secret != "aaa" {
-		t.Fatalf("dominantAppPair = (%q, %q), want (1, aaa)", appID, secret)
-	}
-	// No pair anywhere means the Firehawk rows must be skipped rather than ingested as rejects.
-	appID, secret = dominantAppPair([]map[string]any{{"token": "t"}})
-	if appID != "" || secret != "" {
-		t.Fatalf("a feed with no pair must report none, got (%q, %q)", appID, secret)
-	}
-}
-
-// TestParseFirehawkDeezerArls floors an ARL at the length the submit path requires, so a truncated
-// value scraped from the rentry is dropped before it can burn a health check and a lease slot.
-func TestParseFirehawkDeezerArls(t *testing.T) {
-	full := strings.Repeat("a", 180)
-	arls := ParseFirehawkDeezerArls("arl: `" + full + "` then `" + strings.Repeat("a", 179) + "`")
-	if len(arls) != 1 || arls[0].ARL != full {
-		t.Fatalf("ParseFirehawkDeezerArls returned %#v, want only the 180-char ARL", arls)
-	}
-}

@@ -6,16 +6,27 @@ import { db } from "@/lib/db"
 import { instanceEntries } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
 import { runCheck } from "@/lib/health"
+import { FetchBudgetExhausted, fetchBudgetExceeded } from "@/lib/cf-env"
 import { fingerprint, maskLabel, normalizeUrl, type Service } from "@/lib/sources"
 
 export interface InstanceSyncResult {
-  fetched: number // unique URLs handed in
+  fetched: number // unique URLs handed in (the whole candidate list, before any slicing)
   skipped: number // already in pool and recently checked (by fingerprint)
   checked: number // actually health-checked this run
   added: number // passed check, newly inserted
   updated: number // already existed, status updated
   failed: number // health check did not pass
   rejected: number // reachable but not premium/hi-res — not added (new) per pool policy
+  /** Present only when the call was bounded (opts.limit): keyset cursor for the next
+   *  slice — repeat with after=batch.nextAfter until done. */
+  batch?: {
+    total: number
+    after: string | null
+    nextAfter: string | null
+    done: boolean
+    /** The slice stopped early because the request's outbound-fetch budget was spent. */
+    budgetExhausted?: boolean
+  }
 }
 
 /** Instances checked more recently than this are skipped, so a sweep never hammers live hosts. */
@@ -47,20 +58,30 @@ const DEFAULT_CONCURRENCY = 5
  * @param opts.note        optional origin marker stored on new payloads (encrypted at rest)
  * @param opts.recheckWindowMs  skip alive entries checked more recently than this
  * @param opts.concurrency number of instances health-checked in parallel
+ * @param opts.after/opts.limit  bound this call to a slice of the sorted candidate list:
+ *   rows strictly after `after`, at most `limit`. Hosts with per-request ceilings
+ *   (Workers free tier) page through with the batch.nextAfter cursor the previous call
+ *   returned; leave unset everywhere else.
  */
 export async function syncInstanceUrls(
   service: Service,
   urls: string[],
-  opts: { note?: string; recheckWindowMs?: number; concurrency?: number } = {},
+  opts: { note?: string; recheckWindowMs?: number; concurrency?: number; after?: string; limit?: number } = {},
 ): Promise<InstanceSyncResult> {
   await ensureSchema()
 
   const recheckWindowMs = opts.recheckWindowMs ?? DEFAULT_RECHECK_WINDOW_MS
   const concurrency = opts.concurrency ?? DEFAULT_CONCURRENCY
 
+  // Sorted so a bounded run can keyset-paginate on `after` — a live feed refetched
+  // between calls may grow or shrink, but a >-cursor over the sorted set still converges
+  // (a brand-new URL simply lands in a later or next sweep).
   const allUrls = Array.from(
     new Set(urls.map((u) => normalizeUrl(u)).filter((u) => u.startsWith("http"))),
-  )
+  ).sort()
+  const startIndex = opts.after == null ? 0 : allUrls.findIndex((u) => u > opts.after!)
+  const from = startIndex < 0 ? allUrls.length : startIndex
+  const work = opts.limit == null ? allUrls : allUrls.slice(from, from + Math.max(1, opts.limit))
 
   const result: InstanceSyncResult = {
     fetched: allUrls.length,
@@ -71,7 +92,15 @@ export async function syncInstanceUrls(
     failed: 0,
     rejected: 0,
   }
-  if (allUrls.length === 0) return result
+  if (opts.limit != null) {
+    result.batch = {
+      total: allUrls.length,
+      after: opts.after ?? null,
+      nextAfter: work.length > 0 ? work[work.length - 1] : opts.after ?? null,
+      done: from + work.length >= allUrls.length,
+    }
+  }
+  if (work.length === 0) return result
 
   // Load existing fingerprints for this service so known-good, recently-checked entries are
   // skipped instead of re-probed on every sweep.
@@ -104,8 +133,13 @@ export async function syncInstanceUrls(
       }
     }
 
-    result.checked++
     const check = await runCheck(service, "api", payload)
+    // Same taint guard as the sweep: a verdict computed after the request's fetch
+    // budget tripped may be a declined fetch flattened into "dead" by a check's own
+    // error handling. Discard it — this candidate counts as unfinished, the batch
+    // stops, and nextAfter already points before it for the next call to resume.
+    if (fetchBudgetExceeded()) throw new FetchBudgetExhausted()
+    result.checked++
 
     if (!check.ok) {
       result.failed++
@@ -166,6 +200,7 @@ export async function syncInstanceUrls(
         okCount: 1,
         consecutiveFailures: 0,
         lastCheckedAt: new Date(),
+        ...(check.ok ? { lastOkAt: sql`now()` } : {}),
         disabled: false,
         removed: false,
       })
@@ -181,6 +216,7 @@ export async function syncInstanceUrls(
           removed: false,
           checkCount: sql`${instanceEntries.checkCount} + 1`,
           okCount: sql`${instanceEntries.okCount} + 1`,
+          ...(check.ok ? { lastOkAt: sql`now()` } : {}),
           lastCheckedAt: new Date(),
         },
       })
@@ -190,12 +226,39 @@ export async function syncInstanceUrls(
   }
 
   let next = 0
-  const workers = Array.from({ length: Math.min(concurrency, allUrls.length) }, async () => {
-    while (next < allUrls.length) {
-      await checkAndUpsert(allUrls[next++])
+  let budgetHit = false
+  // Candidates whose check returned are the consumed prefix; a candidate interrupted by
+  // the fetch budget stays unfinished, and nextAfter must end before it so the next
+  // slice resumes at exactly that URL.
+  const finished = new Array<boolean>(work.length).fill(false)
+  const workers = Array.from({ length: Math.min(concurrency, work.length) }, async () => {
+    while (!budgetHit && next < work.length) {
+      const idx = next++
+      try {
+        await checkAndUpsert(work[idx])
+        finished[idx] = true
+      } catch (e) {
+        if (e instanceof FetchBudgetExhausted) {
+          budgetHit = true
+        } else {
+          throw e
+        }
+      }
     }
   })
   await Promise.all(workers)
+
+  if (opts.limit != null) {
+    let consumed = 0
+    while (consumed < work.length && finished[consumed]) consumed++
+    result.batch = {
+      total: allUrls.length,
+      after: opts.after ?? null,
+      nextAfter: consumed > 0 ? work[consumed - 1] : (opts.after ?? null),
+      done: consumed === work.length && from + work.length >= allUrls.length,
+      budgetExhausted: budgetHit,
+    }
+  }
 
   return result
 }

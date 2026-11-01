@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import {
+  bigint,
   boolean,
   index,
   integer,
@@ -40,19 +41,52 @@ const entryColumns = {
   lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
   // Drives least-recently-leased rotation, so no one entry absorbs all traffic and gets banned.
   lastLeasedAt: timestamp("last_leased_at", { withTimezone: true }),
+  // Per-entry verify lease claimed by /api/report before paying for a live check: without it,
+  // concurrent serverless instances all see a stale verdict and all probe the provider at once.
+  verifyLeaseUntil: timestamp("verify_lease_until", { withTimezone: true }),
+  // Set (to the check's own timestamp) by every check that ran and SUCCEEDED, any entitlement.
+  // The report path refuses to record a report-driven failure over a success newer than the
+  // report itself — without this a racing check's verdict can be overwritten by the report.
+  lastOkAt: timestamp("last_ok_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }
 
 /** Contributed account credentials (encrypted payload). */
 export const accountEntries = pgTable(
   "account_entries",
-  entryColumns,
+  {
+    ...entryColumns,
+    // Single-flight marker for credential refresh (Tidal token POST, Deezer ARL rotation,
+    // Qobuz re-login): whoever wins the conditional claim refreshes and clears it in the same
+    // UPDATE that persists the rotated credential — a concurrent lease on another instance must
+    // never double-POST, because a rotated refresh token invalidates the one just spent.
+    refreshInFlightUntil: timestamp("refresh_in_flight_until", { withTimezone: true }),
+    // Skip refresh attempts until this instant: set on Tidal abuse_detected/429 (15 min,
+    // doubling to 6h while it keeps arriving) and on transient refresh failures (2 min). A
+    // cooling account is never marked dead — the provider's rate limiter is not a verdict.
+    refreshCooldownUntil: timestamp("refresh_cooldown_until", { withTimezone: true }),
+    // The abuse hold's CURRENT duration in ms, persisted so it survives the cooldown expiring:
+    // each repeat doubles it (up to 6h), a successful refresh resets it to NULL. Cooldown
+    // expiry alone must not erase the escalation history.
+    refreshBackoffMs: integer("refresh_backoff_ms"),
+  },
   (t) => ({
     serviceIdx: index("idx_account_entries_service").on(t.service),
     activeIdx: index("idx_account_entries_active").on(t.status, t.disabled, t.removed),
     leaseIdx: index("idx_account_entries_lease").on(t.service, t.premium, t.lastLeasedAt),
   }),
 )
+
+/**
+ * Tiny cross-instance key/value row for pool-wide signals that do not belong on any entry —
+ * today: the global Tidal refresh backoff shared by every account when abuse_detected shows up
+ * on several of them inside a minute.
+ */
+export const poolState = pgTable("pool_state", {
+  key: text("key").primaryKey(),
+  value: jsonb("value").notNull().default({}).$type<Record<string, unknown>>(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+})
 
 /** Contributed instance base URLs (restream/proxy servers). */
 export const instanceEntries = pgTable(
@@ -201,8 +235,36 @@ export const users = pgTable("users", {
   createdUa: text("created_ua").notNull().default(""),
   lastLoginIp: text("last_login_ip").notNull().default(""),
   lastLoginUa: text("last_login_ua").notNull().default(""),
+  // GitHub OAuth subject (numeric id from /user). NULL for password-era accounts and
+  // for legacy accounts not yet claimed. Unique when present — one GitHub per account.
+  githubId: bigint("github_id", { mode: "number" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 })
+
+/**
+ * A pending username claim from the GitHub sign-in flow: the GitHub identity proved
+ * control of an OAuth account but the chosen legacy username could not be proven by an
+ * API key, so an admin reviews and links it. Same shape discipline as api_key_requests.
+ */
+export const githubClaims = pgTable(
+  "github_claims",
+  {
+    id: serial("id").primaryKey(),
+    githubId: bigint("github_id", { mode: "number" }).notNull(),
+    githubLogin: text("github_login").notNull().default(""),
+    // The existing account being claimed — its username string, resolved to a user id
+    // only when the claim is approved.
+    username: text("username").notNull(),
+    status: text("status").notNull().default("pending"), // pending | approved | rejected
+    reviewNote: text("review_note").notNull().default(""),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+    reviewedBy: integer("reviewed_by").references(() => users.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    statusIdx: index("idx_github_claims_status").on(t.status),
+  }),
+)
 
 /** Append-only record of privileged actions. See docs/ADMIN.md. */
 export const auditLog = pgTable(

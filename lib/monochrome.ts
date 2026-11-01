@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import "server-only"
 import { syncInstanceUrls, type InstanceSyncResult } from "@/lib/instance-sync"
+import { budgetedFetch } from "@/lib/cf-env"
 import { normalizeUrl } from "@/lib/sources"
 
 /** Shape returned by https://monochrome.st/instances.json (the project's current home). */
@@ -27,12 +28,17 @@ export type MonochromeSyncResult = InstanceSyncResult
  * not a published instance list, so it contributes nothing here — the Deezer tier in
  * lib/sources.ts is fed by contributor submissions instead.
  */
-export async function syncMonochromeInstances(): Promise<MonochromeSyncResult> {
+/**
+ * The normalized candidate URLs from the monochrome feed, before any checking.
+ * Exported so a batch-driving caller (the cron route on request-budgeted hosts)
+ * can page through the same list it would otherwise have synced in one go.
+ */
+export async function fetchMonochromeUrls(): Promise<string[]> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
   let raw: MonochromeInstances
   try {
-    const res = await fetch(MONOCHROME_URL, {
+    const res = await budgetedFetch(MONOCHROME_URL, {
       signal: controller.signal,
       headers: { "user-agent": "ArchiveTune-SourcePool/1.0" },
       cache: "no-store",
@@ -43,9 +49,11 @@ export async function syncMonochromeInstances(): Promise<MonochromeSyncResult> {
     clearTimeout(timer)
   }
 
-  const urls = [...(raw.api ?? []), ...(raw.streaming ?? [])]
+  return [...(raw.api ?? []), ...(raw.streaming ?? [])]
     .map((u) => normalizeUrl(u))
     .filter((u) => u.startsWith("http"))
+}
 
-  return syncInstanceUrls("tidal", urls, { note: "monochrome" })
+export async function syncMonochromeInstances(): Promise<MonochromeSyncResult> {
+  return syncInstanceUrls("tidal", await fetchMonochromeUrls(), { note: "monochrome" })
 }

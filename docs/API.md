@@ -24,6 +24,29 @@ Three distinct credentials exist. They never overlap:
 Keys/tokens are sent as `Authorization: Bearer <secret>`. `x-api-key: <secret>` is also
 accepted for read keys. Query-string keys are **intentionally rejected** — URLs get logged.
 
+### Web sign-in (GitHub OAuth)
+
+Browser sign-in uses GitHub OAuth (password sign-in returns `503 web_login_unavailable`
+on Workers — scrypt cannot fit the free-tier CPU budget — and its error text points here):
+
+- `GET /api/auth/github/start` — state + PKCE verifier in a short-lived signed HttpOnly
+  cookie, then a redirect to `github.com/login/oauth/authorize` (`scope=read:user`).
+- `GET /api/auth/github/callback` — verifies the state cookie, exchanges the code
+  (PKCE), reads the numeric id + login from `/user`, signs in a known `github_id`, or
+  issues a 10-minute signed "pending" cookie and sends the browser to choose a username.
+- `POST /api/auth/github/complete` — `{ "username" }` creates a new account for the
+  pending GitHub identity (username must be free; same rules as sign-up usernames).
+- `POST /api/auth/github/claim` — claims an EXISTING username. With
+  `{ "username", "apiKey" }`, the key's SHA-256 hash must match an `api_keys` row owned
+  by that account — possessing the account's own key is the ownership proof — then
+  `github_id` links to it and the old keys keep working unchanged for apps. With just
+  `{ "username" }` a pending row lands in `github_claims` for admin review
+  (`GET /api/admin/claims`, `POST /api/admin/claims/{id}` with `approve`/`reject`).
+
+Sessions are the same HMAC-signed `atp_session` cookie as before (signed via
+`crypto.subtle` on this path). `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` must be set —
+the routes answer `503 github_auth_unconfigured` otherwise.
+
 Read-key enforcement is controlled by the `READ_KEYS_ENFORCED` env var:
 
 - unset or `"false"` — `/api/sources` and `/api/discovery/*` are open (no key required);
@@ -206,18 +229,64 @@ contributed submissions, and are served only after that liveness check.
 
 ### `GET /api/cron/health`
 
-Runs one health sweep (and the monochrome instance sync). Used by the GitHub Actions
-workflow in this repo hourly.
+Runs one health sweep and republishes the instance snapshot. Used by the GitHub Actions
+workflow in this repo every 6 hours.
 
 ```json
-{ "ok": true, "checked": 0, "skipped": 0, "disabled": 0, "reenabled": 0, "ranAt": "..." }
+{ "ok": true, "checked": 0, "skipped": 0, "starved": 0, "disabled": 0, "reenabled": 0, "remaining": 0, "done": true, "ranAt": "..." }
 ```
+
+Optional `?batch=N&cursor=C` (N: 1–10, default 8) runs at most N real checks — and
+at most min(2N, 12) consumed rows — per call for hosts with a per-request budget
+(Cloudflare Workers free tier). Consumed counts rows whose check is skipped without a
+verdict (refresh cooling, a lost claim), because a bail-out can still spend upstream
+fetches. `cursor` in the response is the keyset of the last consumed row; pass it back as
+`cursor=` so a skipped prefix cannot head every batch and starve the tail. A per-request
+outbound-fetch budget (40 on Workers, unlimited elsewhere) can stop a call earlier —
+`budgetedFetch` charges every probe including each redirect hop — when `budgetExhausted`
+is true the cursor already ends before the cut-off row, so the same loop just resumes it
+with a fresh budget; a verdict computed after the budget tripped is never persisted.
+Each row additionally has a 24-fetch ceiling: a batch only starts a row when the
+request still holds a full ceiling, and a row that burns through it is reported as a
+consumed no-verdict skip under `starved` (no dead verdict, no cooldown) — the cursor
+moves past it, so one pathological entry can never starve the queue.
+`attempted`
+counts the stale rows consumed, `remaining` the ones still waiting after the cursor;
+`done` is true when `remaining` is 0, and only the finishing call republishes the
+snapshot. The scheduled workflow loops until `done:true`. Called without `batch`, the
+whole sweep still runs in one request.
 
 ### `GET /api/cron/monochrome`
 
 Runs the monochrome (Tidal/Qobuz proxy) instance sync without the full sweep.
 
-Both accept the admin token as an alternative credential so they stay manually triggerable.
+Batched mode for request-budgeted hosts:
+
+- `?feed=NAME` — `monochrome`, `spotiflac-tidal` or `spotiflac-qobuz`; one feed per call.
+- `&after=URL&limit=N` — keyset slice of that feed's sorted candidate list (limit
+  1–10, default 8). The response's `batch` object carries
+  `{ total, after, nextAfter, done, budgetExhausted }`; repeat with
+  `after=<batch.nextAfter>` until `done` — `budgetExhausted:true` slices resume at the
+  first unfinished candidate (a fetch-budget cut-off is never written as a verdict).
+  Keyset (not offset) is deliberate: the live feed is refetched per call, and a >-cursor over
+  the sorted set converges even when its membership shifts mid-sweep.
+- `?publish=1` — republish the instance snapshot once every feed has drained (the workflows
+  call it after their feed loops). No parameters: the whole sync still runs in one request.
+
+### `GET /api/cron/purge-dead`
+
+Soft-removes entries that have been unservable for at least 7 days: `dead` or `disabled`,
+older than the grace window, and with no `ok && premium` row in `health_log` inside it. This
+is the scheduled form of `POST /api/admin/purge-dead` — same `removed = true` semantics, same
+`entry.purge_dead` audit action (actor `cron`), just bounded so a transient outage cannot
+empty the pool. Idempotent: the eligibility predicate is the UPDATE's WHERE clause, so a second
+run in the same window removes nothing. The response reports the real counts:
+
+```json
+{ "ok": true, "removed": 0, "removedAccounts": 0, "removedInstances": 0, "graceDays": 7, "ranAt": "..." }
+```
+
+All accept the admin token as an alternative credential so they stay manually triggerable.
 `maxDuration` is 60s.
 
 ```bash
@@ -268,6 +337,12 @@ entry's `fingerprint`.
 ### `POST /api/admin/check-entry` — re-check one entry
 
 Request: `{ "id": 42 }` → `{ "ok": true, "result": { ... } }`. `404` when unknown.
+
+### `GET /api/admin/claims` — pending GitHub username claims
+
+### `POST /api/admin/claims/{id}` — review a claim: `{ action: "approve" }` links the
+claimed `github_id` to the existing account; `{ action: "reject", note }` needs a
+≥10-char note. Audited like key-request reviews.
 
 ### `POST /api/admin/force-check` — full sweep + monochrome sync now
 
@@ -448,8 +523,8 @@ App consumption:
 
 - **Vercel cron cap** — `vercel.json` deliberately has no `crons` block (Hobby caps at one
   per day, and a more frequent expression fails the deployment). The real scheduler is
-  `.github/workflows/health-cron.yml` (hourly) + `monochrome-cron.yml` (every 12 h),
-  which just `curl` the cron routes with `CRON_SECRET`.
+  `.github/workflows/health-cron.yml` (every 6 h) + `monochrome-cron.yml` (every 12 h) +
+  `purge-cron.yml` (daily), which just `curl` the cron routes with `CRON_SECRET`.
 - **Secrets to keep in sync** — `POOL_CLIENT_KEY` must be byte-identical between this site
   and the app builds; `POOL_ENCRYPTION_KEY` must survive database migrations or stored
   accounts become undecryptable.

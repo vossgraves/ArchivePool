@@ -7,7 +7,7 @@ import { accountEntries, apiKeyLeases, apiKeyRequests, apiKeys, instanceEntries 
 import { ensureSchema } from "./db/ensure"
 import { CATEGORIES, type Kind, type Service } from "./sources"
 import type { KeyScope } from "./api-keys"
-import { ensureFreshTidalToken } from "./health"
+import { ensureFreshTidalToken, isTidalAccessExpired } from "./health"
 
 export interface CategoryStatus {
   service: Service
@@ -38,8 +38,6 @@ export async function getStatus(): Promise<CategoryStatus[]> {
       status: accountEntries.status,
       premium: accountEntries.premium,
       disabled: accountEntries.disabled,
-      checkCount: accountEntries.checkCount,
-      okCount: accountEntries.okCount,
       lastCheckedAt: accountEntries.lastCheckedAt,
     })
     .from(accountEntries)
@@ -50,8 +48,6 @@ export async function getStatus(): Promise<CategoryStatus[]> {
       status: instanceEntries.status,
       premium: instanceEntries.premium,
       disabled: instanceEntries.disabled,
-      checkCount: instanceEntries.checkCount,
-      okCount: instanceEntries.okCount,
       lastCheckedAt: instanceEntries.lastCheckedAt,
     })
     .from(instanceEntries)
@@ -62,6 +58,32 @@ export async function getStatus(): Promise<CategoryStatus[]> {
     ...instances.map((r) => ({ ...r, kind: "api" as const })),
   ]
 
+  // Uptime is the 14-day pass rate of real health checks (sweeps and report-triggered verifies),
+  // read from health_log with the same scope as the history chart: synthetic 'app report:' marker
+  // rows are not checks and are excluded, and only entries still in the pool (removed = false)
+  // count. The lifetime check_count/ok_count columns cannot express any of that — they never
+  // decay, they count report verifies on the same handful of leased entries, and a dead entry
+  // keeps accruing failures every sweep until an admin removes it, so the figure slid ever
+  // downward on a healthy pool.
+  const uptimeRows = (
+    await db.execute(sql`
+      with entries as (
+        select id, service, 'account' as kind from account_entries where removed = false
+        union all
+        select id, service, 'api' as kind from instance_entries where removed = false
+      )
+      select e.service as service, e.kind as kind,
+             count(*)::int as checks,
+             count(*) filter (where h.ok)::int as ok
+      from health_log h
+      join entries e on e.id = h.entry_id
+      where h.checked_at >= now() - make_interval(days => ${HISTORY_DAYS})
+        and (h.detail is null or h.detail not like 'app report%')
+      group by 1, 2
+    `)
+  ).rows as unknown as { service: string; kind: string; checks: number; ok: number }[] | undefined
+  const uptimeByCategory = new Map((uptimeRows ?? []).map((r) => [`${r.service}|${r.kind}`, r] as const))
+
   return CATEGORIES.map((cat) => {
     const items = rows.filter((r) => r.service === cat.service && r.kind === cat.kind)
     // Disabled entries are served to nobody, so they must not read as alive here.
@@ -69,9 +91,11 @@ export async function getStatus(): Promise<CategoryStatus[]> {
     const premium = items.filter((r) => !r.disabled && r.status === "alive" && r.premium).length
     const dead = items.filter((r) => r.status === "dead").length
     const pending = items.filter((r) => r.status === "pending").length
-    const totalChecks = items.reduce((a, r) => a + r.checkCount, 0)
-    const totalOk = items.reduce((a, r) => a + r.okCount, 0)
-    const uptimePct = totalChecks > 0 ? Math.round((totalOk / totalChecks) * 1000) / 10 : null
+    const uptime = uptimeByCategory.get(`${cat.service}|${cat.kind}`)
+    const uptimePct =
+      uptime && Number(uptime.checks) > 0
+        ? Math.round((Number(uptime.ok) / Number(uptime.checks)) * 1000) / 10
+        : null
     const lastChecked = items
       .map((r) => r.lastCheckedAt)
       .filter(Boolean)
@@ -220,15 +244,29 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
   // routinely dead on arrival. Only the rows about to be served are refreshed: the candidate list
   // is the whole pool, and refreshing all of it would put a Tidal round trip per account on every
   // lease request.
+  const tidalChecked = new Set<number>()
+  const tidalExcluded = new Set<number>()
   await Promise.all(
     rows
       .filter((r) => r.service === "tidal")
-      .slice(0, LEASE_PER_CATEGORY_ACCOUNT)
+      // Refresh twice the serve count so a skipped entry can be substituted — still bounded,
+      // unlike refreshing the whole pool per lease. Selection below serves ONLY from this
+      // checked set — an unchecked candidate may be holding an expired token.
+      .slice(0, LEASE_PER_CATEGORY_ACCOUNT * 2)
       .map(async (r) => {
+        tidalChecked.add(r.id)
         const plain = decryptAtRest(r.payload)
+        const stored = String(plain.token ?? "").trim()
         const fresh = await ensureFreshTidalToken(plain, r.fingerprint).catch(() => null)
-        if (fresh != null && fresh !== String(plain.token ?? "").trim()) {
+        if (fresh != null && fresh !== stored) {
           r.payload = encryptAtRest({ ...plain, token: fresh })
+          return
+        }
+        // A credential that NEEDED a refresh and could not get one (claim lost, cooling,
+        // provider down) must not be served — the stored token is already dead and the app
+        // would just 401 on it. Exclude the entry from THIS lease; the next candidate moves up.
+        if (fresh == null && stored && isTidalAccessExpired(stored)) {
+          tidalExcluded.add(r.id)
         }
       }),
   )
@@ -236,7 +274,15 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
   const leasedIds: number[] = []
   const picked: { id: number; service: Service }[] = []
   const group = (service: Service) => {
-    const rowsForService = rows.filter((r) => r.service === service).slice(0, LEASE_PER_CATEGORY_ACCOUNT)
+    // Tidal entries are eligible ONLY if they went through the freshness check above and
+    // were not excluded by it — a fallback from the unchecked tail could serve a dead token.
+    const rowsForService = rows
+      .filter(
+        (r) =>
+          r.service === service &&
+          (service !== "tidal" || (tidalChecked.has(r.id) && !tidalExcluded.has(r.id))),
+      )
+      .slice(0, LEASE_PER_CATEGORY_ACCOUNT)
     for (const r of rowsForService) {
       leasedIds.push(r.id)
       picked.push({ id: r.id, service })
@@ -532,6 +578,13 @@ interface HistoryRow {
 /**
  * Daily pass rate per category, joined back to the entry tables because health_log records only an
  * entry id — ids are unique across the pair, which is what makes one join per table safe.
+ *
+ * Rows whose detail starts with 'app report:' are excluded: they are marker rows the report route
+ * appends to record that a client complained, not health checks. Every 'dead' report lands one
+ * with ok=false even when the verify-before-park check it also ran just passed — counting them as
+ * checks halved the displayed pass rate on a healthy pool (thousands of false reports a day on the
+ * same handful of leased entries). The markers stay in the table for audit purposes; they just do
+ * not belong in a pass rate.
  */
 async function readHistory(entryIds?: number[]): Promise<HistoryRow[]> {
   await ensureSchema()
@@ -543,9 +596,9 @@ async function readHistory(entryIds?: number[]): Promise<HistoryRow[]> {
         : sql`h.entry_id in ${entryIds}`
   const result = await db.execute(sql`
     with entries as (
-      select id, service, 'account' as kind from account_entries
+      select id, service, 'account' as kind from account_entries where removed = false
       union all
-      select id, service, 'api' as kind from instance_entries
+      select id, service, 'api' as kind from instance_entries where removed = false
     )
     select e.service as service,
            e.kind as kind,
@@ -555,6 +608,7 @@ async function readHistory(entryIds?: number[]): Promise<HistoryRow[]> {
     from health_log h
     join entries e on e.id = h.entry_id
     where h.checked_at >= now() - make_interval(days => ${HISTORY_DAYS}) and ${scope}
+      and (h.detail is null or h.detail not like 'app report%')
     group by 1, 2, 3
   `)
   return (result.rows ?? []) as unknown as HistoryRow[]

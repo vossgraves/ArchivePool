@@ -9,6 +9,7 @@
 // fetch the player page server-side (no CORS) and scrape it.
 
 import { createHash } from "node:crypto"
+import { budgetedFetch } from "./cf-env"
 
 // Public Qobuz web-player app credentials. These are widely known and used by every
 // open-source Qobuz client (streamrip, qobuz-dl, etc.) — they are NOT private.
@@ -48,12 +49,22 @@ export interface QobuzLoginResult {
 }
 
 /**
+ * Per-request timeout merged with an optional overall probe deadline — report-path checks pass
+ * one down so a re-login or secret scrape cannot outlive the verify lease that paid for it.
+ */
+function fetchSignal(deadline?: AbortSignal): AbortSignal {
+  const own = AbortSignal.timeout(12_000)
+  return deadline ? AbortSignal.any([own, deadline]) : own
+}
+
+/**
  * Signs in with Qobuz credentials. Returns the user_auth_token on success.
  * Throws a user-friendly Error on failure.
  */
 export async function qobuzLogin(
   username: string,
   password: string,
+  deadline?: AbortSignal,
 ): Promise<QobuzLoginResult> {
   const body = new URLSearchParams({
     username,
@@ -61,7 +72,7 @@ export async function qobuzLogin(
     password,
     app_id: QOBUZ_LOGIN_APP_ID,
   })
-  const res = await fetch(LOGIN_URL, {
+  const res = await budgetedFetch(LOGIN_URL, {
     method: "POST",
     headers: {
       "content-type": "application/x-www-form-urlencoded",
@@ -69,6 +80,7 @@ export async function qobuzLogin(
       "user-agent": UA,
     },
     body,
+    signal: fetchSignal(deadline),
     cache: "no-store",
   })
 
@@ -111,11 +123,12 @@ export async function qobuzLogin(
  * technique is identical to what streamrip / qobuz-dl use. The secret is per-registration, so an
  * unknown appId falls back to the play.qobuz.com player.
  */
-export async function scrapeQobuzAppSecret(appId = QOBUZ_APP_ID): Promise<string | null> {
+export async function scrapeQobuzAppSecret(appId = QOBUZ_APP_ID, deadline?: AbortSignal): Promise<string | null> {
   const { page, origin } = SECRET_SOURCES[appId] ?? SECRET_SOURCES[QOBUZ_APP_ID]
   try {
-    const pageRes = await fetch(page, {
+    const pageRes = await budgetedFetch(page, {
       headers: { "user-agent": UA },
+      signal: fetchSignal(deadline),
       cache: "no-store",
     })
     if (!pageRes.ok) return null
@@ -134,10 +147,15 @@ export async function scrapeQobuzAppSecret(appId = QOBUZ_APP_ID): Promise<string
     // The secret appears in patterns like: app_secret:"<hex32>" or seed:"<hex32>".
     const secretRe = /(?:app_secret|secret|seed)\s*[:=]\s*"([a-f0-9]{32})"/i
 
-    for (const url of scriptUrls) {
+    // Bound the scrape: the player page lists dozens of bundles, and each is a
+    // subrequest the health sweep now budgets. The app bundle carrying the secret
+    // is always among the first few <script> tags.
+    const BUNDLE_SCAN_MAX = 6
+    for (const url of scriptUrls.slice(0, BUNDLE_SCAN_MAX)) {
       try {
-        const jsRes = await fetch(url, {
+        const jsRes = await budgetedFetch(url, {
           headers: { "user-agent": UA },
+          signal: fetchSignal(deadline),
           cache: "no-store",
         })
         if (!jsRes.ok) continue
@@ -178,7 +196,7 @@ export async function validateAppSecret(
     `&track_id=${PROBE_TRACK}&format_id=${PROBE_FORMAT}&intent=stream` +
     `&app_id=${encodeURIComponent(appId)}&user_auth_token=${encodeURIComponent(userAuthToken)}`
   try {
-    const res = await fetch(url, {
+    const res = await budgetedFetch(url, {
       headers: { "x-app-id": appId, "x-user-auth-token": userAuthToken, "user-agent": UA },
       cache: "no-store",
       signal: AbortSignal.timeout(12_000),
