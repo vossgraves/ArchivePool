@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { NextResponse, type NextRequest } from "next/server"
+import { cfWaitUntil } from "@/lib/cf-env"
 import { setSessionCookie } from "@/lib/sessions"
 import { findUserByUsername, updateLastLogin, verifyPassword } from "@/lib/users"
 import { clientIp, rateLimit, tooManyRequests } from "@/lib/rate-limit"
@@ -45,7 +46,8 @@ export async function POST(req: NextRequest) {
 
   const ip = (req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? req.headers.get("x-real-ip") ?? "").slice(0, 64)
   const ua = (req.headers.get("user-agent") ?? "").slice(0, 256)
-  void updateLastLogin(user.id, ip, ua).catch(() => {})
+  // Best-effort; on Workers cfWaitUntil keeps it alive past the response.
+  cfWaitUntil(updateLastLogin(user.id, ip, ua).catch(() => {}))
 
   await setSessionCookie(user.id)
   return NextResponse.json({ username: user.username })

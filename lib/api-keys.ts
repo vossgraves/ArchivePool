@@ -2,6 +2,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 import { and, desc, eq, gt, ne, sql } from "drizzle-orm"
 import type { NextRequest } from "next/server"
+import { cfWaitUntil } from "@/lib/cf-env"
 import { db } from "@/lib/db"
 import { ensureSchema } from "@/lib/db/ensure"
 import { apiKeys, apiKeyRequests, users } from "@/lib/db/schema"
@@ -98,13 +99,16 @@ export async function identifyReadKey(req: NextRequest, alwaysEnforce = false): 
   const b = Buffer.from(keyHash)
   if (a.length !== b.length || !timingSafeEqual(a, b)) return { ok: false, keyId: null, scope: null }
 
-  // Best-effort; never block the request on it.
-  void db
-    .update(apiKeys)
-    .set({ useCount: sql`${apiKeys.useCount} + 1`, lastUsedAt: new Date() })
-    .where(eq(apiKeys.id, row.id))
-    .then(() => {})
-    .catch(() => {})
+  // Best-effort; never block the request on it. On Workers the write rides
+  // ctx.waitUntil — a response-scoped promise there is dropped at return.
+  cfWaitUntil(
+    db
+      .update(apiKeys)
+      .set({ useCount: sql`${apiKeys.useCount} + 1`, lastUsedAt: new Date() })
+      .where(eq(apiKeys.id, row.id))
+      .then(() => {})
+      .catch(() => {}),
+  )
 
   return { ok: true, keyId: row.id, scope }
 }

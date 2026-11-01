@@ -45,6 +45,13 @@ const nextConfig = {
   images: {
     unoptimized: true,
   },
+  // pg lazily requires "pg-cloudflare" for its Workers socket, but that package's
+  // exports map serves a stub (dist/empty.js) under the default condition — so the
+  // file tracer only copies the stub while the Worker bundle (workerd condition)
+  // resolves dist/index.js. Tracing-include the real files so the bundle finds them.
+  outputFileTracingIncludes: {
+    "*": ["./node_modules/pg-cloudflare/dist/**/*", "./node_modules/pg-cloudflare/esm/**/*"],
+  },
   async headers() {
     return [{ source: "/:path*", headers: securityHeaders }]
   },
