@@ -1,0 +1,47 @@
+name: Dead entry purge cron
+
+# Pings the deployed site's /api/cron/purge-dead endpoint once a day. It soft-removes entries
+# that have been dead or disabled — with no successful premium check — for at least a week,
+# which is the job the admin panel's purge button otherwise does by hand. Host-agnostic: it
+# just curls a URL, so it works on Vercel, Fly, a VPS, or anywhere else.
+#
+# Required repo secrets (same ones the health cron already uses):
+#   HEALTH_URL   - Base URL of the deployed site, e.g. https://archivepool.vercel.app
+#   CRON_SECRET  - Same value as the CRON_SECRET env var on the deployed site.
+
+on:
+  schedule:
+    # Daily at 04:30 UTC — off the hour so it does not contend with the 6-hourly health sweep
+    # (00/06/12/18 UTC) for the Neon compute or the DB advisory lock. Daily is enough: the
+    # purge only touches entries that have already been dead a full week, so a few extra hours
+    # change nothing.
+    - cron: "30 4 * * *"
+  workflow_dispatch: {} # allow manual runs from the Actions tab
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger dead entry purge
+        env:
+          HEALTH_URL: ${{ secrets.HEALTH_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$HEALTH_URL" ] || [ -z "$CRON_SECRET" ]; then
+            echo "HEALTH_URL and CRON_SECRET secrets must be set." >&2
+            exit 1
+          fi
+          # Strip any trailing slash so we don't produce a double slash.
+          base="${HEALTH_URL%/}"
+          echo "Pinging $base/api/cron/purge-dead"
+          code=$(curl -sS -o /tmp/body.txt -w "%{http_code}" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            "$base/api/cron/purge-dead")
+          echo "HTTP $code"
+          cat /tmp/body.txt
+          echo
+          # Fail the job on non-2xx so a broken deploy shows up as a red run.
+          case "$code" in
+            2*) exit 0 ;;
+            *) echo "Purge cron failed with HTTP $code" >&2; exit 1 ;;
+          esac

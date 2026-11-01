@@ -111,7 +111,7 @@ Without a scheduler nothing auto-disables dead sources, so this step is required
 once per day, and a more frequent expression there does not merely get throttled — it makes the
 deployment fail outright. Once a day is far too coarse for a pool health sweep.
 
-Use the included GitHub Actions workflows instead (`.github/workflows/health-cron.yml`, every 6 hours, and `monochrome-cron.yml`, every 12 hours). They only `curl` a URL, so they work on any
+Use the included GitHub Actions workflows instead (`.github/workflows/health-cron.yml`, every 6 hours; `monochrome-cron.yml`, every 12 hours; `purge-cron.yml`, daily). They only `curl` a URL, so they work on any
 host:
 
 The 6-hour cadence is a Neon budget decision, not a freshness one: every sweep wakes the compute
@@ -161,6 +161,7 @@ Admin (require `Authorization: Bearer $ADMIN_TOKEN`):
 - `DELETE /api/admin/keys?id=<id>` — revoke a key.
 - `POST /api/admin/remove` — hard-remove a source entry.
 - `GET /api/cron/health` — run a health sweep on demand.
+- `GET /api/cron/purge-dead` — soft-remove entries dead/disabled ≥ 7 days (scheduled daily).
 - `POST /api/report` — apps declare dead / non-premium credentials (see `docs/API.md`).
 
 ## Read keys

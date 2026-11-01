@@ -206,8 +206,8 @@ contributed submissions, and are served only after that liveness check.
 
 ### `GET /api/cron/health`
 
-Runs one health sweep (and the monochrome instance sync). Used by the GitHub Actions
-workflow in this repo hourly.
+Runs one health sweep and republishes the instance snapshot. Used by the GitHub Actions
+workflow in this repo every 6 hours.
 
 ```json
 { "ok": true, "checked": 0, "skipped": 0, "disabled": 0, "reenabled": 0, "ranAt": "..." }
@@ -217,7 +217,20 @@ workflow in this repo hourly.
 
 Runs the monochrome (Tidal/Qobuz proxy) instance sync without the full sweep.
 
-Both accept the admin token as an alternative credential so they stay manually triggerable.
+### `GET /api/cron/purge-dead`
+
+Soft-removes entries that have been unservable for at least 7 days: `dead` or `disabled`,
+older than the grace window, and with no `ok && premium` row in `health_log` inside it. This
+is the scheduled form of `POST /api/admin/purge-dead` — same `removed = true` semantics, same
+`entry.purge_dead` audit action (actor `cron`), just bounded so a transient outage cannot
+empty the pool. Idempotent: the eligibility predicate is the UPDATE's WHERE clause, so a second
+run in the same window removes nothing. The response reports the real counts:
+
+```json
+{ "ok": true, "removed": 0, "removedAccounts": 0, "removedInstances": 0, "graceDays": 7, "ranAt": "..." }
+```
+
+All accept the admin token as an alternative credential so they stay manually triggerable.
 `maxDuration` is 60s.
 
 ```bash
@@ -448,8 +461,8 @@ App consumption:
 
 - **Vercel cron cap** — `vercel.json` deliberately has no `crons` block (Hobby caps at one
   per day, and a more frequent expression fails the deployment). The real scheduler is
-  `.github/workflows/health-cron.yml` (hourly) + `monochrome-cron.yml` (every 12 h),
-  which just `curl` the cron routes with `CRON_SECRET`.
+  `.github/workflows/health-cron.yml` (every 6 h) + `monochrome-cron.yml` (every 12 h) +
+  `purge-cron.yml` (daily), which just `curl` the cron routes with `CRON_SECRET`.
 - **Secrets to keep in sync** — `POOL_CLIENT_KEY` must be byte-identical between this site
   and the app builds; `POOL_ENCRYPTION_KEY` must survive database migrations or stored
   accounts become undecryptable.
