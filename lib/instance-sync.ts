@@ -166,6 +166,7 @@ export async function syncInstanceUrls(
         okCount: 1,
         consecutiveFailures: 0,
         lastCheckedAt: new Date(),
+        ...(check.ok ? { lastOkAt: sql`now()` } : {}),
         disabled: false,
         removed: false,
       })
@@ -181,6 +182,7 @@ export async function syncInstanceUrls(
           removed: false,
           checkCount: sql`${instanceEntries.checkCount} + 1`,
           okCount: sql`${instanceEntries.okCount} + 1`,
+          ...(check.ok ? { lastOkAt: sql`now()` } : {}),
           lastCheckedAt: new Date(),
         },
       })

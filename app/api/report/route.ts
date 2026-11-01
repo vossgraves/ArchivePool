@@ -94,6 +94,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "id or fingerprint required" }, { status: 400 })
   }
 
+  // The report's start on the DATABASE's clock, captured BEFORE the entry snapshot: the
+  // park/failure UPDATE below refuses to apply when the verdict it would act on is no longer the
+  // row's current one, and both sides of that comparison must share one time source.
+  const startedRows = await db.execute(sql`select now() as now`)
+  const reportStartedAt = (startedRows.rows[0] as { now: Date }).now
+
   // Ids are globally unique, fingerprints only per table, so prefer the id. `service` comes
   // from the resolved row: a client must not steer which service a replacement is drawn from.
   // The stored verdict columns come along too — inside REPORT_VERIFY_COOLDOWN_MS they stand in
@@ -106,6 +112,7 @@ export async function POST(req: NextRequest) {
     disabled: boolean
     premium: boolean
     lastCheckedAt: Date | null
+    lastOkAt: Date | null
   } | null = null
   const entryColumns = (t: typeof accountEntries | typeof instanceEntries) => ({
     id: t.id,
@@ -114,6 +121,7 @@ export async function POST(req: NextRequest) {
     disabled: t.disabled,
     premium: t.premium,
     lastCheckedAt: t.lastCheckedAt,
+    lastOkAt: t.lastOkAt,
   })
   if (id) {
     const [account] = await db
@@ -158,12 +166,6 @@ export async function POST(req: NextRequest) {
 
   const table = entry.kind === "account" ? accountEntries : instanceEntries
 
-  // The report's start on the DATABASE's clock: the park/failure UPDATE below refuses to apply
-  // when a check that succeeded after this moment already landed (the last_ok_at guard), so the
-  // reference instant must come from the same clock that writes that column.
-  const startedRows = await db.execute(sql`select now() as now`)
-  const reportStartedAt = (startedRows.rows[0] as { now: Date }).now
-
   // A stored verdict is the entry's last *check* outcome, kept separate from serving policy:
   // 'alive'/'preview' mean the probe succeeded (premium flag tells entitlement), 'dead' means it
   // failed, 'pending' that none has decided yet. `disabled` is deliberately NOT folded in — a
@@ -177,7 +179,12 @@ export async function POST(req: NextRequest) {
     checkedAt != null && Date.now() - new Date(checkedAt).getTime() < REPORT_VERIFY_COOLDOWN_MS
   const readVerdictRow = async () => {
     const [row] = await db
-      .select({ status: table.status, premium: table.premium, lastCheckedAt: table.lastCheckedAt })
+      .select({
+        status: table.status,
+        premium: table.premium,
+        lastCheckedAt: table.lastCheckedAt,
+        lastOkAt: table.lastOkAt,
+      })
       .from(table)
       .where(eq(table.id, entry.id))
       .limit(1)
@@ -194,9 +201,17 @@ export async function POST(req: NextRequest) {
    *    is still stale runs the real provider probe.
    * `probed` reports whether a real check ran this call, which the dead-report path needs for
    * failure accounting: a probe that ran already recorded its own result inside checkEntryById.
+   * `lastOkAtSeen` is the last_ok_at attached to the verdict being acted on — the park UPDATE
+   * applies only while that exact value is still current, so a success landing between the
+   * verdict read and the write makes the write a no-op instead of overwriting the win.
    */
-  const verifyReport = async (): Promise<{ verdict: { ok: boolean; premium: boolean } | null; probed: boolean }> => {
-    if (isFresh(entry.lastCheckedAt)) return { verdict: storedVerdict(entry), probed: false }
+  const verifyReport = async (): Promise<{
+    verdict: { ok: boolean; premium: boolean } | null
+    probed: boolean
+    lastOkAtSeen: Date | null
+  }> => {
+    if (isFresh(entry.lastCheckedAt))
+      return { verdict: storedVerdict(entry), probed: false, lastOkAtSeen: entry.lastOkAt }
 
     const [claimed] = await db
       .update(table)
@@ -213,22 +228,29 @@ export async function POST(req: NextRequest) {
 
     if (!claimed) {
       // Another instance is verifying (or its probe just landed): use whatever is on record now.
-      return { verdict: fresh ? storedVerdict(fresh) : storedVerdict(entry), probed: false }
+      return {
+        verdict: fresh ? storedVerdict(fresh) : storedVerdict(entry),
+        probed: false,
+        lastOkAtSeen: fresh ? fresh.lastOkAt : entry.lastOkAt,
+      }
     }
 
     // We hold the lease. If the re-read is fresh, that verdict is as good as probing again —
     // and one fewer upstream call is the point of the cooldown.
-    if (fresh && isFresh(fresh.lastCheckedAt)) return { verdict: storedVerdict(fresh), probed: false }
+    if (fresh && isFresh(fresh.lastCheckedAt))
+      return { verdict: storedVerdict(fresh), probed: false, lastOkAtSeen: fresh.lastOkAt }
 
     const verdict = await checkEntryById(entry.id, AbortSignal.timeout(PROBE_BUDGET_MS)).catch(() => null)
-    return { verdict, probed: true }
+    // For a probe that FAILED the row's last_ok_at is untouched, so the pre-probe value from the
+    // claim-time re-read is still the marker the park guard must see unchanged.
+    return { verdict, probed: true, lastOkAtSeen: fresh ? fresh.lastOkAt : entry.lastOkAt }
   }
 
   if (reportType === "dead") {
     // Verify-before-park: a report usually means the app's cached copy went stale (Tidal kills
     // access tokens hourly, apps cache them for a day), not that the account died. The live check
     // already records itself and resets a healthy entry, so only a failing one is parked.
-    const { verdict: live, probed } = await verifyReport()
+    const { verdict: live, probed, lastOkAtSeen } = await verifyReport()
     if (live == null || !live.ok) {
       // Failure accounting, in one atomic UPDATE ... RETURNING so racing reports on different
       // instances cannot both conclude "below threshold":
@@ -244,9 +266,11 @@ export async function POST(req: NextRequest) {
       //  - disabled is OR-ed with the new count crossing the threshold, so this write can only
       //    add a disable, never undo one — and it fires whether the +1 comes from this report
       //    (reportCounts) or was already counted by the probe that just ran;
-      //  - the last_ok_at guard makes the whole thing a no-op when a check that ran and
-      //    succeeded landed after this report began — a fresh success always outranks a
-      //    report-driven failure.
+      //  - the verdict-equality guard makes the whole thing a no-op when the verdict's own
+      //    marker (last_ok_at) is no longer what we read: a success landing between the verdict
+      //    read and this write changes last_ok_at, and a fresh success always outranks a
+      //    report-driven failure. The reportStartedAt clause keeps the same protection against
+      //    a success that predates our verdict read but postdates the report's arrival.
       await db
         .update(table)
         .set({
@@ -262,6 +286,7 @@ export async function POST(req: NextRequest) {
         .where(
           and(
             eq(table.id, entry.id),
+            sql`(${table.lastOkAt} is not distinct from ${lastOkAtSeen})`,
             or(sql`${table.lastOkAt} is null`, sql`${table.lastOkAt} < ${reportStartedAt}`),
           ),
         )

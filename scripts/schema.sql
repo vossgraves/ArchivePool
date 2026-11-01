@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS account_entries (
   last_leased_at       timestamptz,                          -- least-recently-leased rotation
   verify_lease_until   timestamptz,                          -- report-path verify anti-stampede
   last_ok_at           timestamptz,                          -- last check that ran and succeeded
+  refresh_in_flight_until timestamptz,                       -- refresh single-flight claim
+  refresh_cooldown_until  timestamptz,                       -- refresh backoff (abuse/transient)
   created_at           timestamptz NOT NULL DEFAULT now()
 );
 
@@ -73,6 +75,14 @@ CREATE INDEX IF NOT EXISTS idx_account_entries_lease ON account_entries (service
 CREATE INDEX IF NOT EXISTS idx_instance_entries_service ON instance_entries (service);
 CREATE INDEX IF NOT EXISTS idx_instance_entries_active ON instance_entries (status, disabled, removed);
 CREATE INDEX IF NOT EXISTS idx_instance_entries_lease ON instance_entries (service, premium DESC, last_leased_at NULLS FIRST);
+
+-- Pool-wide cross-instance signals that do not belong on any entry row (today: the shared
+-- Tidal refresh backoff that trips when abuse_detected hits several accounts inside a minute).
+CREATE TABLE IF NOT EXISTS pool_state (
+  key                text PRIMARY KEY,
+  value              jsonb NOT NULL DEFAULT '{}',
+  updated_at         timestamptz NOT NULL DEFAULT now()
+);
 
 -- Per-check health history (used for the aggregate public status). entry_id is globally unique
 -- across account_entries + instance_entries thanks to the shared id sequence.

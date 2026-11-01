@@ -96,6 +96,7 @@ export async function ingestSource(
       okCount: result.ok ? 1 : 0,
       consecutiveFailures: result.ok ? 0 : 1,
       lastCheckedAt: new Date(),
+      ...(result.ok ? { lastOkAt: sql`now()` } : {}),
       removed: false,
       disabled: false,
       contributor,
@@ -113,6 +114,10 @@ export async function ingestSource(
         checkCount: sql`${table.checkCount} + 1`,
         okCount: sql`${table.okCount} + ${result.ok ? 1 : 0}`,
         consecutiveFailures: result.ok ? 0 : sql`${table.consecutiveFailures} + 1`,
+        // The report path's last_ok_at guard keys on every successful check, and a passing
+        // resubmission is exactly that — stamp it here so a queued dead-report cannot park an
+        // entry the contributor just proved works.
+        ...(result.ok ? { lastOkAt: sql`now()` } : {}),
         lastCheckedAt: new Date(),
         removed: false,
         // Credit sticks to whoever contributed the entry first. A re-submission that revives a

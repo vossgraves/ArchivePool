@@ -53,13 +53,35 @@ const entryColumns = {
 /** Contributed account credentials (encrypted payload). */
 export const accountEntries = pgTable(
   "account_entries",
-  entryColumns,
+  {
+    ...entryColumns,
+    // Single-flight marker for credential refresh (Tidal token POST, Deezer ARL rotation,
+    // Qobuz re-login): whoever wins the conditional claim refreshes and clears it in the same
+    // UPDATE that persists the rotated credential — a concurrent lease on another instance must
+    // never double-POST, because a rotated refresh token invalidates the one just spent.
+    refreshInFlightUntil: timestamp("refresh_in_flight_until", { withTimezone: true }),
+    // Skip refresh attempts until this instant: set on Tidal abuse_detected/429 (15 min,
+    // doubling to 6h while it keeps arriving) and on transient refresh failures (2 min). A
+    // cooling account is never marked dead — the provider's rate limiter is not a verdict.
+    refreshCooldownUntil: timestamp("refresh_cooldown_until", { withTimezone: true }),
+  },
   (t) => ({
     serviceIdx: index("idx_account_entries_service").on(t.service),
     activeIdx: index("idx_account_entries_active").on(t.status, t.disabled, t.removed),
     leaseIdx: index("idx_account_entries_lease").on(t.service, t.premium, t.lastLeasedAt),
   }),
 )
+
+/**
+ * Tiny cross-instance key/value row for pool-wide signals that do not belong on any entry —
+ * today: the global Tidal refresh backoff shared by every account when abuse_detected shows up
+ * on several of them inside a minute.
+ */
+export const poolState = pgTable("pool_state", {
+  key: text("key").primaryKey(),
+  value: jsonb("value").notNull().default({}).$type<Record<string, unknown>>(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+})
 
 /** Contributed instance base URLs (restream/proxy servers). */
 export const instanceEntries = pgTable(

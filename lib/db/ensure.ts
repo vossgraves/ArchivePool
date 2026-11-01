@@ -162,6 +162,15 @@ const STATEMENTS: string[] = [
   // no-ops when a success newer than the report landed (see app/api/report).
   `ALTER TABLE account_entries ADD COLUMN IF NOT EXISTS last_ok_at timestamptz`,
   `ALTER TABLE instance_entries ADD COLUMN IF NOT EXISTS last_ok_at timestamptz`,
+
+  // 2026-11-01: credential-refresh single-flight + backoff (see lib/health.ts refresh helpers).
+  `ALTER TABLE account_entries ADD COLUMN IF NOT EXISTS refresh_in_flight_until timestamptz`,
+  `ALTER TABLE account_entries ADD COLUMN IF NOT EXISTS refresh_cooldown_until timestamptz`,
+  `CREATE TABLE IF NOT EXISTS pool_state (
+    key         text PRIMARY KEY,
+    value       jsonb NOT NULL DEFAULT '{}',
+    updated_at  timestamptz NOT NULL DEFAULT now()
+  )`,
 ]
 
 const globalForMigrations = globalThis as unknown as { __poolSchemaEnsured?: Promise<void> }

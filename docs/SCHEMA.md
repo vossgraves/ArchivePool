@@ -9,6 +9,7 @@ share a table or a feed.
 |---|---|---|---|
 | `account_entries` | contributed account credentials — tokens, ARLs, secrets | always encrypted at rest (`POOL_ENCRYPTION_KEY`), re-encrypted per requester on the way out | `/api/accounts`, legacy `/api/sources` |
 | `instance_entries` | contributed instance base URLs | `baseUrl` stays readable server-side for discovery; sensitive extras are still encrypted | `/api/instances/[service]`, `/api/discovery/*` |
+| `pool_state` | one-row-per-key pool-wide signals (the shared Tidal refresh backoff) | none | internal only |
 
 Both draw ids from one `source_entry_id_seq`, so an id is globally unique across the pair. That
 keeps `health_log.entry_id` unambiguous and lets `/api/report` and the admin endpoints resolve an
