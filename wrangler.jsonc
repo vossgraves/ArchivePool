@@ -14,10 +14,12 @@
     "directory": ".open-next/assets",
     "binding": "ASSETS",
   },
-  "r2_buckets": [
+  "kv_namespaces": [
     {
+      // Workers KV, not R2: the snapshot is a few KB rewritten a few times a day,
+      // well inside KV's free tier (R2 needs a payment method to activate).
       "binding": "POOL_SNAPSHOTS",
-      "bucket_name": "archivepool-snapshots",
+      "id": "55052226236e4a69b298655e82110508",
     },
   ],
   "hyperdrive": [

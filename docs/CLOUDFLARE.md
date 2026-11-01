@@ -17,8 +17,8 @@ file changes how the app runs anywhere else.
 | 50 subrequests/request | Report path ≤ ~10; the sweep/instance sync are driven in `?batch=` slices (≤10 checks each) by GitHub Actions — see below. |
 | Cron triggers | Not needed — the existing GitHub Actions crons keep driving `/api/cron/*` via `HEALTH_URL`. |
 | Hyperdrive | Free. Pooled TCP to Neon; `pg` connects to the `HYPERDRIVE` binding's in-colo endpoint over a Workers socket. |
-| R2 | Free (10 GB). The `POOL_SNAPSHOTS` bucket replaces `@vercel/blob` for `pool/instances.json`. |
-| KV | Not needed — snapshot lives in R2, rate limits stay in-isolate (same semantics as Vercel warm instances). |
+| Workers KV | Free (1k writes / 100k reads / day, 25 MiB values). The `POOL_SNAPSHOTS` namespace replaces `@vercel/blob` for `pool/instances.json` — a few KB rewritten ~6×/day. Chosen over R2: R2 activation needs a payment method on the account; KV does not. |
+| R2 | Not needed — the snapshot lives in KV. |
 
 ## One-time setup
 
@@ -26,9 +26,9 @@ file changes how the app runs anywhere else.
 # 1. Install deps (pnpm — the repo's package manager)
 corepack pnpm install
 
-# 2. R2 bucket for the instance snapshot
-pnpm exec wrangler r2 bucket create archivepool-snapshots
-#    (bucket name is already wired in wrangler.jsonc — POOL_SNAPSHOTS binding)
+# 2. KV namespace for the instance snapshot
+pnpm exec wrangler kv namespace create archivepool-snapshots
+#    (namespace id is already wired in wrangler.jsonc — POOL_SNAPSHOTS binding)
 
 # 3. Hyperdrive over the existing Neon database
 #    Use the same pooled DATABASE_URL Vercel has (Neon "-pooler" host).
@@ -52,7 +52,7 @@ pnpm exec wrangler secret put GITHUB_CLIENT_SECRET
 # optional var: POOL_DB_MAX_CONNECTIONS (default 3; keep ≤3 on Workers)
 ```
 
-`BLOB_READ_WRITE_TOKEN` is **not** needed on Workers — the snapshot goes to R2.
+`BLOB_READ_WRITE_TOKEN` is **not** needed on Workers — the snapshot goes to KV.
 `VERCEL_OIDC_TOKEN` is Vercel-only — not needed.
 
 ### GitHub OAuth App (web sign-in)
@@ -109,9 +109,11 @@ curl http://localhost:8787/api/status
 - **DB** — `pg` + drizzle unchanged; the pool is created lazily per isolate and
   prefers the `HYPERDRIVE` binding's connection string over `DATABASE_URL`
   (`lib/db/index.ts`). Per-isolate pool stays ≤ `POOL_DB_MAX_CONNECTIONS`.
-- **Snapshot** — `POOL_SNAPSHOTS` R2 bucket, same `pool/instances.json` key, same
-  24 h TTL and `snapshotCacheControl()` rules (`lib/edge-snapshot.ts`). The
-  `@vercel/blob` path remains for Vercel deploys.
+- **Snapshot** — `POOL_SNAPSHOTS` KV namespace, same `pool/instances.json` key
+  (value wraps `{savedAt, data}` — KV keeps no object metadata, so the 24 h TTL is
+  checked from the payload plus a hard `expirationTtl`), same
+  `snapshotCacheControl()` rules (`lib/edge-snapshot.ts`). The `@vercel/blob`
+  path remains for Vercel deploys.
 - **Sweep / instance sync** — unchanged logic; only sliced so a single request
   stays inside free-tier CPU/subrequest budgets (`app/api/cron/health?batch=N&cursor=…`,
   `app/api/cron/monochrome?feed=…&after=…&limit=N`). The sweep drains its stale list

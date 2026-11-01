@@ -13,14 +13,16 @@ import { SERVICES, type Service } from "@/lib/sources"
  * lib/ttl-cache.ts for what a woken compute costs.
  *
  * Storage backend, picked per deployment:
- *  - Cloudflare Workers: the `POOL_SNAPSHOTS` R2 bucket binding (object storage is
- *    free at this size; a read through the binding never leaves the colo).
+ *  - Cloudflare Workers: the `POOL_SNAPSHOTS` Workers KV namespace. The object is a
+ *    few KB, rewritten in place a handful of times a day — far inside KV's free
+ *    allotment (1k writes / 100k reads / 25 MiB per value) and needs no payment
+ *    method, unlike R2 on a fresh account.
  *  - Vercel / elsewhere: Vercel Blob, exactly as before, behind BLOB_READ_WRITE_TOKEN.
  * Both are optional: an unconfigured store returns null and the routes fall back to
  * the (cached) database feed, which is the same degradation they already had.
  */
 
-/** One stable pathname, rewritten in place each sweep, so a reader needs no lookup table. */
+/** One stable key, rewritten in place each sweep, so a reader needs no lookup table. */
 const SNAPSHOT_PATHNAME = "pool/instances.json"
 
 /**
@@ -33,23 +35,19 @@ const SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000
 type Discovery = { streaming: string[]; api: string[] }
 type Snapshot = Record<Service, Discovery>
 
-/** The slice of the R2Bucket API this file uses — declared locally so no workers-types dep is needed. */
-interface SnapshotObject {
-  uploaded: Date
-  text(): Promise<string>
-}
-interface SnapshotBucket {
-  get(key: string): Promise<SnapshotObject | null>
-  put(
-    key: string,
-    value: string,
-    options?: { httpMetadata?: { contentType?: string } },
-  ): Promise<unknown>
+// The TTL travels inside the value: KV keeps no uploaded timestamp, so readers check
+// savedAt themselves — identical semantics to the old object-metadata check.
+type StoredSnapshot = { savedAt: number; data: Snapshot }
+
+/** The slice of the KVNamespace API this file uses — declared locally so no workers-types dep is needed. */
+interface SnapshotStore {
+  get(key: string): Promise<string | null>
+  put(key: string, value: string, options?: { expirationTtl?: number }): Promise<unknown>
 }
 
-function snapshotBucket(): SnapshotBucket | null {
-  const bucket = cfBindings()?.POOL_SNAPSHOTS
-  return bucket ? (bucket as SnapshotBucket) : null
+function snapshotStore(): SnapshotStore | null {
+  const store = cfBindings()?.POOL_SNAPSHOTS
+  return store ? (store as SnapshotStore) : null
 }
 
 function isDiscovery(value: unknown): value is Discovery {
@@ -70,26 +68,28 @@ function isDiscovery(value: unknown): value is Discovery {
  * succeeded, and the routes treat an absent snapshot as "read Postgres" anyway.
  */
 export async function writeInstanceSnapshot(): Promise<void> {
-  const bucket = snapshotBucket()
-  // Blob only enters when there is no R2 binding, so a Workers deploy never needs the token.
-  const useBlob = !bucket && Boolean(process.env.BLOB_READ_WRITE_TOKEN)
-  if (!bucket && !useBlob) return
+  const store = snapshotStore()
+  // Blob only enters when there is no KV binding, so a Workers deploy never needs the token.
+  const useBlob = !store && Boolean(process.env.BLOB_READ_WRITE_TOKEN)
+  if (!store && !useBlob) return
   try {
     const discovered = await Promise.all(SERVICES.map((service) => getDiscovery(service)))
     const snapshot = {} as Snapshot
     SERVICES.forEach((service, index) => {
       snapshot[service] = discovered[index]
     })
-    const body = JSON.stringify(snapshot)
-    if (bucket) {
-      await bucket.put(SNAPSHOT_PATHNAME, body, {
-        httpMetadata: { contentType: "application/json" },
+    const body = JSON.stringify({ savedAt: Date.now(), data: snapshot } satisfies StoredSnapshot)
+    if (store) {
+      // Belt-and-braces expiry next to the readers' own savedAt check: a dead store
+      // can never serve a stale feed past the TTL.
+      await store.put(SNAPSHOT_PATHNAME, body, {
+        expirationTtl: Math.ceil(SNAPSHOT_TTL_MS / 1000) + 3600,
       })
     } else {
       // Lazy import: keeps @vercel/blob out of the Workers bundle entirely on builds
       // where this branch can never execute.
       const { put } = await import("@vercel/blob")
-      await put(SNAPSHOT_PATHNAME, body, {
+      await put(SNAPSHOT_PATHNAME, JSON.stringify(snapshot), {
         access: "public",
         contentType: "application/json",
         addRandomSuffix: false,
@@ -107,14 +107,15 @@ export async function writeInstanceSnapshot(): Promise<void> {
  * same null because the caller's fallback — the cached database feed — is identical in each case.
  */
 export async function readInstanceSnapshot(service: Service): Promise<Discovery | null> {
-  const bucket = snapshotBucket()
-  if (bucket) {
+  const store = snapshotStore()
+  if (store) {
     try {
-      const obj = await bucket.get(SNAPSHOT_PATHNAME)
-      if (!obj) return null
-      if (Date.now() - new Date(obj.uploaded).getTime() > SNAPSHOT_TTL_MS) return null
-      const parsed = JSON.parse(await obj.text()) as Partial<Snapshot> | null
-      const entry = parsed?.[service]
+      const raw = await store.get(SNAPSHOT_PATHNAME)
+      if (!raw) return null
+      const parsed = JSON.parse(raw) as Partial<StoredSnapshot> | null
+      if (!parsed || typeof parsed.savedAt !== "number") return null
+      if (Date.now() - parsed.savedAt > SNAPSHOT_TTL_MS) return null
+      const entry = parsed.data?.[service]
       return isDiscovery(entry) ? entry : null
     } catch {
       return null

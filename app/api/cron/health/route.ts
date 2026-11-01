@@ -29,7 +29,7 @@ export const maxDuration = 60
  */
 const BATCH_DEFAULT = 8
 // ~4 upstream fetches per entry worst case (refresh + probe + fallbacks), plus an
-// R2 put on the finishing batch — 10 keeps the total comfortably under 50.
+// KV put on the finishing batch — 10 keeps the total comfortably under 50.
 const BATCH_MAX = 10
 
 function batchLimit(raw: string): number {
