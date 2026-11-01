@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { NextResponse, type NextRequest } from "next/server"
-import { cfWaitUntil } from "@/lib/cf-env"
+import { cfWaitUntil, webLoginDisabled } from "@/lib/cf-env"
 import { setSessionCookie } from "@/lib/sessions"
 import { findUserByUsername, updateLastLogin, verifyPassword } from "@/lib/users"
 import { clientIp, rateLimit, tooManyRequests } from "@/lib/rate-limit"
@@ -18,6 +18,16 @@ const IP_ATTEMPT_LIMIT = 30
 const ATTEMPT_WINDOW_MS = 10 * 60_000
 
 export async function POST(req: NextRequest) {
+  if (webLoginDisabled()) {
+    return NextResponse.json(
+      {
+        error: "web_login_unavailable",
+        detail:
+          "Web accounts are disabled on this deployment — the free-tier CPU budget cannot run the password hash. Use bearer-token read keys and the reporting API instead.",
+      },
+      { status: 503, headers: { "cache-control": "private, no-store" } },
+    )
+  }
   let body: { username?: string; password?: string }
   try {
     body = await req.json()

@@ -58,6 +58,18 @@ export function cfExecutionContext(): object | null {
  * Use for best-effort writes (telemetry bumps) that Workers would otherwise drop
  * when the response completes.
  */
+/**
+ * True when web login/signup must refuse to run: on Workers the free-tier CPU budget
+ * (~10 ms) cannot run the scrypt password hash (N=16384, ~30-80 ms), so those routes
+ * fail fast with 503 web_login_unavailable instead of timing out mid-hash. Set the
+ * CF_WEB_LOGIN_ENABLED var to "true" to re-enable, e.g. on a paid plan where the CPU
+ * budget is minutes. Off Workers this is always false — scrypt runs normally and is
+ * never weakened.
+ */
+export function webLoginDisabled(): boolean {
+  return cfBindings() != null && process.env.CF_WEB_LOGIN_ENABLED !== "true"
+}
+
 export function cfWaitUntil(work: Promise<unknown>): void {
   try {
     const full = getCloudflareContext({ async: false }) as unknown as {

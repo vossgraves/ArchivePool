@@ -10,7 +10,7 @@
     "lint": "eslint .",
     "build:cf": "opennextjs-cloudflare build",
     "preview:cf": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
-    "deploy:cf": "opennextjs-cloudflare deploy",
+    "deploy:cf": "pnpm run build:cf && opennextjs-cloudflare deploy",
     "cf-typegen": "wrangler types"
   },
   "dependencies": {

@@ -1,11 +1,22 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { NextResponse, type NextRequest } from "next/server"
+import { webLoginDisabled } from "@/lib/cf-env"
 import { setSessionCookie } from "@/lib/sessions"
 import { countRecentUsersByIpUa, createUser, findUserByUsername, validateCredentials } from "@/lib/users"
 
 export const dynamic = "force-dynamic"
 
 export async function POST(req: NextRequest) {
+  if (webLoginDisabled()) {
+    return NextResponse.json(
+      {
+        error: "web_login_unavailable",
+        detail:
+          "Web accounts are disabled on this deployment — the free-tier CPU budget cannot run the password hash.",
+      },
+      { status: 503, headers: { "cache-control": "private, no-store" } },
+    )
+  }
   let body: { username?: string; password?: string }
   try {
     body = await req.json()

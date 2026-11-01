@@ -56,7 +56,10 @@ pnpm exec wrangler secret put CRON_SECRET
 ## Deploy
 
 ```bash
-# Build + deploy (requires CLOUDFLARE_API_TOKEN or `wrangler login`)
+# Build + deploy in one step — deploy:cf runs `pnpm build:cf` then
+# `opennextjs-cloudflare deploy` (requires CLOUDFLARE_API_TOKEN or `wrangler login`).
+# NEXT_PUBLIC_SITE_URL must be exported BEFORE the command: it is a build-time
+# var — an env the deploy step alone sees would be too late.
 NEXT_PUBLIC_SITE_URL=https://archivepool.<subdomain>.workers.dev pnpm deploy:cf
 ```
 
@@ -87,10 +90,13 @@ curl http://localhost:8787/api/status
 - **Snapshot** — `POOL_SNAPSHOTS` R2 bucket, same `pool/instances.json` key, same
   24 h TTL and `snapshotCacheControl()` rules (`lib/edge-snapshot.ts`). The
   `@vercel/blob` path remains for Vercel deploys.
-- **Sweep / instance sync** — unchanged logic; only sliced into `?batch=` calls so
-  a single request stays inside free-tier CPU/subrequest budgets
-  (`app/api/cron/health`, `app/api/cron/monochrome`). Response bodies are additive:
-  `remaining`, `done`, `batch{…}` — existing single-shot calls still work.
+- **Sweep / instance sync** — unchanged logic; only sliced so a single request
+  stays inside free-tier CPU/subrequest budgets (`app/api/cron/health?batch=N`,
+  `app/api/cron/monochrome?feed=…&after=…&limit=N`). The sweep drains its stale list
+  until N real checks ran — rows skipped without a verdict (refresh cooling) are passed
+  over inside the call, so `remaining`/`done` stay truthful; feed slices keyset-paginate
+  on the sorted URL list via `batch.nextAfter`. Response bodies are additive:
+  `attempted`, `remaining`, `done`, `batch{…}` — existing single-shot calls still work.
 - **Purge cron** — unchanged (pure SQL, no subrequests).
 - **Response shapes** — all public feeds identical; `s-maxage`/`swr` headers are
   still emitted. `workers.dev` subdomains don't CDN-cache worker responses, so
@@ -99,12 +105,14 @@ curl http://localhost:8787/api/status
 
 ## Known limits on the free tier
 
-- **User login/signup can exceed 10 ms CPU.** `scrypt(N=16384)` intentionally burns
-  ~30–80 ms of CPU per verify — that is the brute-force defense, and the stored
-  hashes cannot be verified cheaper. Admin-token auth (`sha256`) and session-cookie
-  auth (`hmac`) are unaffected; only `/api/auth/login` and `/api/auth/signup` hit it.
-  If user logins matter, the fix is budget not code: Workers Paid ($5/mo) raises the
-  CPU ceiling to 30 s, and nothing else needs to change.
+- **Web login/signup are disabled on Workers — by design.** `scrypt(N=16384)`
+  intentionally burns ~30–80 ms of CPU per verify — that is the brute-force defense, and
+  the stored hashes cannot be verified cheaper, so on Workers `/api/auth/login` and
+  `/api/auth/signup` fail fast: `503 {"error":"web_login_unavailable"}`
+  (`webLoginDisabled()` in `lib/cf-env.ts`; scrypt itself is untouched). Admin-token
+  (`sha256`) and session-cookie (`hmac`) auth are unaffected, and the dashboard pages
+  simply surface the 503. To restore web login, move to Workers Paid ($5/mo, 30 s CPU)
+  and set the `CF_WEB_LOGIN_ENABLED` var to `"true"` — no code change.
 - **First request on a cold isolate** pays one TCP+SCRAM handshake per new pool
   connection (a few ms CPU) — Hyperdrive keeps this rare by pooling upstream.
 - **`use_count`/`last_login` best-effort writes** ride `ctx.waitUntil` on Workers —
