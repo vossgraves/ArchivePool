@@ -245,7 +245,8 @@ if (!liveReady) {
     "live: racing creation signs into the winner",
     "live: claim with active key transfers",
     "live: revoked key files pending, never transfers",
-    "live: proof re-check inside the transfer",
+    "live: mid-claim revoke loses the race",
+    "live: issuance vs recovery cannot deadlock",
     "live: foreign key rejected",
     "live: disabled claimer's session is dead",
     "live: mutual claim impossible",
@@ -254,6 +255,10 @@ if (!liveReady) {
     "live: claimed user's sessions die",
   ]) skip(name, "dev worker or postgres unreachable")
 } else {
+  // Buckets persist in Postgres across runs (10 min windows): clear them so a
+  // previous run's hits cannot consume this run's per-IP/per-user allowance.
+  await sql(`DELETE FROM rate_limit_buckets`).catch(() => {})
+
   // ---- auto-create -----------------------------------------------------------
   {
     const gid = 80000000 + Math.floor(Math.random() * 899999)
@@ -313,24 +318,83 @@ if (!liveReady) {
     )
   }
 
-  // ---- proof re-check inside the transfer: a key that is inactive at the FOR UPDATE re-read cannot transfer
+  // ---- in-transaction proof re-check (Sol finding: the revoked BETWEEN pre-check
+  // and transfer case). The ATP_CLAIM_TEST_HOOK=revoke-proof seam in
+  // transferLegacyAccount revokes an atp_hook_-prefixed key INSIDE the transfer
+  // transaction, just before the locked re-read — deterministic simulation of a
+  // revoke landing between the route's pre-check and the re-check. If the
+  // re-check were removed, this test FAILS (the transfer would complete).
   {
-    // The route's pre-check classifies; the tx re-checks under lock. We exercise
-    // the same predicate the re-check enforces: revoke a key BETWEEN seeding and
-    // the call so the stored row the tx locks is already revoked.
-    const lname = `${RUN}_c`.slice(0, 24)
-    const luid = await makeUser(lname)
-    const k1 = key(++uidSeq)
-    await makeKey(luid, k1)
-    await sql(`UPDATE api_keys SET revoked=true WHERE key_hash=$1`, [hashKey(k1)]) // revoked after the claimer's knowledge
-    const cuid = await makeUser(`${RUN}_ghclaimerc`.slice(0, 24))
-    await sql(`UPDATE users SET github_id=$1, github_login=$2 WHERE id=$3`, [88000000 + luid + 1, `${RUN}gc`, cuid])
-    const res = await claim(cuid, { username: lname, apiKey: k1 }, secret)
-    const u = await sql(`SELECT claimed_by FROM users WHERE id=$1`, [luid])
-    await check(
-      "live: proof re-check inside the transfer",
-      res.status === 200 && res.data.status === "claim_pending" && u[0]?.claimed_by == null,
-    )
+    const hookActive = (() => {
+      for (const p of ["../.dev.vars", ".dev.vars"]) {
+        try {
+          if (fs2.readFileSync(new URL(p, import.meta.url), "utf8").includes("ATP_CLAIM_TEST_HOOK=revoke-proof")) return true
+        } catch { /* next */ }
+      }
+      return false
+    })()
+    if (!hookActive) {
+      skip("live: mid-claim revoke loses the race", "ATP_CLAIM_TEST_HOOK not set")
+    } else {
+      const lname = `${RUN}_c`.slice(0, 24)
+      const luid = await makeUser(lname)
+      // atp_hook_ prefix arms the seam; the key is ACTIVE at the pre-check.
+      const k1 = `atp_hook_${RUN}${String(++uidSeq).padStart(4, "0")}`
+      await makeKey(luid, k1)
+      const cuid = await makeUser(`${RUN}_ghclaimerc`.slice(0, 24))
+      await sql(`UPDATE users SET github_id=$1, github_login=$2 WHERE id=$3`, [88000000 + luid + 1, `${RUN}gc`, cuid])
+      const res = await claim(cuid, { username: lname, apiKey: k1 }, secret)
+      const u = await sql(`SELECT claimed_by, disabled FROM users WHERE id=$1`, [luid])
+      const k = await sql(`SELECT revoked, user_id FROM api_keys WHERE key_hash=$1`, [hashKey(k1)])
+      // The seam revoked the key inside the tx; the re-check must catch it:
+      // no transfer, the outcome is the revoked-key path (pending claim for a
+      // github-linked claimer) — never "claimed".
+      await check(
+        "live: mid-claim revoke loses the race",
+        res.data.status === "claim_pending" && u[0]?.claimed_by == null && u[0]?.disabled === false && k[0]?.revoked === true && k[0]?.user_id === luid,
+      )
+    }
+  }
+
+  // ---- issuance vs recovery lock-order (Sol finding: users-then-requests) ----
+  // claimApprovedKey now locks the user row before the request row, matching
+  // transferLegacyAccount's ascending-users order. Fired concurrently, one side
+  // simply wins; neither can deadlock into a 500. Whatever the order, the end
+  // state is consistent: issuance either lands on the live owner or sees the
+  // request already transferred (404), and the request's owner is exactly one
+  // of the two accounts afterwards.
+  {
+    for (let round = 0; round < 3; round++) {
+      const lname = `${RUN}ir${round}`.slice(0, 24)
+      const luid = await makeUser(lname)
+      const k1 = key(++uidSeq)
+      await makeKey(luid, k1)
+      const reqRows = await sql(
+        `INSERT INTO api_key_requests (user_id, subject, reason, status) VALUES ($1,'sim','sim fixture reason','approved') RETURNING id`,
+        [luid],
+      )
+      const cuid = await makeUser(`${RUN}irw${round}`.slice(0, 24))
+      const [claimRes, issueRes] = await Promise.all([
+        claim(cuid, { username: lname, apiKey: k1 }, secret),
+        fetch(`${BASE}/api/requests/${reqRows[0].id}/claim`, {
+          method: "POST",
+          headers: authed(luid, secret),
+          body: "{}",
+        }).then(async (r) => ({ status: r.status, data: await r.json().catch(() => ({})) })),
+      ])
+      const u = await sql(`SELECT claimed_by, disabled FROM users WHERE id=$1`, [luid])
+      const rq = await sql(`SELECT user_id, status, resulting_key_id FROM api_key_requests WHERE id=$1`, [reqRows[0].id])
+      const no5xx = claimRes.status < 500 && issueRes.status < 500
+      // Outcomes are order-dependent but always consistent: issuance either
+      // minted the key first (200 — the row is then repointed to the claimer),
+      // saw the request already transferred (400 not_found) or had its session
+      // die mid-race (401). A deadlock would surface as a 500 — never allowed.
+      const consistent = [200, 400, 401].includes(issueRes.status) && rq[0]?.user_id === cuid
+      await check(
+        `live: issuance vs recovery cannot deadlock (round ${round})`,
+        no5xx && claimRes.status === 200 && u[0]?.claimed_by === cuid && consistent,
+      )
+    }
   }
 
   // ---- foreign key ------------------------------------------------------------

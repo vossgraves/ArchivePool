@@ -227,6 +227,14 @@ export async function transferLegacyAccount(
     // The ownership proof, re-verified under the same lock the transfer runs
     // under — a key revoked or deleted after the route's pre-check loses.
     const keyHash = hashKey(apiKey)
+    // TEST SEAM — no-op in production (ATP_CLAIM_TEST_HOOK is never set there).
+    // With ATP_CLAIM_TEST_HOOK=revoke-proof, a proof key prefixed atp_hook_ is
+    // revoked inside this transaction, just before the locked re-read — the
+    // exact interleave between the route's pre-check and the re-check that the
+    // regression sim must prove cannot transfer.
+    if (process.env.ATP_CLAIM_TEST_HOOK === "revoke-proof" && apiKey.startsWith("atp_hook_")) {
+      await tx.update(apiKeys).set({ revoked: true }).where(eq(apiKeys.keyHash, keyHash))
+    }
     const [keyRow] = await tx
       .select({ userId: apiKeys.userId, revoked: apiKeys.revoked, deleted: apiKeys.deleted })
       .from(apiKeys)
