@@ -117,7 +117,17 @@ export async function clearSessionCookie(): Promise<void> {
   store.set(COOKIE_NAME, "", { httpOnly: true, path: "/", maxAge: 0 })
 }
 
+/**
+ * Authenticated user id, or null when absent/forged/expired — OR when the
+ * account is dead. Session cookies are stateless and cannot be revoked, so
+ * resolution itself refuses them: a deleted, disabled or claimed legacy
+ * account (claims mark it claimed_by + disabled) loses every outstanding
+ * session the instant the row changes.
+ */
 export async function getSessionUserId(): Promise<number | null> {
   const store = await cookies()
-  return verifySessionToken(store.get(COOKIE_NAME)?.value)
+  const userId = verifySessionToken(store.get(COOKIE_NAME)?.value)
+  if (userId === null) return null
+  const { isSessionUserLive } = await import("@/lib/users")
+  return (await isSessionUserLive(userId)) ? userId : null
 }

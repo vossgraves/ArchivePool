@@ -13,7 +13,7 @@ import {
 import { claimDecision } from "@/lib/github-cookies"
 import { getSessionUserId } from "@/lib/sessions"
 import { USERNAME_PATTERN } from "@/lib/users"
-import { clientIp, rateLimit, tooManyRequests } from "@/lib/rate-limit"
+import { clientIp, dbRateLimit, tooManyRequests } from "@/lib/rate-limit"
 
 export const dynamic = "force-dynamic"
 
@@ -36,8 +36,11 @@ const NO_STORE = { "cache-control": "private, no-store" } as const
  * claimed+disabled, atomically.
  *
  *   { username, apiKey }  -> sha256(apiKey) must match an ACTIVE api_keys row of
- *                            the target. A REVOKED key still identifies the owner
- *                            but cannot self-authorize: it files a pending claim.
+ *                            the target, re-verified FOR UPDATE inside the transfer
+ *                            transaction itself (a key revoked or deleted between
+ *                            the pre-check and the transfer loses there). A REVOKED
+ *                            key still identifies the owner but cannot
+ *                            self-authorize: it files a pending claim.
  *   { username }          -> files a pending github_claims row for admin review
  *                            (GitHub-linked accounts only — the claim binds a
  *                            GitHub identity to the decision).
@@ -52,9 +55,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401, headers: NO_STORE })
   }
 
-  const perIp = rateLimit(`legacy-claim:ip:${clientIp(req.headers)}`, PER_IP_LIMIT, CLAIM_WINDOW_MS)
+  // DB-backed buckets: Workers isolates do not share process memory, so a
+  // local limiter would silently multiply the ceiling by the isolate count.
+  // Fails closed — a limiter outage denies the claim.
+  const perIp = await dbRateLimit(`legacy-claim:ip:${clientIp(req.headers)}`, PER_IP_LIMIT, CLAIM_WINDOW_MS)
   if (!perIp.ok) return tooManyRequests(perIp.retryAfterSec, "legacy-claim")
-  const perUser = rateLimit(`legacy-claim:user:${userId}`, PER_USER_LIMIT, CLAIM_WINDOW_MS)
+  const perUser = await dbRateLimit(`legacy-claim:user:${userId}`, PER_USER_LIMIT, CLAIM_WINDOW_MS)
   if (!perUser.ok) return tooManyRequests(perUser.retryAfterSec, "legacy-claim")
 
   let body: { username?: string; apiKey?: string }
@@ -72,7 +78,7 @@ export async function POST(req: NextRequest) {
     )
   }
 
-  const perName = rateLimit(`legacy-claim:name:${username}`, PER_NAME_LIMIT, CLAIM_WINDOW_MS)
+  const perName = await dbRateLimit(`legacy-claim:name:${username}`, PER_NAME_LIMIT, CLAIM_WINDOW_MS)
   if (!perName.ok) return tooManyRequests(perName.retryAfterSec, "legacy-claim")
 
   try {
@@ -121,10 +127,30 @@ export async function POST(req: NextRequest) {
           detail: "That key is revoked, so the claim needs admin review instead.",
         }, { headers: NO_STORE })
       }
-      // Active key proved ownership. The transfer is atomic — a row claimed
-      // between the read above and this write reports not_claimable.
-      const moved = await transferLegacyAccount(userId, target.id)
+      // Active key proved ownership. The transfer re-verifies the proof under
+      // lock inside its transaction — a key revoked or deleted between the
+      // pre-check above and the transfer's re-read loses there, not here.
+      const moved = await transferLegacyAccount(userId, target.id, apiKey)
       if (!moved.ok) {
+        if (moved.error === "proof_revoked") {
+          const claim = await fileReviewClaim(me, username, "key was revoked during the claim — needs manual review")
+          if (!claim) return reviewUnavailable()
+          return NextResponse.json({
+            ok: true,
+            status: "claim_pending",
+            claimId: claim.id,
+            detail: "That key is revoked, so the claim needs admin review instead.",
+          }, { headers: NO_STORE })
+        }
+        if (moved.error === "proof_failed") {
+          return NextResponse.json(
+            { error: "claim_proof_failed", detail: "That key is not one of this account's existing API keys." },
+            { status: 403, headers: NO_STORE },
+          )
+        }
+        if (moved.error === "claimer_not_live" || moved.error === "claimer_gone") {
+          return NextResponse.json({ error: "account_disabled" }, { status: 403, headers: NO_STORE })
+        }
         return NextResponse.json(
           { error: moved.error, detail: "That account was just claimed elsewhere — it is no longer claimable." },
           { status: 409, headers: NO_STORE },

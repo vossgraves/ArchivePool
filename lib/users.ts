@@ -67,11 +67,6 @@ export async function createUser(
   return row
 }
 
-/** True when [err] is a Postgres unique-constraint violation (23505). */
-function isUniqueViolation(err: unknown): boolean {
-  return typeof err === "object" && err !== null && (err as { code?: string }).code === "23505"
-}
-
 /**
  * Create the account for a first-time GitHub sign-in — no username prompt. The
  * username is DERIVED from the GitHub login (deriveGithubUsernameCandidates):
@@ -80,9 +75,12 @@ function isUniqueViolation(err: unknown): boolean {
  * the final fallback (github_<base36>) makes "every candidate taken"
  * unreachable in practice.
  *
- * Returns { user } on success, { conflict: "github_id" } when this GitHub
- * identity already has an account (a second tab completed first) — the caller
- * re-reads and signs that one in instead.
+ * INSERT ... ON CONFLICT DO NOTHING decides atomicity at the row itself — a
+ * pre-check SELECT would still race the unique index. A zero-row RETURNING is
+ * ambiguous (username taken vs github_id taken), so the github_id lookup runs
+ * next: a hit means a racing creation for the same GitHub identity already won
+ * and the caller signs that user in ({ conflict: "github_id" }); a miss means
+ * the username was taken and the next candidate is tried.
  */
 export async function createGithubUser(
   githubId: number,
@@ -94,21 +92,34 @@ export async function createGithubUser(
   const candidates = deriveGithubUsernameCandidates(githubLogin)
   candidates.push(`github_${(githubId % 36 ** 10).toString(36)}`)
   for (const username of candidates) {
-    if (await findUserByUsername(username)) continue
-    try {
+    const [row] = await db
+      .insert(users)
       // "github" is never a valid scrypt string, so password verification can
       // never succeed on OAuth-only accounts.
-      const user = await createUser(username, "github", ip, ua, githubId, githubLogin)
-      return { user }
-    } catch (err) {
-      if (!isUniqueViolation(err)) throw err
-      // A unique violation on username retries with the next candidate; one on
-      // github_id means this identity was linked between our read and insert.
-    }
+      .values({ username, passwordHash: "github", githubId, githubLogin, createdIp: ip, createdUa: ua, lastLoginIp: ip, lastLoginUa: ua })
+      .onConflictDoNothing()
+      .returning({ id: users.id, username: users.username })
+    if (row) return { user: row }
+    const [winner] = await db.select({ id: users.id }).from(users).where(eq(users.githubId, githubId)).limit(1)
+    if (winner) return { conflict: "github_id" }
   }
-  const [existing] = await db.select({ id: users.id }).from(users).where(eq(users.githubId, githubId)).limit(1)
-  if (existing) return { conflict: "github_id" }
   throw new Error("no free username candidate for GitHub sign-in")
+}
+
+/**
+ * Whether a session for [userId] should still be honoured. Stateless cookies
+ * cannot be revoked, so resolution itself must refuse dead accounts: a missing,
+ * disabled or claimed legacy row (claims mark it claimed_by + disabled) means
+ * every outstanding session for it is over.
+ */
+export async function isSessionUserLive(userId: number): Promise<boolean> {
+  await ensureSchema()
+  const [row] = await db
+    .select({ disabled: users.disabled, claimedBy: users.claimedBy })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1)
+  return Boolean(row) && !row.disabled && row.claimedBy == null
 }
 
 export async function updateLastLogin(userId: number, ip: string, ua: string) {

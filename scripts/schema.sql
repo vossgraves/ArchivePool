@@ -161,6 +161,14 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS github_login text NOT NULL DEFAULT ''
 ALTER TABLE users ADD COLUMN IF NOT EXISTS claimed_by integer REFERENCES users(id);
 CREATE INDEX IF NOT EXISTS idx_users_claimed_by ON users (claimed_by);
 
+-- Shared atomic rate-limit counters for the legacy-claim endpoint — process-local
+-- windows do not hold across Workers isolates (see dbRateLimit in lib/rate-limit.ts).
+CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+  bucket       text PRIMARY KEY,
+  window_start timestamptz NOT NULL,
+  n            integer NOT NULL DEFAULT 0
+);
+
 -- API key requests: subject + reason workflow with admin approval.
 -- Enforces 1 request per IP+UA (see lib/api-keys.ts countRequestsByIpUa).
 CREATE TABLE IF NOT EXISTS api_key_requests (

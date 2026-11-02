@@ -7,6 +7,7 @@ import { apiKeys, apiKeyRequests, githubClaims, users } from "@/lib/db/schema"
 import { hashKey } from "@/lib/api-keys"
 import { budgetedFetch } from "@/lib/cf-env"
 import {
+  deriveGithubUsernameCandidates,
   OAUTH_COOKIE_MAX_AGE_SEC,
   packOauthCookie,
   readOauthCookie,
@@ -166,31 +167,77 @@ export async function findOwnedApiKey(
 
 export type ClaimTransfer =
   | { ok: true; keys: number; requests: number }
-  | { ok: false; error: "not_claimable" | "same_account" | "claimer_gone" }
+  | {
+      ok: false
+      error:
+        | "not_claimable"
+        | "same_account"
+        | "claimer_gone"
+        | "claimer_not_live"
+        | "proof_failed"
+        | "proof_revoked"
+    }
 
 /**
  * Absorb a legacy account into [claimerId]'s account — the only way a legacy
- * username transfers. One transaction:
+ * username transfers. ONE transaction; nothing outside it is authoritative:
  *
- *   1. ATOMIC marker: UPDATE users SET claimed_by, disabled WHERE id=? AND the row is
+ *   1. LOCK the claimer and target rows SELECT ... FOR UPDATE in ascending-id
+ *      order — a deterministic order, so two accounts claiming each other cannot
+ *      interleave into a deadlock (and after the first transfer, the second sees
+ *      a dead claimer, not a mutual wipeout).
+ *   2. Re-check the CLAIMER: must exist and be live — a disabled or already
+ *      claimed account cannot receive rows (its session dies anyway; a transfer
+ *      to it would strand the keys).
+ *   3. Re-check the PROOF under lock: the presented API key's row is locked
+ *      FOR UPDATE and must still belong to the target, be unrevoked and
+ *      undeleted. A key revoked or deleted between the caller's pre-check and
+ *      this point can no longer authorize a takeover.
+ *   4. ATOMIC marker: UPDATE users SET claimed_by, disabled WHERE id=? AND the row is
  *      still claimable (not claimed, not disabled, no github_id, not the claimer).
  *      The predicate is the concurrency guard — a row claimed between the earlier
  *      read and this write yields no row and the whole transaction rolls back.
- *   2. Re-point every per-user row: api_keys and api_key_requests get the new owner.
+ *   5. Re-point every per-user row: api_keys and api_key_requests get the new owner.
  *      Keys keep working unchanged for apps — only user_id moves; key_hash and
  *      prefix are untouched, and api_key_leases references key ids, not users.
  *
  * contributor credit and audit_log history are deliberately NOT rewritten —
  * they are historical records, not ownership.
  */
-export async function transferLegacyAccount(claimerId: number, legacyUserId: number): Promise<ClaimTransfer> {
+export async function transferLegacyAccount(
+  claimerId: number,
+  legacyUserId: number,
+  apiKey: string,
+): Promise<ClaimTransfer> {
   await ensureSchema()
   if (claimerId === legacyUserId) return { ok: false, error: "same_account" }
   return db.transaction(async (tx) => {
+    await lockUsersInOrder(tx, claimerId, legacyUserId)
+
     // The claimer must be a live row: it becomes claimed_by and the new owner of
     // every transferred key, both foreign keys.
-    const [claimer] = await tx.select({ id: users.id }).from(users).where(eq(users.id, claimerId)).limit(1)
+    const [claimer] = await tx
+      .select({ id: users.id, disabled: users.disabled, claimedBy: users.claimedBy })
+      .from(users)
+      .where(eq(users.id, claimerId))
+      .limit(1)
     if (!claimer) return { ok: false, error: "claimer_gone" as const }
+    if (claimer.disabled || claimer.claimedBy != null) return { ok: false, error: "claimer_not_live" as const }
+
+    // The ownership proof, re-verified under the same lock the transfer runs
+    // under — a key revoked or deleted after the route's pre-check loses.
+    const keyHash = hashKey(apiKey)
+    const [keyRow] = await tx
+      .select({ userId: apiKeys.userId, revoked: apiKeys.revoked, deleted: apiKeys.deleted })
+      .from(apiKeys)
+      .where(eq(apiKeys.keyHash, keyHash))
+      .limit(1)
+      .for("update")
+    if (!keyRow || keyRow.userId !== legacyUserId || keyRow.deleted) {
+      return { ok: false, error: "proof_failed" as const }
+    }
+    if (keyRow.revoked) return { ok: false, error: "proof_revoked" as const }
+
     const [marker] = await tx
       .update(users)
       .set({ claimedBy: claimerId, disabled: true })
@@ -219,6 +266,16 @@ export async function transferLegacyAccount(claimerId: number, legacyUserId: num
   })
 }
 
+/** FOR UPDATE on two user rows in ascending-id order — the deterministic lock
+ *  order that keeps concurrent mutual claims deadlock-free. */
+async function lockUsersInOrder(tx: Tx, first: number, second: number): Promise<void> {
+  for (const id of [Math.min(first, second), Math.max(first, second)]) {
+    await tx.select({ id: users.id }).from(users).where(eq(users.id, id)).limit(1).for("update")
+  }
+}
+
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0]
+
 export async function createGithubClaim(githubId: number, githubLogin: string, username: string, provenance = "") {
   const [row] = await db
     .insert(githubClaims)
@@ -239,11 +296,16 @@ export async function listPendingClaims() {
 
 /**
  * Approve a pending claim — inside one transaction. The claimed legacy account's
- * rows are transferred to the claim's GitHub account (resolved through its
- * github_id), the legacy row is marked claimed+disabled by the same atomic
- * predicate the self-service path uses, and the claim is closed. Refuses when
- * the GitHub account no longer exists, the target went away, or the target was
- * already claimed/linked — each maps to a distinct error for the admin UI.
+ * rows are transferred to the claim's GitHub account, the legacy row is marked
+ * claimed+disabled by the same atomic predicate the self-service path uses, and
+ * the claim is closed.
+ *
+ * Claims filed BEFORE auto-account creation was deployed may reference a
+ * github_id that has no account yet — the claim still stores the identity, so
+ * approval CREATES the account from the claim's github_id/login (same candidate
+ * derivation as first sign-in) and transfers into it. Refuses when the target
+ * went away, was already claimed/linked, or the claimer row is dead — each maps
+ * to a distinct error for the admin UI.
  */
 export async function approveGithubClaim(claimId: number, reviewerId: number | null) {
   await ensureSchema()
@@ -254,10 +316,50 @@ export async function approveGithubClaim(claimId: number, reviewerId: number | n
       .where(and(eq(githubClaims.id, claimId), eq(githubClaims.status, "pending")))
       .limit(1)
     if (!claim) return null
-    const [claimer] = await tx.select({ id: users.id }).from(users).where(eq(users.githubId, claim.githubId)).limit(1)
+
+    let claimer = (await tx.select({ id: users.id }).from(users).where(eq(users.githubId, claim.githubId)).limit(1))[0] ?? null
+    if (!claimer) {
+      // Pre-upgrade claim: materialize the GitHub account it names. INSERT ...
+      // ON CONFLICT DO NOTHING handles races — a zero-row insert followed by a
+      // github_id hit means a concurrent sign-in created it first and wins.
+      const candidates = deriveGithubUsernameCandidates(claim.githubLogin || "")
+      candidates.push(`github_${(claim.githubId % 36 ** 10).toString(36)}`)
+      for (const username of candidates) {
+        const [created] = await tx
+          .insert(users)
+          .values({ username, passwordHash: "github", githubId: claim.githubId, githubLogin: claim.githubLogin })
+          .onConflictDoNothing()
+          .returning({ id: users.id })
+        if (created) {
+          claimer = created
+          break
+        }
+        const [winner] = await tx.select({ id: users.id }).from(users).where(eq(users.githubId, claim.githubId)).limit(1)
+        if (winner) {
+          claimer = winner
+          break
+        }
+      }
+    }
     if (!claimer) return { error: "claimer_gone" as const }
-    const [target] = await tx.select().from(users).where(eq(users.username, claim.username)).limit(1)
+
+    const [target] = await tx.select({ id: users.id }).from(users).where(eq(users.username, claim.username)).limit(1)
     if (!target) return { error: "user_gone" as const }
+    if (target.id === claimer.id) return { error: "not_claimable" as const }
+
+    await lockUsersInOrder(tx, claimer.id, target.id)
+
+    // The claimer row may have gone dead while we held no locks — a disabled or
+    // claimed account cannot receive a transfer.
+    const [claimerLive] = await tx
+      .select({ disabled: users.disabled, claimedBy: users.claimedBy })
+      .from(users)
+      .where(eq(users.id, claimer.id))
+      .limit(1)
+    if (!claimerLive || claimerLive.disabled || claimerLive.claimedBy != null) {
+      return { error: "claimer_gone" as const }
+    }
+
     const [marker] = await tx
       .update(users)
       .set({ claimedBy: claimer.id, disabled: true })

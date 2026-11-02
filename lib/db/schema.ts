@@ -273,6 +273,19 @@ export const githubClaims = pgTable(
   }),
 )
 
+/**
+ * Shared atomic counters for the legacy-claim rate limit. Unlike the process-local
+ * limiter in lib/rate-limit.ts this holds across Workers isolates and deploys: one
+ * row per bucket, upserted in a single statement so the counter cannot be raced.
+ * `window_start` is the (fixed) window origin; when it is older than the window
+ * length the bucket resets in the same upsert.
+ */
+export const rateLimitBuckets = pgTable("rate_limit_buckets", {
+  bucket: text("bucket").primaryKey(),
+  windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+  n: integer("n").notNull().default(0),
+})
+
 /** Append-only record of privileged actions. See docs/ADMIN.md. */
 export const auditLog = pgTable(
   "audit_log",

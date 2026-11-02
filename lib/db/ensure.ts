@@ -162,6 +162,15 @@ const STATEMENTS: string[] = [
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS claimed_by integer REFERENCES users(id)`,
   `CREATE INDEX IF NOT EXISTS idx_users_claimed_by ON users (claimed_by)`,
 
+  // 2026-11-02: shared rate-limit counters for the claim endpoint — process-local
+  // limits do not hold across Workers isolates, so the claim buckets live here,
+  // upserted atomically (see dbRateLimit in lib/rate-limit.ts).
+  `CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+    bucket       text PRIMARY KEY,
+    window_start timestamptz NOT NULL,
+    n            integer NOT NULL DEFAULT 0
+  )`,
+
   // 2026-09-12: named admins and an audit trail.
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'user'`,
   `CREATE TABLE IF NOT EXISTS audit_log (
