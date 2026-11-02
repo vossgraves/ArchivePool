@@ -4,6 +4,7 @@ import { and, desc, eq, gte } from "drizzle-orm"
 import { db } from "@/lib/db"
 import { ensureSchema } from "@/lib/db/ensure"
 import { users } from "@/lib/db/schema"
+import { deriveGithubUsernameCandidates } from "@/lib/github-cookies"
 
 // scrypt hashing moved to lib/passwords.ts, which the web login routes import lazily
 // — the Workers code path never loads it (see webLoginDisabled in lib/cf-env).
@@ -56,13 +57,69 @@ export async function createUser(
   ip = "",
   ua = "",
   githubId: number | null = null,
+  githubLogin = "",
 ) {
   await ensureSchema()
   const [row] = await db
     .insert(users)
-    .values({ username, passwordHash, githubId, createdIp: ip, createdUa: ua, lastLoginIp: ip, lastLoginUa: ua })
+    .values({ username, passwordHash, githubId, githubLogin, createdIp: ip, createdUa: ua, lastLoginIp: ip, lastLoginUa: ua })
     .returning({ id: users.id, username: users.username })
   return row
+}
+
+/**
+ * Create the account for a first-time GitHub sign-in — no username prompt. The
+ * username is DERIVED from the GitHub login (deriveGithubUsernameCandidates):
+ * the first free candidate wins, so a GitHub login can never silently take over
+ * an existing account's name. Collisions get a gh_/numeric-suffixed variant;
+ * the final fallback (github_<base36>) makes "every candidate taken"
+ * unreachable in practice.
+ *
+ * INSERT ... ON CONFLICT DO NOTHING decides atomicity at the row itself — a
+ * pre-check SELECT would still race the unique index. A zero-row RETURNING is
+ * ambiguous (username taken vs github_id taken), so the github_id lookup runs
+ * next: a hit means a racing creation for the same GitHub identity already won
+ * and the caller signs that user in ({ conflict: "github_id" }); a miss means
+ * the username was taken and the next candidate is tried.
+ */
+export async function createGithubUser(
+  githubId: number,
+  githubLogin: string,
+  ip = "",
+  ua = "",
+): Promise<{ user: { id: number; username: string } } | { conflict: "github_id" }> {
+  await ensureSchema()
+  const candidates = deriveGithubUsernameCandidates(githubLogin)
+  candidates.push(`github_${(githubId % 36 ** 10).toString(36)}`)
+  for (const username of candidates) {
+    const [row] = await db
+      .insert(users)
+      // "github" is never a valid scrypt string, so password verification can
+      // never succeed on OAuth-only accounts.
+      .values({ username, passwordHash: "github", githubId, githubLogin, createdIp: ip, createdUa: ua, lastLoginIp: ip, lastLoginUa: ua })
+      .onConflictDoNothing()
+      .returning({ id: users.id, username: users.username })
+    if (row) return { user: row }
+    const [winner] = await db.select({ id: users.id }).from(users).where(eq(users.githubId, githubId)).limit(1)
+    if (winner) return { conflict: "github_id" }
+  }
+  throw new Error("no free username candidate for GitHub sign-in")
+}
+
+/**
+ * Whether a session for [userId] should still be honoured. Stateless cookies
+ * cannot be revoked, so resolution itself must refuse dead accounts: a missing,
+ * disabled or claimed legacy row (claims mark it claimed_by + disabled) means
+ * every outstanding session for it is over.
+ */
+export async function isSessionUserLive(userId: number): Promise<boolean> {
+  await ensureSchema()
+  const [row] = await db
+    .select({ disabled: users.disabled, claimedBy: users.claimedBy })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1)
+  return Boolean(row) && !row.disabled && row.claimedBy == null
 }
 
 export async function updateLastLogin(userId: number, ip: string, ua: string) {

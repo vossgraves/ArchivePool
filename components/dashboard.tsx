@@ -17,6 +17,7 @@ import { Field } from "@/components/ui/field"
 import { Notice } from "@/components/ui/notice"
 import { Panel } from "@/components/ui/panel"
 import { DashboardContributions } from "@/components/dashboard-contributions"
+import { DashboardLegacyRecovery } from "@/components/dashboard-legacy-recovery"
 import { DashboardPool } from "@/components/dashboard-pool"
 import { DashboardSummary } from "@/components/dashboard-summary"
 import { cn, expiryState, formatAgo, formatCount, formatDateTime, formatDay, formatUntil } from "@/lib/utils"
@@ -440,6 +441,8 @@ export function Dashboard({
           </form>
         </details>
       </Panel>
+
+      <DashboardLegacyRecovery />
 
       <div id="contributions" className="scroll-mt-20">
         <DashboardContributions

@@ -69,10 +69,15 @@ https://github.com/settings/developers → "New OAuth App":
 Then set the app's Client ID and generated Client Secret as the two
 `wrangler secret put` values above. The flow costs two outbound fetches and a few
 `crypto.subtle` HMAC/SHA-256 ops per callback — well inside the free request budget.
-Legacy accounts claim their old username with an existing API key
-(`POST /api/auth/github/claim`) or an admin-approved `github_claims` row; new users
-just pick a free username. Deployments that keep password login (non-Workers) get the
-same GitHub button alongside the password form.
+A first GitHub sign-in creates the account immediately — the username is derived
+from the GitHub login (collisions get a suffixed variant; an existing legacy name is
+never taken over) and there is no username prompt. Legacy (pre-GitHub) accounts are
+recovered from the dashboard: the user proves ownership with one of the old account's
+API keys (`POST /api/auth/claim-legacy`) and every per-user row — api_keys, same
+hashes so apps keep working, and api_key_requests — moves to their GitHub account while
+the legacy row is marked claimed+disabled. Without a key, GitHub-linked accounts file a
+`github_claims` row for admin review (same transfer on approval). Deployments that
+keep password login (non-Workers) get the same GitHub button alongside the password form.
 
 ## Deploy
 

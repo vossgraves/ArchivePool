@@ -9,10 +9,11 @@ export const dynamic = "force-dynamic"
 const MIN_REJECTION_NOTE = 10
 
 /**
- * Review one GitHub username claim: `{ action: "approve" }` links the claimed
- * github_id to the existing account (the next GitHub sign-in lands straight in it);
- * `{ action: "reject", note: "…" }` files a visible reason. Same gate and audit
- * trail as /api/admin/requests/[id].
+ * Review one legacy-account claim: `{ action: "approve" }` transfers the legacy
+ * username's per-user rows (api_keys — same hashes, so they keep working — and
+ * api_key_requests) to the claim's GitHub account and marks the legacy row
+ * claimed+disabled; `{ action: "reject", note: "…" }` files a visible reason.
+ * Same gate and audit trail as /api/admin/requests/[id].
  */
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const actor = await resolveAdmin(req)

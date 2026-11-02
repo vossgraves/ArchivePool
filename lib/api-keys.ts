@@ -356,10 +356,17 @@ export type ClaimResult =
 /**
  * The only place an approved request becomes a key row, and the only place the plaintext exists.
  * Locks the request row so two tabs cannot both claim it and orphan a key.
+ *
+ * Lock order: the user row FIRST, then the request — the same order
+ * transferLegacyAccount uses for recovery (users ascending, then request/key
+ * rows). Without it, issuance could hold the request lock while recovery holds
+ * the user lock and waits for the request — PostgreSQL then aborts one side
+ * with a deadlock 500.
  */
 export async function claimApprovedKey(userId: number, requestId: number): Promise<ClaimResult> {
   await ensureSchema()
   return db.transaction(async (tx) => {
+    await tx.select({ id: users.id }).from(users).where(eq(users.id, userId)).limit(1).for("update")
     const [req] = await tx
       .select()
       .from(apiKeyRequests)

@@ -7,6 +7,7 @@ import {
   issueOauthCookie,
   pkceChallenge,
 } from "@/lib/github-auth"
+import { cookieSecure } from "@/lib/sessions"
 
 export const dynamic = "force-dynamic"
 
@@ -27,7 +28,7 @@ export async function GET(req: NextRequest) {
   const res = NextResponse.redirect(authorizeUrl(origin, state, await pkceChallenge(verifier)))
   res.cookies.set(GITHUB_OAUTH_COOKIE, cookieValue, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    secure: cookieSecure(req.url),
     sameSite: "lax",
     path: "/",
     maxAge: 600,

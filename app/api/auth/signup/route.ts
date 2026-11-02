@@ -60,6 +60,6 @@ export async function POST(req: NextRequest) {
   // Lazy-imported for the same reason as the login route's verifyPassword.
   const { hashPassword } = await import("@/lib/passwords")
   const user = await createUser(username, await hashPassword(password), ip, ua)
-  await setSessionCookie(user.id)
+  await setSessionCookie(user.id, req.url)
   return NextResponse.json({ username: user.username })
 }

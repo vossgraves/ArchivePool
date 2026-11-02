@@ -14,6 +14,9 @@ import { cn } from "@/lib/utils"
 
 export const metadata = { title: "Dashboard" }
 
+// Session-dependent — never let a prerendered/cached copy serve signed-out state.
+export const dynamic = "force-dynamic"
+
 export default async function DashboardPage() {
   const userId = await getSessionUserId()
   if (!userId) redirect("/login")

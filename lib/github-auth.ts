@@ -1,20 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import "server-only"
-import { and, desc, eq, isNull, or } from "drizzle-orm"
+import { and, desc, eq, sql } from "drizzle-orm"
 import { db } from "@/lib/db"
 import { ensureSchema } from "@/lib/db/ensure"
-import { apiKeys, githubClaims, users } from "@/lib/db/schema"
+import { apiKeys, apiKeyRequests, githubClaims, users } from "@/lib/db/schema"
 import { hashKey } from "@/lib/api-keys"
 import { budgetedFetch } from "@/lib/cf-env"
 import {
+  deriveGithubUsernameCandidates,
   OAUTH_COOKIE_MAX_AGE_SEC,
   packOauthCookie,
-  packPendingCookie,
   readOauthCookie,
-  readPendingCookie,
-  type PendingIdentity,
 } from "@/lib/github-cookies"
-import { signWithSessionSecret } from "@/lib/hmac-cookie"
+import { lockUsersInOrder, runLegacyClaimTransfer, type ClaimTransfer } from "@/lib/claim-transfer"
+
 
 /**
  * GitHub OAuth sign-in — the web-auth path that fits a Workers free request
@@ -24,20 +23,21 @@ import { signWithSessionSecret } from "@/lib/hmac-cookie"
  *   /api/auth/github/start     state + PKCE verifier in a signed HttpOnly cookie,
  *                              redirect to github.com/login/oauth/authorize
  *   /api/auth/github/callback  verify state, exchange code (PKCE), fetch /user,
- *                              sign in known github_ids, else hand out a short-lived
- *                              "pending" cookie that carries the verified identity
- *   /api/auth/github/complete  choose a NEW username -> create account
- *   /api/auth/github/claim     take an EXISTING username -> prove with one of its
- *                              active API keys (sha256 lookup) or a revoked key /
- *                              no key -> pending github_claims row for admin review
+ *                              sign a known github_id straight in, or auto-create
+ *                              an account whose username is DERIVED from the
+ *                              GitHub login (no username prompt anywhere)
+ *   /api/auth/claim-legacy     signed-in user proves a legacy username is theirs
+ *                              with one of its ACTIVE API keys -> every per-user
+ *                              row moves to their account and the legacy row is
+ *                              marked claimed+disabled; a REVOKED key or no key
+ *                              files a pending github_claims row for admin review
  *
- * Both cookies are purpose-tagged inside their signed body ("gh-oauth-v1" vs
- * "gh-pending-v1") and every numeric field passes a canonical regex — a cookie
- * minted for one step can never be re-presented as the other.
+ * The state cookie is purpose-tagged inside its signed body ("gh-oauth-v1") and
+ * every field passes a canonical regex, so it cannot be re-presented as any
+ * other token.
  */
 
 export const GITHUB_OAUTH_COOKIE = "atp_gh_oauth"
-export const GITHUB_PENDING_COOKIE = "atp_gh_pending"
 export { OAUTH_COOKIE_MAX_AGE_SEC }
 export const GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 export const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
@@ -123,35 +123,26 @@ export async function fetchGithubUser(token: string): Promise<GithubIdentity> {
   return { id: data.id, login: data.login }
 }
 
-// ---------- Pending-identity cookie ----------
-
-export async function issuePendingCookie(identity: GithubIdentity): Promise<string> {
-  return packPendingCookie(identity.id, identity.login)
-}
-
-export type { PendingIdentity }
-export { readPendingCookie }
-
-// ---------- users / claims ----------
+// ---------- users / legacy claims ----------
 
 export async function findUserByGithubId(githubId: number) {
   const [row] = await db.select().from(users).where(eq(users.githubId, githubId)).limit(1)
   return row ?? null
 }
 
-/**
- * Attach a GitHub subject to an existing account — ATOMICALLY: the UPDATE only
- * lands while the row's github_id is still NULL (or already this same id), so two
- * concurrent claimants cannot both win. Null = the row was claimed in between.
- */
-export async function linkGithubToUser(userId: number, githubId: number) {
+/** The account fields the legacy-claim flow needs. */
+export async function findClaimableUser(username: string) {
   const [row] = await db
-    .update(users)
-    .set({ githubId })
-    .where(
-      and(eq(users.id, userId), or(isNull(users.githubId), eq(users.githubId, githubId))),
-    )
-    .returning({ id: users.id, username: users.username })
+    .select({
+      id: users.id,
+      username: users.username,
+      disabled: users.disabled,
+      githubId: users.githubId,
+      claimedBy: users.claimedBy,
+    })
+    .from(users)
+    .where(eq(users.username, username))
+    .limit(1)
   return row ?? null
 }
 
@@ -175,6 +166,24 @@ export async function findOwnedApiKey(
   return row ?? null
 }
 
+export type { ClaimTransfer }
+
+/**
+ * Absorb a legacy account into [claimerId]'s account — the only way a legacy
+ * username transfers. The transaction itself lives in lib/claim-transfer.ts
+ * (a dependency-light module the regression sim also compiles and calls
+ * directly); this wrapper supplies the shared db handle and hashes the
+ * presented key so plaintext never crosses that boundary.
+ */
+export async function transferLegacyAccount(
+  claimerId: number,
+  legacyUserId: number,
+  apiKey: string,
+): Promise<ClaimTransfer> {
+  await ensureSchema()
+  return runLegacyClaimTransfer(db, claimerId, legacyUserId, hashKey(apiKey))
+}
+
 export async function createGithubClaim(githubId: number, githubLogin: string, username: string, provenance = "") {
   const [row] = await db
     .insert(githubClaims)
@@ -194,11 +203,17 @@ export async function listPendingClaims() {
 }
 
 /**
- * Approve a pending claim — inside one transaction, with the same atomic link
- * predicate as the self-service path: the UPDATE only lands while the account is
- * still unlinked (or already holds this github_id). Also refuses when that
- * github_id is already attached to a DIFFERENT account; the partial-unique index
- * remains the final backstop and its violation maps to "already_linked".
+ * Approve a pending claim — inside one transaction. The claimed legacy account's
+ * rows are transferred to the claim's GitHub account, the legacy row is marked
+ * claimed+disabled by the same atomic predicate the self-service path uses, and
+ * the claim is closed.
+ *
+ * Claims filed BEFORE auto-account creation was deployed may reference a
+ * github_id that has no account yet — the claim still stores the identity, so
+ * approval CREATES the account from the claim's github_id/login (same candidate
+ * derivation as first sign-in) and transfers into it. Refuses when the target
+ * went away, was already claimed/linked, or the claimer row is dead — each maps
+ * to a distinct error for the admin UI.
  */
 export async function approveGithubClaim(claimId: number, reviewerId: number | null) {
   await ensureSchema()
@@ -209,22 +224,66 @@ export async function approveGithubClaim(claimId: number, reviewerId: number | n
       .where(and(eq(githubClaims.id, claimId), eq(githubClaims.status, "pending")))
       .limit(1)
     if (!claim) return null
-    const [target] = await tx.select().from(users).where(eq(users.username, claim.username)).limit(1)
+
+    let claimer = (await tx.select({ id: users.id }).from(users).where(eq(users.githubId, claim.githubId)).limit(1))[0] ?? null
+    if (!claimer) {
+      // Pre-upgrade claim: materialize the GitHub account it names. INSERT ...
+      // ON CONFLICT DO NOTHING handles races — a zero-row insert followed by a
+      // github_id hit means a concurrent sign-in created it first and wins.
+      const candidates = deriveGithubUsernameCandidates(claim.githubLogin || "")
+      candidates.push(`github_${(claim.githubId % 36 ** 10).toString(36)}`)
+      for (const username of candidates) {
+        const [created] = await tx
+          .insert(users)
+          .values({ username, passwordHash: "github", githubId: claim.githubId, githubLogin: claim.githubLogin })
+          .onConflictDoNothing()
+          .returning({ id: users.id })
+        if (created) {
+          claimer = created
+          break
+        }
+        const [winner] = await tx.select({ id: users.id }).from(users).where(eq(users.githubId, claim.githubId)).limit(1)
+        if (winner) {
+          claimer = winner
+          break
+        }
+      }
+    }
+    if (!claimer) return { error: "claimer_gone" as const }
+
+    const [target] = await tx.select({ id: users.id }).from(users).where(eq(users.username, claim.username)).limit(1)
     if (!target) return { error: "user_gone" as const }
-    const [holder] = await tx
-      .select({ id: users.id })
+    if (target.id === claimer.id) return { error: "not_claimable" as const }
+
+    await lockUsersInOrder(tx, claimer.id, target.id)
+
+    // The claimer row may have gone dead while we held no locks — a disabled or
+    // claimed account cannot receive a transfer.
+    const [claimerLive] = await tx
+      .select({ disabled: users.disabled, claimedBy: users.claimedBy })
       .from(users)
-      .where(eq(users.githubId, claim.githubId))
+      .where(eq(users.id, claimer.id))
       .limit(1)
-    if (holder && holder.id !== target.id) return { error: "already_linked" as const }
-    const [linked] = await tx
+    if (!claimerLive || claimerLive.disabled || claimerLive.claimedBy != null) {
+      return { error: "claimer_gone" as const }
+    }
+
+    const [marker] = await tx
       .update(users)
-      .set({ githubId: claim.githubId })
+      .set({ claimedBy: claimer.id, disabled: true })
       .where(
-        and(eq(users.id, target.id), or(isNull(users.githubId), eq(users.githubId, claim.githubId))),
+        and(
+          eq(users.id, target.id),
+          sql`${users.claimedBy} IS NULL`,
+          sql`${users.githubId} IS NULL`,
+          eq(users.disabled, false),
+          sql`${users.id} <> ${claimer.id}`,
+        ),
       )
       .returning({ id: users.id })
-    if (!linked) return { error: "already_linked" as const }
+    if (!marker) return { error: "not_claimable" as const }
+    await tx.update(apiKeys).set({ userId: claimer.id }).where(eq(apiKeys.userId, target.id))
+    await tx.update(apiKeyRequests).set({ userId: claimer.id }).where(eq(apiKeyRequests.userId, target.id))
     const [done] = await tx
       .update(githubClaims)
       .set({ status: "approved", reviewedAt: new Date(), reviewedBy: reviewerId })

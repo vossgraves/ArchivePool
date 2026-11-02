@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import "server-only"
 import { createHash } from "node:crypto"
+import { pool } from "@/lib/db"
+import { ensureSchema } from "@/lib/db/ensure"
 
 /**
  * Lightweight in-memory sliding-window rate limiter.
@@ -70,6 +72,42 @@ export function rateLimit(id: string, limit: number, windowMs: number): RateVerd
   }
 
   return { ok: true, retryAfterSec: 0, remaining: limit - bucket.hits.length }
+}
+
+/**
+ * Shared, atomic rate limit — the ONLY option for buckets that must hold across
+ * Workers isolates and serverless instances (the legacy-claim endpoint: a claim
+ * brute-force spread over isolates would defeat the process-local limiter above).
+ *
+ * One row per bucket in rate_limit_buckets, upserted inside a single statement so
+ * concurrent hits can never lose a count; when the stored window_start is older
+ * than [windowMs] the same upsert resets it. FAILS CLOSED: a limiter outage denies
+ * the request rather than opening a brute-force window.
+ */
+export async function dbRateLimit(id: string, limit: number, windowMs: number): Promise<RateVerdict> {
+  try {
+    await ensureSchema()
+    const { rows } = await pool.query<{ n: number; window_start: Date }>(
+      `INSERT INTO rate_limit_buckets (bucket, window_start, n)
+       VALUES ($1, now(), 1)
+       ON CONFLICT (bucket) DO UPDATE SET
+         window_start = CASE
+           WHEN rate_limit_buckets.window_start < now() - $2 * interval '1 millisecond'
+           THEN now() ELSE rate_limit_buckets.window_start END,
+         n = CASE
+           WHEN rate_limit_buckets.window_start < now() - $2 * interval '1 millisecond'
+           THEN 1 ELSE rate_limit_buckets.n + 1 END
+       RETURNING n, window_start`,
+      [id, windowMs],
+    )
+    const n = Number(rows[0]?.n ?? limit + 1)
+    const windowStart = new Date(rows[0]?.window_start ?? Date.now()).getTime()
+    if (n <= limit) return { ok: true, retryAfterSec: 0, remaining: limit - n }
+    return { ok: false, retryAfterSec: Math.max(1, Math.ceil((windowStart + windowMs - Date.now()) / 1000)), remaining: 0 }
+  } catch (e) {
+    console.error("[rate-limit] db bucket failed, denying request:", e)
+    return { ok: false, retryAfterSec: 60, remaining: 0 }
+  }
 }
 
 /** Stable, non-reversible id for a presented read key (its sha256 hex). */

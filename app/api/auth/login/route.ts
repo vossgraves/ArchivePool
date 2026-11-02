@@ -62,6 +62,6 @@ export async function POST(req: NextRequest) {
   // Best-effort; on Workers cfWaitUntil keeps it alive past the response.
   cfWaitUntil(updateLastLogin(user.id, ip, ua).catch(() => {}))
 
-  await setSessionCookie(user.id)
+  await setSessionCookie(user.id, req.url)
   return NextResponse.json({ username: user.username })
 }

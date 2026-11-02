@@ -43,14 +43,34 @@ export async function createSessionTokenWeb(userId: number): Promise<{ value: st
 }
 
 /**
+ * Whether the `Secure` attribute belongs on cookies set for [reqUrl].
+ * Scheme-derived, not NODE_ENV-derived: on https (production, any host) the
+ * cookie is Secure; on plain http (local dev, wrangler preview) it is not —
+ * a Secure cookie over http is silently dropped by the browser, which is the
+ * classic "sign-in succeeded but the UI still shows Sign in" failure.
+ */
+export function cookieSecure(reqUrl: string): boolean {
+  try {
+    return new URL(reqUrl).protocol === "https:"
+  } catch {
+    return process.env.NODE_ENV === "production"
+  }
+}
+
+/**
  * Route-handler variant of setSessionCookie — writes onto the NextResponse being
  * returned (redirect responses in OAuth callbacks cannot use the cookies() store).
+ * Pass the request URL so `secure` follows the real scheme.
  */
-export async function applySessionCookie(res: NextResponse, userId: number): Promise<void> {
+export async function applySessionCookie(
+  res: NextResponse,
+  userId: number,
+  reqUrl?: string,
+): Promise<void> {
   const { value, maxAgeMs } = await createSessionTokenWeb(userId)
   res.cookies.set(COOKIE_NAME, value, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    secure: reqUrl !== undefined ? cookieSecure(reqUrl) : process.env.NODE_ENV === "production",
     sameSite: "lax",
     path: "/",
     maxAge: Math.floor(maxAgeMs / 1000),
@@ -80,12 +100,12 @@ export function verifySessionToken(token: string | undefined): number | null {
   return userId
 }
 
-export async function setSessionCookie(userId: number): Promise<void> {
+export async function setSessionCookie(userId: number, reqUrl?: string): Promise<void> {
   const { value, maxAgeMs } = createSessionToken(userId)
   const store = await cookies()
   store.set(COOKIE_NAME, value, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    secure: reqUrl !== undefined ? cookieSecure(reqUrl) : process.env.NODE_ENV === "production",
     sameSite: "lax",
     path: "/",
     maxAge: Math.floor(maxAgeMs / 1000),
@@ -97,7 +117,17 @@ export async function clearSessionCookie(): Promise<void> {
   store.set(COOKIE_NAME, "", { httpOnly: true, path: "/", maxAge: 0 })
 }
 
+/**
+ * Authenticated user id, or null when absent/forged/expired — OR when the
+ * account is dead. Session cookies are stateless and cannot be revoked, so
+ * resolution itself refuses them: a deleted, disabled or claimed legacy
+ * account (claims mark it claimed_by + disabled) loses every outstanding
+ * session the instant the row changes.
+ */
 export async function getSessionUserId(): Promise<number | null> {
   const store = await cookies()
-  return verifySessionToken(store.get(COOKIE_NAME)?.value)
+  const userId = verifySessionToken(store.get(COOKIE_NAME)?.value)
+  if (userId === null) return null
+  const { isSessionUserLive } = await import("@/lib/users")
+  return (await isSessionUserLive(userId)) ? userId : null
 }

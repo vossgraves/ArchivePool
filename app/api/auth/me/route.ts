@@ -18,5 +18,8 @@ export async function GET() {
     .limit(1)
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
 
-  return NextResponse.json({ username: user.username })
+  return NextResponse.json(
+    { username: user.username },
+    { headers: { "cache-control": "private, no-store" } },
+  )
 }

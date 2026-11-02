@@ -11,22 +11,12 @@ import { signWithSessionSecret, verifyWithSessionSecret } from "./hmac-cookie"
  * shared format let an OAuth-state cookie parse as a pending identity.
  */
 export const OAUTH_COOKIE_TAG = "gh-oauth-v1"
-export const PENDING_COOKIE_TAG = "gh-pending-v1"
 
 export const OAUTH_COOKIE_MAX_AGE_SEC = 10 * 60
 
 // Canonical field shapes — regexes, never parseInt prefixes ("4242abc" is not an id).
-const NUMERIC_ID = /^[1-9][0-9]{0,18}$/
 const NONCE = /^[A-Za-z0-9_-]{16,64}$/
 const EXPIRY = /^[0-9]{10,15}$/
-const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/
-
-function encodeField(value: string): string {
-  return encodeURIComponent(value)
-}
-function decodeField(value: string): string {
-  return decodeURIComponent(value)
-}
 
 function notExpired(exp: number): boolean {
   return Number.isFinite(exp) && exp > Date.now()
@@ -56,44 +46,49 @@ export async function readOauthCookie(value: string | undefined): Promise<{ stat
   return { state, verifier }
 }
 
-// ---------- Pending-identity cookie: <tag>.<githubId>.<login>.<exp>.<hmac> ----------
-// login is URI-encoded; GitHub logins are alnum+hyphen so no dot can appear anyway,
-// but the regex pins it down so the field layout can never be confused.
+// ---------- Username derivation for first-time GitHub sign-ins ----------
+// Site usernames are /^[a-z0-9_]{3,24}$/; GitHub logins are alnum + hyphen, ≤39
+// chars. These candidates are tried in order — the first FREE one wins, so a
+// GitHub login can never silently take over an existing (legacy) username.
 
-export async function packPendingCookie(githubId: number, login: string): Promise<string> {
-  const exp = Date.now() + OAUTH_COOKIE_MAX_AGE_SEC * 1000
-  const body = `${PENDING_COOKIE_TAG}.${githubId}.${encodeField(login)}.${exp}`
-  return `${body}.${await signWithSessionSecret(body)}`
+const USERNAME_RE = /^[a-z0-9_]{3,24}$/
+const MAX_LEN = 24
+
+/** The sanitized base: lowercase, hyphen→underscore, anything else dropped,
+ *  runs of underscores collapsed, edge underscores trimmed. */
+export function githubUsernameBase(login: string): string {
+  const base = login
+    .toLowerCase()
+    .replace(/-/g, "_")
+    .replace(/[^a-z0-9_]/g, "")
+    .replace(/_{2,}/g, "_")
+    .replace(/^_+|_+$/g, "")
+  return base.slice(0, MAX_LEN)
 }
 
-export interface PendingIdentity {
-  id: number
-  login: string
+function clamp(candidate: string): string {
+  return candidate.slice(0, MAX_LEN)
 }
 
-export async function readPendingCookie(value: string | undefined): Promise<PendingIdentity | null> {
-  if (!value) return null
-  const parts = value.split(".")
-  if (parts.length !== 5) return null
-  const [tag, idRaw, loginRaw, expRaw, sig] = parts
-  // Tag is part of the signed body: a gh-oauth cookie presented here fails fast,
-  // and a numeric prefix cannot smuggle an id past the canonical regex.
-  if (tag !== PENDING_COOKIE_TAG || !NUMERIC_ID.test(idRaw) || !EXPIRY.test(expRaw)) return null
-  const exp = Number(expRaw)
-  if (!notExpired(exp)) return null
-  if (!(await verifyWithSessionSecret(`${tag}.${idRaw}.${loginRaw}.${expRaw}`, sig))) return null
-  const login = decodeField(loginRaw)
-  if (!GITHUB_LOGIN.test(login)) return null
-  return { id: Number(idRaw), login }
+/**
+ * Ordered username candidates for a GitHub login. Index 0 is the preferred
+ * spelling when it already satisfies the site pattern; the later fallbacks keep
+ * the name recognisable while guaranteeing at least one well-formed candidate
+ * exists for ANY login (digits-only, one-char, non-ASCII).
+ */
+export function deriveGithubUsernameCandidates(login: string): string[] {
+  const base = githubUsernameBase(login)
+  const stem = base.length > 0 ? base : "user"
+  const out: string[] = []
+  if (USERNAME_RE.test(stem)) out.push(stem)
+  // gh_-prefixed variant — covers too-short stems and gives a clearly GitHub-flavoured fallback.
+  out.push(clamp(`gh_${stem}`))
+  // Numeric suffixes — "octo", "octo_2", "octo_3" … (underscore, never hyphen: not in the pattern).
+  for (let i = 2; i <= 9; i++) out.push(clamp(`${stem}_${i}`))
+  return out.filter((c) => USERNAME_RE.test(c))
 }
 
-// ---------- Link / claim predicates (shared by the routes and the sim) ----------
-
-/** Whether [incoming] may be stored on an account whose github_id is [current].
- *  The SQL link uses exactly this predicate: github_id IS NULL OR github_id = incoming. */
-export function canLinkGithubId(current: number | null | undefined, incoming: number): boolean {
-  return current == null || current === incoming
-}
+// ---------- Claim proof decision (shared by the route and the sim) ----------
 
 export type OwnedKey = { revoked: boolean } | null
 export type ClaimDecision = "link" | "pending" | "reject"
@@ -101,11 +96,27 @@ export type ClaimDecision = "link" | "pending" | "reject"
 /** What a pasted API key proves for a legacy-username claim:
  *  - key does not belong to the account     -> reject
  *  - key belongs but is REVOKED             -> a pending admin claim may be filed (a
- *    revoked key still identifies its owner, but must not self-authorize a link)
- *  - key belongs and is active              -> link
+ *    revoked key still identifies its owner, but must not self-authorize a claim)
+ *  - key belongs and is active              -> the claim may proceed
  */
 export function claimDecision(key: OwnedKey): ClaimDecision {
   if (key == null) return "reject"
   if (key.revoked) return "pending"
   return "link"
+}
+
+/** Whether [target] is a claimable LEGACY account for [claimerId]:
+ *  a real account that is not the claimer's own, not disabled, not already
+ *  claimed, and not already linked to a GitHub identity (a linked row is a
+ *  current account, not a legacy one). */
+export function canClaimLegacyUser(
+  target: { id: number; disabled: boolean; claimedBy: number | null; githubId: number | null },
+  claimerId: number,
+): boolean {
+  return (
+    target.id !== claimerId &&
+    !target.disabled &&
+    target.claimedBy == null &&
+    target.githubId == null
+  )
 }
