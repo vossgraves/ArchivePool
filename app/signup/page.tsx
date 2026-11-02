@@ -9,6 +9,9 @@ import { getSessionUserId } from "@/lib/sessions"
 
 export const metadata = { title: "Create account" }
 
+// Session-dependent — never let a prerendered/cached copy serve signed-out state.
+export const dynamic = "force-dynamic"
+
 export default async function SignupPage() {
   if (await getSessionUserId()) redirect("/dashboard")
 

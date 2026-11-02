@@ -154,6 +154,13 @@ CREATE TABLE IF NOT EXISTS github_claims (
 );
 CREATE INDEX IF NOT EXISTS idx_github_claims_status ON github_claims (status);
 
+-- The GitHub login captured at OAuth time, and the "claimed by" pointer a legacy
+-- account gets when a signed-in user proves ownership and absorbs its per-user rows
+-- (api_keys, api_key_requests move to the claimer; keys keep working, same hashes).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS github_login text NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS claimed_by integer REFERENCES users(id);
+CREATE INDEX IF NOT EXISTS idx_users_claimed_by ON users (claimed_by);
+
 -- API key requests: subject + reason workflow with admin approval.
 -- Enforces 1 request per IP+UA (see lib/api-keys.ts countRequestsByIpUa).
 CREATE TABLE IF NOT EXISTS api_key_requests (

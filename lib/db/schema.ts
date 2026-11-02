@@ -10,6 +10,7 @@ import {
   serial,
   text,
   timestamp,
+  type AnyPgColumn,
 } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
 
@@ -238,6 +239,12 @@ export const users = pgTable("users", {
   // GitHub OAuth subject (numeric id from /user). NULL for password-era accounts and
   // for legacy accounts not yet claimed. Unique when present — one GitHub per account.
   githubId: bigint("github_id", { mode: "number" }),
+  // The GitHub login captured at OAuth time (display/review only — identity is github_id).
+  githubLogin: text("github_login").notNull().default(""),
+  // Set when a newer account proved ownership of this legacy account and absorbed its
+  // per-user rows (api_keys, api_key_requests). Claimed accounts are also disabled so
+  // the shell cannot be reused; the keys themselves keep working on their new owner.
+  claimedBy: integer("claimed_by").references((): AnyPgColumn => users.id),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 })
 

@@ -4,6 +4,7 @@ import { and, desc, eq, gte } from "drizzle-orm"
 import { db } from "@/lib/db"
 import { ensureSchema } from "@/lib/db/ensure"
 import { users } from "@/lib/db/schema"
+import { deriveGithubUsernameCandidates } from "@/lib/github-cookies"
 
 // scrypt hashing moved to lib/passwords.ts, which the web login routes import lazily
 // — the Workers code path never loads it (see webLoginDisabled in lib/cf-env).
@@ -56,13 +57,58 @@ export async function createUser(
   ip = "",
   ua = "",
   githubId: number | null = null,
+  githubLogin = "",
 ) {
   await ensureSchema()
   const [row] = await db
     .insert(users)
-    .values({ username, passwordHash, githubId, createdIp: ip, createdUa: ua, lastLoginIp: ip, lastLoginUa: ua })
+    .values({ username, passwordHash, githubId, githubLogin, createdIp: ip, createdUa: ua, lastLoginIp: ip, lastLoginUa: ua })
     .returning({ id: users.id, username: users.username })
   return row
+}
+
+/** True when [err] is a Postgres unique-constraint violation (23505). */
+function isUniqueViolation(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { code?: string }).code === "23505"
+}
+
+/**
+ * Create the account for a first-time GitHub sign-in — no username prompt. The
+ * username is DERIVED from the GitHub login (deriveGithubUsernameCandidates):
+ * the first free candidate wins, so a GitHub login can never silently take over
+ * an existing account's name. Collisions get a gh_/numeric-suffixed variant;
+ * the final fallback (github_<base36>) makes "every candidate taken"
+ * unreachable in practice.
+ *
+ * Returns { user } on success, { conflict: "github_id" } when this GitHub
+ * identity already has an account (a second tab completed first) — the caller
+ * re-reads and signs that one in instead.
+ */
+export async function createGithubUser(
+  githubId: number,
+  githubLogin: string,
+  ip = "",
+  ua = "",
+): Promise<{ user: { id: number; username: string } } | { conflict: "github_id" }> {
+  await ensureSchema()
+  const candidates = deriveGithubUsernameCandidates(githubLogin)
+  candidates.push(`github_${(githubId % 36 ** 10).toString(36)}`)
+  for (const username of candidates) {
+    if (await findUserByUsername(username)) continue
+    try {
+      // "github" is never a valid scrypt string, so password verification can
+      // never succeed on OAuth-only accounts.
+      const user = await createUser(username, "github", ip, ua, githubId, githubLogin)
+      return { user }
+    } catch (err) {
+      if (!isUniqueViolation(err)) throw err
+      // A unique violation on username retries with the next candidate; one on
+      // github_id means this identity was linked between our read and insert.
+    }
+  }
+  const [existing] = await db.select({ id: users.id }).from(users).where(eq(users.githubId, githubId)).limit(1)
+  if (existing) return { conflict: "github_id" }
+  throw new Error("no free username candidate for GitHub sign-in")
 }
 
 export async function updateLastLogin(userId: number, ip: string, ua: string) {

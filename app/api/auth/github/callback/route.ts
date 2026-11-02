@@ -3,15 +3,15 @@ import { NextResponse, type NextRequest } from "next/server"
 import { ensureSchema } from "@/lib/db/ensure"
 import {
   GITHUB_OAUTH_COOKIE,
-  GITHUB_PENDING_COOKIE,
   exchangeCode,
   fetchGithubUser,
   findUserByGithubId,
   githubConfigured,
-  issuePendingCookie,
   readOauthCookie,
 } from "@/lib/github-auth"
 import { applySessionCookie } from "@/lib/sessions"
+import { clientIp } from "@/lib/rate-limit"
+import { createGithubUser } from "@/lib/users"
 
 export const dynamic = "force-dynamic"
 
@@ -19,11 +19,16 @@ function fail(req: NextRequest, code: string): NextResponse {
   return NextResponse.redirect(new URL(`/login?error=${code}`, req.url))
 }
 
+function clearOauthCookie(res: NextResponse): void {
+  res.cookies.set(GITHUB_OAUTH_COOKIE, "", { httpOnly: true, path: "/", maxAge: 0 })
+}
+
 /**
  * GitHub redirect target. Verifies the signed state cookie, exchanges the code for
  * a token (PKCE), reads the numeric id + login from /user, then either signs the
- * known account in or hands out a short-lived pending-identity cookie and sends the
- * browser to the choose-username / claim flow.
+ * known account in or CREATES one on the spot — the username is derived from the
+ * GitHub login (collisions get suffixed, a legacy name is never taken over), so
+ * there is no choose-username step and nothing else to ask the user for.
  */
 export async function GET(req: NextRequest) {
   if (!githubConfigured()) return fail(req, "github_unconfigured")
@@ -51,26 +56,34 @@ export async function GET(req: NextRequest) {
     const user = await findUserByGithubId(identity.id)
     if (user && !user.disabled) {
       const res = NextResponse.redirect(new URL("/dashboard", req.url))
-      await applySessionCookie(res, user.id)
-      res.cookies.set(GITHUB_OAUTH_COOKIE, "", { httpOnly: true, path: "/", maxAge: 0 })
+      await applySessionCookie(res, user.id, req.url)
+      clearOauthCookie(res)
       return res
     }
     if (user?.disabled) return fail(req, "account_disabled")
+
+    // First sign-in for this github_id: create the account immediately with a
+    // username derived from the GitHub login — never a prompt, never a takeover.
+    const ip = clientIp(req.headers).slice(0, 64)
+    const ua = (req.headers.get("user-agent") ?? "").slice(0, 256)
+    const created = await createGithubUser(identity.id, identity.login, ip, ua)
+    if ("conflict" in created) {
+      // A second tab finished first — sign into the account it created.
+      const winner = await findUserByGithubId(identity.id)
+      if (winner && !winner.disabled) {
+        const res = NextResponse.redirect(new URL("/dashboard", req.url))
+        await applySessionCookie(res, winner.id, req.url)
+        clearOauthCookie(res)
+        return res
+      }
+      return fail(req, "internal")
+    }
+    const res = NextResponse.redirect(new URL("/dashboard", req.url))
+    await applySessionCookie(res, created.user.id, req.url)
+    clearOauthCookie(res)
+    return res
   } catch (e) {
-    console.error("[github-auth] user lookup failed:", e)
+    console.error("[github-auth] user lookup/create failed:", e)
     return fail(req, "internal")
   }
-
-  // Unknown github_id: park the VERIFIED identity in a short-lived signed cookie and
-  // send the browser to choose a username or claim a legacy one.
-  const res = NextResponse.redirect(new URL(`/login?github=choose&login=${encodeURIComponent(identity.login)}`, req.url))
-  res.cookies.set(GITHUB_PENDING_COOKIE, await issuePendingCookie(identity), {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
-    path: "/",
-    maxAge: 600,
-  })
-  res.cookies.set(GITHUB_OAUTH_COOKIE, "", { httpOnly: true, path: "/", maxAge: 0 })
-  return res
 }

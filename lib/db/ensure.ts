@@ -156,6 +156,11 @@ const STATEMENTS: string[] = [
     created_at   timestamptz NOT NULL DEFAULT now()
   )`,
   `CREATE INDEX IF NOT EXISTS idx_github_claims_status ON github_claims (status)`,
+  // 2026-11-02: the GitHub login captured at OAuth time, and the "claimed by" pointer a
+  // legacy account gets when a signed-in user proves ownership and absorbs its rows.
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS github_login text NOT NULL DEFAULT ''`,
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS claimed_by integer REFERENCES users(id)`,
+  `CREATE INDEX IF NOT EXISTS idx_users_claimed_by ON users (claimed_by)`,
 
   // 2026-09-12: named admins and an audit trail.
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'user'`,
