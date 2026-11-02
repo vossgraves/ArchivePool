@@ -145,13 +145,72 @@ const DATABASE_URL = process.env.SIM_DATABASE_URL ?? "postgresql://postgres:post
 const GH_PORT = Number(process.env.MOCK_GITHUB_PORT ?? 8999)
 
 /** The sim writes real rows — it must never touch a database it cannot own.
- *  Local hosts only, unless SIM_ALLOW_REMOTE_DB=1 is passed explicitly. */
+ *  Local hosts only, unless SIM_ALLOW_REMOTE_DB=1 is passed explicitly.
+ *
+ *  The URI hostname is NOT the effective target: pg honours a `host=` query
+ *  parameter (postgresql://localhost/db?host=evil.example dials evil.example),
+ *  a missing host falls back to PGHOST, and host lists are comma-separated.
+ *  So the check resolves the connection the same way pg itself does — via
+ *  connectionParameters — and requires EVERY resolved host to be local:
+ *  localhost / 127.0.0.1 / ::1, a unix socket path, or a docker hostname. */
+const LOCAL_DB_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "ap-pg", "postgres", "host.docker.internal"])
+const isLocalDbHost = (h) => {
+  const bare = h.startsWith("[") && h.endsWith("]") ? h.slice(1, -1) : h // pg keeps [::1] bracketed
+  return LOCAL_DB_HOSTS.has(bare) || bare.startsWith("/") || bare.startsWith(".")
+}
+
+function effectiveDbHosts(url) {
+  const conn = new pg.Client({ connectionString: url })
+  return String(conn.connectionParameters.host ?? "localhost")
+    .split(",")
+    .map((h) => h.trim())
+    .filter(Boolean)
+}
+
 function databaseUrlIsLocal(url) {
   if (process.env.SIM_ALLOW_REMOTE_DB === "1") return true
   try {
-    return ["localhost", "127.0.0.1", "::1", "ap-pg", "postgres", "host.docker.internal"].includes(new URL(url).hostname)
+    const hosts = effectiveDbHosts(url)
+    return hosts.length > 0 && hosts.every(isLocalDbHost)
   } catch {
     return false
+  }
+}
+
+// --- 5: databaseUrlIsLocal self-test (pure — no connection) --------------------
+{
+  const cases = [
+    ["postgresql://localhost/archivepool", true],
+    ["postgresql://127.0.0.1:5432/archivepool", true],
+    ["postgresql://[::1]/db", true],
+    ["postgresql://ap-pg/archivepool", true],
+    ["postgresql://host.docker.internal/db", true],
+    ["postgresql://localhost/db?host=db.example.invalid", false], // host= query override
+    ["postgresql://db.example.invalid/db?host=127.0.0.1", true],  // override wins both ways
+    ["postgresql:///db", true],                                    // host-less -> localhost
+    ["postgresql://u@/db?host=/var/run/postgresql", true],         // unix socket path
+    ["postgresql://db.example.invalid/db", false],
+    ["postgresql://localhost,db.example.invalid/db", false],       // multi-host: all must be local
+    ["not-a-url", false],
+  ]
+  for (const [u, want] of cases) {
+    await check(`guard: ${u} -> ${want ? "local" : "remote"}`, databaseUrlIsLocal(u) === want)
+  }
+  const savedPghost = process.env.PGHOST
+  const savedOverride = process.env.SIM_ALLOW_REMOTE_DB
+  try {
+    delete process.env.SIM_ALLOW_REMOTE_DB
+    process.env.PGHOST = "db.example.invalid"
+    await check("guard: remote PGHOST refused", databaseUrlIsLocal("postgresql:///db") === false)
+    process.env.PGHOST = "127.0.0.1"
+    await check("guard: local PGHOST allowed", databaseUrlIsLocal("postgresql:///db") === true)
+    process.env.SIM_ALLOW_REMOTE_DB = "1"
+    await check("guard: SIM_ALLOW_REMOTE_DB overrides", databaseUrlIsLocal("postgresql://db.example.invalid/db") === true)
+  } finally {
+    if (savedPghost === undefined) delete process.env.PGHOST
+    else process.env.PGHOST = savedPghost
+    if (savedOverride === undefined) delete process.env.SIM_ALLOW_REMOTE_DB
+    else process.env.SIM_ALLOW_REMOTE_DB = savedOverride
   }
 }
 
