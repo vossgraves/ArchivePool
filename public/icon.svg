@@ -1,26 +1,43 @@
-<svg width="180" height="180" viewBox="0 0 180 180" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <style>
-    @media (prefers-color-scheme: light) {
-      .background { fill: black; }
-      .foreground { fill: white; }
-    }
-    @media (prefers-color-scheme: dark) {
-      .background { fill: white; }
-      .foreground { fill: black; }
-    }
-  </style>
-  <g clip-path="url(#clip0_7960_43945)">
-    <rect class="background" width="180" height="180" rx="37" />
-    <g style="transform: scale(95%); transform-origin: center">
-      <path class="foreground"
-        d="M101.141 53H136.632C151.023 53 162.689 64.6662 162.689 79.0573V112.904H148.112V79.0573C148.112 78.7105 148.098 78.3662 148.072 78.0251L112.581 112.898C112.701 112.902 112.821 112.904 112.941 112.904H148.112V126.672H112.941C98.5504 126.672 86.5638 114.891 86.5638 100.5V66.7434H101.141V100.5C101.141 101.15 101.191 101.792 101.289 102.422L137.56 66.7816C137.255 66.7563 136.945 66.7434 136.632 66.7434H101.141V53Z" />
-      <path class="foreground"
-        d="M65.2926 124.136L14 66.7372H34.6355L64.7495 100.436V66.7372H80.1365V118.47C80.1365 126.278 70.4953 129.958 65.2926 124.136Z" />
-    </g>
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The real ArchiveTune app mark, not a stand-in.
+
+  Both paths are copied verbatim from the Android vector drawable at
+  app/src/main/res/drawable/app_icon_small.xml in the ArchiveTune repo. Android's `pathData` uses
+  the same grammar as SVG's `d`, so the geometry is exact rather than redrawn, and the 185x185
+  viewBox is that drawable's viewport.
+
+  Colours are sampled from the shipped launcher PNG (mipmap-xxxhdpi/ic_launcher.png) rather than
+  eyeballed: #113853 for the mark, #edf4fb for the disc. The source drawable fills its paths with
+  near-white at ~0.92 alpha because in-app it gets tinted at runtime; here they are solid navy so
+  this matches the icon a user actually sees on their launcher.
+
+  A light disc is deliberate even though the site is dark. A favicon sits in the browser's tab
+  strip, not on the page, so it has to hold up against both light and dark browser chrome — and it
+  should look like the app it represents.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 185 185" role="img" aria-label="ArchivePool">
+  <title>ArchivePool</title>
+  <circle cx="92.5" cy="92.5" r="92.5" fill="#edf4fb" />
+  <!--
+    The disc is #edf4fb, so on white browser chrome it all but disappears and the mark looks like
+    it is floating. This hairline ring in the mark's own navy at low alpha defines the edge on
+    white while staying invisible on dark chrome. Radius is inset by half the stroke so the
+    viewBox does not clip it.
+  -->
+  <circle cx="92.5" cy="92.5" r="90.5" fill="none" stroke="#113853" stroke-opacity="0.16" stroke-width="4" />
+  <!--
+    The mark's bounding box is x 41.5-150.5, y 42.5-150.5, so its centre is (96, 96.5) while the
+    canvas centre is (92.5, 92.5) — left alone it sits low and to the right inside the disc, so
+    this recentres it.
+
+    Scale is 0.86, not the 1.1 I first tried: rendering this at 16/24/32/96px side by side showed
+    1.1 pushed the mark's corners into the disc edge, which reads fine at 96px but smudges at the
+    16px a tab favicon actually gets. Backing off preserves the launcher icon's padding and keeps
+    the counter in the "T" open when tiny.
+  -->
+  <g fill="#113853" transform="translate(92.5 92.5) scale(0.86) translate(-96 -96.5)">
+    <path d="M 136.5,42.5 C 139.572,42.1826 142.572,42.5159 145.5,43.5C 147.696,46.5596 149.363,49.893 150.5,53.5C 141.188,70.7896 131.355,87.7896 121,104.5C 115.248,101.04 109.415,97.7069 103.5,94.5C 108.706,84.5868 114.04,74.7535 119.5,65C 93.5133,65.9659 67.5133,67.1326 41.5,68.5C 41.5,61.1667 41.5,53.8333 41.5,46.5C 73.3416,45.5964 105.008,44.2631 136.5,42.5 Z" />
+    <path d="M 77.5,75.5 C 84.8406,76.1159 92.174,76.7826 99.5,77.5C 97.8365,97.8139 94.3365,117.814 89,137.5C 87.8225,142.225 85.9892,146.559 83.5,150.5C 76.3087,148.954 69.3087,146.954 62.5,144.5C 69.9692,122.011 74.9692,99.011 77.5,75.5 Z" />
   </g>
-  <defs>
-    <clipPath id="clip0_7960_43945">
-      <rect width="180" height="180" fill="white" />
-    </clipPath>
-  </defs>
 </svg>

@@ -47,7 +47,6 @@ export const metadata: Metadata = {
   // A status page has nothing to gain from search traffic and the submit form is not a landing
   // page, so keep it out of indexes.
   robots: { index: false, follow: false },
-  generator: "v0.app",
 }
 
 export const viewport: Viewport = {
