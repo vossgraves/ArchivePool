@@ -5,38 +5,67 @@
 // for the auto-account + dashboard-recovery model and the PR-#14 hardening).
 //
 // PART 1 runs the REAL cookie pack/parse, username-derivation and claim-decision
-// code compiled straight from lib/github-cookies.ts + lib/hmac-cookie.ts — the
-// same modules the routes import.
+// code compiled straight from lib/github-cookies.ts + lib/hmac-cookie.ts.
 //
-// PART 2 is a live integration pass: it talks HTTP to a running dev worker and
-// SQL to Postgres, asserting the security invariants that only exist at runtime —
-// the FOR UPDATE proof re-check, dead sessions, mutual-claim protection, racing
-// account creation, shared DB rate-limit buckets and approval-time account
-// materialization.
+// PART 2 is a live integration pass: it talks HTTP to a running dev worker,
+// SQL to Postgres, and calls the REAL lib/claim-transfer.ts transaction
+// (compiled for node below) directly — locks, FOR UPDATE re-checks and
+// repoints included — so the mid-claim revoke race is tested against the code
+// that ships, with no test seam in production code.
 //
-// Build step (run from the repo root before this script). The sed line rewrites
-// the emitted specifier: Next's bundler needs the extensionless import while node
-// ESM needs the .js file name.
-//   corepack pnpm exec tsc lib/github-cookies.ts lib/hmac-cookie.ts \
-//     --outDir /tmp/ghc --module esnext --target es2022 \
-//     --moduleResolution bundler --skipLibCheck
-//   sed -i 's|"./hmac-cookie"|"./hmac-cookie.js"|' /tmp/ghc/github-cookies.js
-// then:
+// The sim compiles the modules it needs into /tmp/ghc itself; the only
+// requirements are a dev worker (defaults below) and a LOCAL postgres.
 //   node scripts/sim-github-auth.mjs
 //
 // Live-part environment (defaults match the repo's local test rig):
-//   BASE_URL          dev worker origin        (http://localhost:8788)
-//   SIM_DATABASE_URL  postgres connection      (postgresql://postgres:postgres@127.0.0.1:5432/archivepool)
-//   MOCK_GITHUB_PORT  port of the token+/user  (8999 — if nothing listens there
-//                     mock the bundle calls     this sim serves it itself)
+//   BASE_URL            dev worker origin        (http://localhost:8788)
+//   SIM_DATABASE_URL    postgres connection      (postgresql://postgres:postgres@127.0.0.1:5432/archivepool)
+//                       — must be local (localhost/127.0.0.1/::1/ap-pg/docker
+//                       name); anything else aborts unless
+//                       SIM_ALLOW_REMOTE_DB=1 is passed explicitly
+//   MOCK_GITHUB_PORT    port of the token+/user  (8999 — if nothing listens there
+//                       mock the bundle calls    this sim serves it itself)
 //
 // Exits 1 if any check fails; live checks print SKIP (not FAIL) when the rig is
 // unavailable.
 
 process.env.SESSION_SECRET ??= "sim-secret-for-regression"
 
+import { execFileSync } from "node:child_process"
+import { createHash, createHmac } from "node:crypto"
+import * as fs from "node:fs"
+import * as path from "node:path"
+import http from "node:http"
+
+const REPO = path.resolve(new URL("..", import.meta.url).pathname)
+const OUT = "/tmp/ghc"
+
+// Compile the REAL modules the tests exercise. The sed passes rewrite emitted
+// specifiers: Next's bundler needs extensionless imports while node ESM needs
+// the .js file names.
+execFileSync(path.join(REPO, "node_modules/.bin/tsc"), [
+  "lib/github-cookies.ts", "lib/hmac-cookie.ts", "lib/claim-transfer.ts", "lib/db/schema.ts",
+  "--outDir", OUT, "--module", "esnext", "--target", "es2022",
+  "--moduleResolution", "bundler", "--skipLibCheck",
+], { cwd: REPO, stdio: "inherit" })
+for (const [file, spec] of [
+  ["github-cookies.js", '"./hmac-cookie"'],
+  ["claim-transfer.js", '"./db/schema"'],
+]) {
+  const p = path.join(OUT, file)
+  fs.writeFileSync(p, fs.readFileSync(p, "utf8").replaceAll(spec, spec.slice(0, -1) + '.js"'))
+}
+// The compiled claim-transfer/schema files resolve drizzle-orm/pg-core and pg
+// from node_modules — point them at the repo's copy.
+if (!fs.existsSync(path.join(OUT, "node_modules"))) {
+  fs.symlinkSync(path.join(REPO, "node_modules"), path.join(OUT, "node_modules"))
+}
+const pg = (await import("pg")).default
 const ghc = await import("file:///tmp/ghc/github-cookies.js")
 const hmac = await import("file:///tmp/ghc/hmac-cookie.js")
+const transferMod = await import("file:///tmp/ghc/claim-transfer.js")
+const schemaMod = await import("file:///tmp/ghc/db/schema.js")
+const { drizzle } = await import("drizzle-orm/node-postgres")
 const {
   packOauthCookie,
   readOauthCookie,
@@ -45,6 +74,7 @@ const {
   canClaimLegacyUser,
   claimDecision,
 } = ghc
+const { runLegacyClaimTransfer } = transferMod
 
 let failures = 0
 let skips = 0
@@ -91,7 +121,6 @@ await check("always >=1 valid candidate (empty)", deriveGithubUsernameCandidates
 await check("every candidate matches the site pattern (typical)", allValid("octo-cat"))
 await check("every candidate matches the site pattern (edge)", allValid("a"))
 await check("preferred candidate omitted when invalid", deriveGithubUsernameCandidates("ab")[0] !== "ab")
-// A legacy name "octo" already taken -> the next candidate is a DIFFERENT string (never the takeover).
 const cands = deriveGithubUsernameCandidates("octo")
 await check("fallbacks differ from the taken name", cands.every((c, i) => i === 0 || c !== "octo"))
 await check("fallbacks are distinct", new Set(cands).size === cands.length)
@@ -115,18 +144,34 @@ const BASE = (process.env.BASE_URL ?? "http://localhost:8788").replace(/\/$/, ""
 const DATABASE_URL = process.env.SIM_DATABASE_URL ?? "postgresql://postgres:postgres@127.0.0.1:5432/archivepool"
 const GH_PORT = Number(process.env.MOCK_GITHUB_PORT ?? 8999)
 
-let pg = null
-let http2 = null
-let crypto2 = null
-let fs2 = null
+/** The sim writes real rows — it must never touch a database it cannot own.
+ *  Local hosts only, unless SIM_ALLOW_REMOTE_DB=1 is passed explicitly. */
+function databaseUrlIsLocal(url) {
+  if (process.env.SIM_ALLOW_REMOTE_DB === "1") return true
+  try {
+    return ["localhost", "127.0.0.1", "::1", "ap-pg", "postgres", "host.docker.internal"].includes(new URL(url).hostname)
+  } catch {
+    return false
+  }
+}
+
 let pgClient = null
-try {
-  pg = (await import("pg")).default
-  http2 = await import("node:http")
-  crypto2 = await import("node:crypto")
-  fs2 = await import("node:fs")
-} catch {
-  // no live deps — part 2 stays skipped
+let txdb = null
+let liveReady = false
+let sql = null
+if (databaseUrlIsLocal(DATABASE_URL)) {
+  try {
+    pgClient = new pg.Client({ connectionString: DATABASE_URL, connectionTimeoutMillis: 4000 })
+    await pgClient.connect()
+    sql = async (q, params = []) => (await pgClient.query(q, params)).rows
+    txdb = drizzle(new pg.Pool({ connectionString: DATABASE_URL, max: 3 }), { schema: schemaMod })
+    const probe = await fetch(`${BASE}/api/auth/me`, { signal: AbortSignal.timeout(4000) }).catch(() => null)
+    liveReady = probe !== null
+  } catch {
+    liveReady = false
+  }
+} else {
+  console.log(`live rig: refusing non-local SIM_DATABASE_URL (set SIM_ALLOW_REMOTE_DB=1 to override)`)
 }
 
 function liveSecret() {
@@ -135,7 +180,7 @@ function liveSecret() {
   }
   for (const p of ["../.dev.vars", ".dev.vars"]) {
     try {
-      const vars = fs2.readFileSync(new URL(p, import.meta.url), "utf8")
+      const vars = fs.readFileSync(new URL(p, import.meta.url), "utf8")
       const m = vars.match(/^SESSION_SECRET=(.*)$/m)
       if (m) return m[1].trim().replace(/^"|"$/g, "")
     } catch { /* next candidate */ }
@@ -145,31 +190,17 @@ function liveSecret() {
 
 function mintSession(uid, secret) {
   const payload = `${uid}.${Date.now() + 30 * 24 * 3600 * 1000}`
-  const sig = crypto2.createHmac("sha256", secret).update(payload).digest("base64url")
+  const sig = createHmac("sha256", secret).update(payload).digest("base64url")
   return `${payload}.${sig}`
 }
 
 function mintOauth(secret, state = "simstate987654321", verifier = "simverifier98765432109876") {
   const body = `gh-oauth-v1.${state}.${verifier}.${Date.now() + 600_000}`
-  const sig = crypto2.createHmac("sha256", secret).update(body).digest("base64url")
+  const sig = createHmac("sha256", secret).update(body).digest("base64url")
   return { cookie: `${body}.${sig}`, state }
 }
 
-const hashKey = (key) => crypto2.createHash("sha256").update(key).digest("hex")
-
-let liveReady = false
-let sql = null
-if (pg) {
-  try {
-    pgClient = new pg.Client({ connectionString: DATABASE_URL, connectionTimeoutMillis: 4000 })
-    await pgClient.connect()
-    sql = async (q, params = []) => (await pgClient.query(q, params)).rows
-    const probe = await fetch(`${BASE}/api/auth/me`, { signal: AbortSignal.timeout(4000) }).catch(() => null)
-    liveReady = probe !== null
-  } catch (e) {
-    liveReady = false
-  }
-}
+const hashKey = (key) => createHash("sha256").update(key).digest("hex")
 
 // Mock GitHub for the patched local bundle: serves /token + /user. If a mock is
 // already on the port we just write the identity files it reads; otherwise the
@@ -178,12 +209,12 @@ let mockServer = null
 async function ensureMockGithub() {
   const probe = await fetch(`http://127.0.0.1:${GH_PORT}/user`, { signal: AbortSignal.timeout(1500) }).catch(() => null)
   if (probe !== null) return // external mock already up
-  mockServer = http2.createServer((req, res) => {
+  mockServer = http.createServer((req, res) => {
     if (req.url === "/token") {
       res.writeHead(200, { "content-type": "application/json" })
       res.end(JSON.stringify({ access_token: "mock-token" }))
     } else if (req.url === "/user") {
-      const rd = (p, d) => { try { return fs2.readFileSync(p, "utf8").trim() } catch { return d } }
+      const rd = (p, d) => { try { return fs.readFileSync(p, "utf8").trim() } catch { return d } }
       res.writeHead(200, { "content-type": "application/json" })
       res.end(JSON.stringify({ id: parseInt(rd("/tmp/gh-id.txt", "424242"), 10), login: rd("/tmp/gh-login.txt", "mockgh") }))
     } else {
@@ -193,30 +224,19 @@ async function ensureMockGithub() {
   await new Promise((resolve) => mockServer.listen(GH_PORT, "127.0.0.1", resolve))
 }
 const setGhIdentity = (id, login) => {
-  fs2.writeFileSync("/tmp/gh-id.txt", String(id))
-  fs2.writeFileSync("/tmp/gh-login.txt", login)
-}
-
-const authed = (uid, secret) => ({ cookie: `atp_session=${mintSession(uid, secret)}`, "content-type": "application/json" })
-async function claim(uid, body, secret) {
-  const res = await fetch(`${BASE}/api/auth/claim-legacy`, {
-    method: "POST",
-    headers: authed(uid, secret),
-    body: JSON.stringify(body),
-  })
-  return { status: res.status, data: await res.json().catch(() => ({})) }
-}
-async function callback(code, state, oauthCookie) {
-  const res = await fetch(`${BASE}/api/auth/github/callback?code=${code}&state=${state}`, {
-    redirect: "manual",
-    headers: { cookie: `atp_gh_oauth=${oauthCookie}` },
-  })
-  return { status: res.status, location: res.headers.get("location"), cookie: res.headers.get("set-cookie") }
+  fs.writeFileSync("/tmp/gh-id.txt", String(id))
+  fs.writeFileSync("/tmp/gh-login.txt", login)
 }
 
 // Test-fixture helpers — every fixture name carries the run tag so repeat runs
-// never collide with leftovers.
+// never collide with leftovers. Rate-limit isolation is structural: each run
+// sends a unique X-Forwarded-For (the per-IP bucket is keyed on it), uses fresh
+// user ids, and RUN-tagged target names — a previous run's buckets can never
+// match this run's keys, and cleanup deletes only the keys this run created.
 const RUN = `sim${Date.now().toString(36)}`
+const XFF = `10.${createHash("sha256").update(RUN).digest().slice(0, 3).join(".")}`
+const bucketKeys = new Set()
+
 let uidSeq = 0
 async function makeUser(name, extra = "") {
   const rows = await sql(`INSERT INTO users (username, password_hash ${extra ? ", role" : ""}) VALUES ($1,'x'${extra ? `,'${extra}'` : ""}) RETURNING id`, [name])
@@ -227,7 +247,32 @@ const makeKey = (userId, plaintext, revoked = false) =>
     `INSERT INTO api_keys (name, key_hash, prefix, user_id, revoked) VALUES ('sim',$1,$2,$3,$4)`,
     [hashKey(plaintext), plaintext.slice(0, 10), userId, revoked],
   )
-const key = (n) => `atp_${RUN}${String(n).padStart(6, "0")}abcdefabcdefabcd` // 3+ chars unique per fixture
+const key = (n) => `atp_${RUN}${String(n).padStart(6, "0")}abcdefabcdefabcd`
+
+const authed = (uid, secret) => ({
+  cookie: `atp_session=${mintSession(uid, secret)}`,
+  "content-type": "application/json",
+  "x-forwarded-for": XFF,
+})
+async function claim(uid, body, secret) {
+  const res = await fetch(`${BASE}/api/auth/claim-legacy`, {
+    method: "POST",
+    headers: authed(uid, secret),
+    body: JSON.stringify(body),
+  })
+  // Track exactly the buckets this run created — cleanup deletes only these.
+  bucketKeys.add(`legacy-claim:ip:${XFF}`)
+  bucketKeys.add(`legacy-claim:user:${uid}`)
+  if (body.username) bucketKeys.add(`legacy-claim:name:${body.username}`)
+  return { status: res.status, data: await res.json().catch(() => ({})) }
+}
+async function callback(code, state, oauthCookie) {
+  const res = await fetch(`${BASE}/api/auth/github/callback?code=${code}&state=${state}`, {
+    redirect: "manual",
+    headers: { cookie: `atp_gh_oauth=${oauthCookie}` },
+  })
+  return { status: res.status, location: res.headers.get("location"), cookie: res.headers.get("set-cookie") }
+}
 
 if (liveReady) {
   try {
@@ -252,13 +297,8 @@ if (!liveReady) {
     "live: mutual claim impossible",
     "live: rate limit shared across callers",
     "live: approval materializes the github account",
-    "live: claimed user's sessions die",
   ]) skip(name, "dev worker or postgres unreachable")
 } else {
-  // Buckets persist in Postgres across runs (10 min windows): clear them so a
-  // previous run's hits cannot consume this run's per-IP/per-user allowance.
-  await sql(`DELETE FROM rate_limit_buckets`).catch(() => {})
-
   // ---- auto-create -----------------------------------------------------------
   {
     const gid = 80000000 + Math.floor(Math.random() * 899999)
@@ -295,19 +335,17 @@ if (!liveReady) {
     const k = await sql(`SELECT user_id FROM api_keys WHERE key_hash=$1`, [hashKey(k1)])
     const r = await sql(`SELECT user_id FROM api_key_requests WHERE user_id=$1 OR user_id=$2`, [cuid, luid])
     await check("live: legacy row claimed+disabled, rows repointed", u[0]?.disabled === true && u[0]?.claimed_by === cuid && k[0]?.user_id === cuid && r.length === 1 && r[0].user_id === cuid)
-    // Stateless sessions cannot be revoked — resolution must refuse the dead row.
     const me = await fetch(`${BASE}/api/auth/me`, { headers: { cookie: `atp_session=${mintSession(luid, secret)}` } })
     await check("live: claimed user's sessions die", me.status === 401)
   }
 
-  // ---- revoked key -> pending, never a transfer (the re-check gate) -----------
+  // ---- revoked key -> pending, never a transfer -------------------------------
   {
     const lname = `${RUN}_b`.slice(0, 24)
     const luid = await makeUser(lname)
     const k1 = key(++uidSeq)
-    await makeKey(luid, k1, true) // revoked before the claim is filed
+    await makeKey(luid, k1, true)
     const cuid = await makeUser(`${RUN}_ghclaimer`.slice(0, 24))
-    // github-linked claimer so the pending claim can be filed
     await sql(`UPDATE users SET github_id=$1, github_login=$2 WHERE id=$3`, [88000000 + luid, `${RUN}g`, cuid])
     const res = await claim(cuid, { username: lname, apiKey: k1 }, secret)
     const u = await sql(`SELECT disabled, claimed_by FROM users WHERE id=$1`, [luid])
@@ -318,51 +356,33 @@ if (!liveReady) {
     )
   }
 
-  // ---- in-transaction proof re-check (Sol finding: the revoked BETWEEN pre-check
-  // and transfer case). The ATP_CLAIM_TEST_HOOK=revoke-proof seam in
-  // transferLegacyAccount revokes an atp_hook_-prefixed key INSIDE the transfer
-  // transaction, just before the locked re-read — deterministic simulation of a
-  // revoke landing between the route's pre-check and the re-check. If the
-  // re-check were removed, this test FAILS (the transfer would complete).
+  // ---- in-transaction proof re-check — called DIRECTLY against the compiled
+  // transaction: the caller-side pre-check says "link" (active key), the key is
+  // revoked between that check and the real runLegacyClaimTransfer call, and
+  // the FOR UPDATE re-read inside the transaction must lose the race. No
+  // production seam: this exercises the code that ships.
   {
-    const hookActive = (() => {
-      for (const p of ["../.dev.vars", ".dev.vars"]) {
-        try {
-          if (fs2.readFileSync(new URL(p, import.meta.url), "utf8").includes("ATP_CLAIM_TEST_HOOK=revoke-proof")) return true
-        } catch { /* next */ }
-      }
-      return false
-    })()
-    if (!hookActive) {
-      skip("live: mid-claim revoke loses the race", "ATP_CLAIM_TEST_HOOK not set")
-    } else {
-      const lname = `${RUN}_c`.slice(0, 24)
-      const luid = await makeUser(lname)
-      // atp_hook_ prefix arms the seam; the key is ACTIVE at the pre-check.
-      const k1 = `atp_hook_${RUN}${String(++uidSeq).padStart(4, "0")}`
-      await makeKey(luid, k1)
-      const cuid = await makeUser(`${RUN}_ghclaimerc`.slice(0, 24))
-      await sql(`UPDATE users SET github_id=$1, github_login=$2 WHERE id=$3`, [88000000 + luid + 1, `${RUN}gc`, cuid])
-      const res = await claim(cuid, { username: lname, apiKey: k1 }, secret)
-      const u = await sql(`SELECT claimed_by, disabled FROM users WHERE id=$1`, [luid])
-      const k = await sql(`SELECT revoked, user_id FROM api_keys WHERE key_hash=$1`, [hashKey(k1)])
-      // The seam revoked the key inside the tx; the re-check must catch it:
-      // no transfer, the outcome is the revoked-key path (pending claim for a
-      // github-linked claimer) — never "claimed".
-      await check(
-        "live: mid-claim revoke loses the race",
-        res.data.status === "claim_pending" && u[0]?.claimed_by == null && u[0]?.disabled === false && k[0]?.revoked === true && k[0]?.user_id === luid,
-      )
-    }
+    const lname = `${RUN}_c`.slice(0, 24)
+    const luid = await makeUser(lname)
+    const k1 = key(++uidSeq)
+    await makeKey(luid, k1)
+    const cuid = await makeUser(`${RUN}_ghclaimerc`.slice(0, 24))
+    await sql(`UPDATE users SET github_id=$1, github_login=$2 WHERE id=$3`, [88000000 + luid + 1, `${RUN}gc`, cuid])
+    // The route's pre-check equivalent: classify the key as owned+active.
+    const pre = await sql(`SELECT revoked FROM api_keys WHERE key_hash=$1 AND user_id=$2 AND deleted=false`, [hashKey(k1), luid])
+    await check("pre-check classifies the active key", claimDecision(pre[0] ?? null) === "link")
+    // The race: revoked BETWEEN the pre-check and the transaction's locked re-read.
+    await sql(`UPDATE api_keys SET revoked=true WHERE key_hash=$1`, [hashKey(k1)])
+    const moved = await runLegacyClaimTransfer(txdb, cuid, luid, hashKey(k1))
+    const u = await sql(`SELECT claimed_by, disabled FROM users WHERE id=$1`, [luid])
+    const k = await sql(`SELECT revoked, user_id FROM api_keys WHERE key_hash=$1`, [hashKey(k1)])
+    await check(
+      "live: mid-claim revoke loses the race",
+      moved.ok === false && moved.error === "proof_revoked" && u[0]?.claimed_by == null && u[0]?.disabled === false && k[0]?.revoked === true && k[0]?.user_id === luid,
+    )
   }
 
-  // ---- issuance vs recovery lock-order (Sol finding: users-then-requests) ----
-  // claimApprovedKey now locks the user row before the request row, matching
-  // transferLegacyAccount's ascending-users order. Fired concurrently, one side
-  // simply wins; neither can deadlock into a 500. Whatever the order, the end
-  // state is consistent: issuance either lands on the live owner or sees the
-  // request already transferred (404), and the request's owner is exactly one
-  // of the two accounts afterwards.
+  // ---- issuance vs recovery lock-order ---------------------------------------
   {
     for (let round = 0; round < 3; round++) {
       const lname = `${RUN}ir${round}`.slice(0, 24)
@@ -385,10 +405,6 @@ if (!liveReady) {
       const u = await sql(`SELECT claimed_by, disabled FROM users WHERE id=$1`, [luid])
       const rq = await sql(`SELECT user_id, status, resulting_key_id FROM api_key_requests WHERE id=$1`, [reqRows[0].id])
       const no5xx = claimRes.status < 500 && issueRes.status < 500
-      // Outcomes are order-dependent but always consistent: issuance either
-      // minted the key first (200 — the row is then repointed to the claimer),
-      // saw the request already transferred (400 not_found) or had its session
-      // die mid-race (401). A deadlock would surface as a 500 — never allowed.
       const consistent = [200, 400, 401].includes(issueRes.status) && rq[0]?.user_id === cuid
       await check(
         `live: issuance vs recovery cannot deadlock (round ${round})`,
@@ -397,14 +413,13 @@ if (!liveReady) {
     }
   }
 
-  // ---- foreign key ------------------------------------------------------------
+  // ---- foreign key -------------------------------------------------------------
   {
     const lname = `${RUN}_d`.slice(0, 24)
-    const luid = await makeUser(lname)
+    await makeUser(lname)
     const cuid = await makeUser(`${RUN}_claimer2`.slice(0, 24))
     const res = await claim(cuid, { username: lname, apiKey: key(999) }, secret)
     await check("live: foreign key rejected", res.status === 403 && res.data.error === "claim_proof_failed")
-    void luid
   }
 
   // ---- disabled claimer --------------------------------------------------------
@@ -427,7 +442,6 @@ if (!liveReady) {
     await makeKey(aid, ka)
     await makeKey(bid, kb)
     const first = await claim(aid, { username: bn, apiKey: kb }, secret)
-    // B's session is now dead — B cannot even reach the endpoint to claim A back.
     const back = await claim(bid, { username: an, apiKey: ka }, secret)
     const aRow = await sql(`SELECT disabled, claimed_by FROM users WHERE id=$1`, [aid])
     await check(
@@ -438,7 +452,7 @@ if (!liveReady) {
 
   // ---- shared rate-limit bucket ---------------------------------------------------
   {
-    const target = `${RUN}rl`.slice(0, 24) // need not exist — the name bucket counts attempts
+    const target = `${RUN}rl`.slice(0, 24)
     const u1 = await makeUser(`${RUN}_r1`.slice(0, 24))
     const u2 = await makeUser(`${RUN}_r2`.slice(0, 24))
     const codes = []
@@ -476,6 +490,11 @@ if (!liveReady) {
       "live: approval materializes the github account",
       res.status === 200 && data.status === "approved" && ghost.length === 1 && u[0]?.claimed_by === ghost[0].id && k[0]?.user_id === ghost[0].id,
     )
+  }
+
+  // Scoped cleanup: delete only the rate-limit buckets this run created.
+  if (bucketKeys.size > 0) {
+    await sql(`DELETE FROM rate_limit_buckets WHERE bucket = ANY($1::text[])`, [[...bucketKeys]]).catch(() => {})
   }
 }
 
