@@ -8,15 +8,16 @@ import { getSessionUserId } from "@/lib/sessions"
 export const dynamic = "force-dynamic"
 
 export async function GET() {
+  const noStore = { headers: { "cache-control": "private, no-store" } }
   const userId = await getSessionUserId()
-  if (!userId) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
+  if (!userId) return NextResponse.json({ error: "unauthorized" }, { status: 401, ...noStore })
 
   const [user] = await db
     .select({ username: users.username })
     .from(users)
     .where(eq(users.id, userId))
     .limit(1)
-  if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
+  if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401, ...noStore })
 
   return NextResponse.json(
     { username: user.username },

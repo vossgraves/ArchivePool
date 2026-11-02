@@ -11,7 +11,7 @@ name: Health check cron
 # run twice.
 #
 # Required repo secrets (Settings -> Secrets and variables -> Actions):
-#   HEALTH_URL   - Base URL of the deployed site, e.g. https://archivepool.workers.dev
+#   HEALTH_URL   - Base URL of the deployed site, e.g. https://archivepool.natune.workers.dev
 #   CRON_SECRET  - Same value as the CRON_SECRET secret on the deployed site.
 
 on:

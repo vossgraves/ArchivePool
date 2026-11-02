@@ -61,7 +61,7 @@ Web accounts sign in with GitHub instead of a password (scrypt cannot run inside
 free 10 ms CPU budget). Create one OAuth App under
 https://github.com/settings/developers → "New OAuth App":
 
-- **Homepage URL:** `https://<worker host>` (e.g. `https://archivepool.workers.dev`
+- **Homepage URL:** `https://<worker host>` (e.g. `https://archivepool.natune.workers.dev`
   or your custom domain).
 - **Authorization callback URL:** `https://<worker host>/api/auth/github/callback`.
 - Scope is the built-in `read:user` — nothing else to grant.
@@ -86,14 +86,14 @@ keep password login (non-Workers) get the same GitHub button alongside the passw
 # `opennextjs-cloudflare deploy` (requires CLOUDFLARE_API_TOKEN or `wrangler login`).
 # NEXT_PUBLIC_SITE_URL must be exported BEFORE the command: it is a build-time
 # var — an env the deploy step alone sees would be too late.
-NEXT_PUBLIC_SITE_URL=https://archivepool.<subdomain>.workers.dev pnpm deploy:cf
+NEXT_PUBLIC_SITE_URL=https://archivepool.natune.workers.dev pnpm deploy:cf
 ```
 
 `NEXT_PUBLIC_SITE_URL` at **build** time keeps `metadataBase` correct for the
 statically prerendered pages (it only affects OpenGraph/canonical URLs).
 
 Then update the GitHub Actions secret `HEALTH_URL` to the worker URL
-(`https://archivepool.<subdomain>.workers.dev`) — the health/monochrome/purge
+(`https://archivepool.natune.workers.dev`) — the health/monochrome/purge
 workflows start driving the new deployment on their next run. No workflow changes
 are needed; they already loop `?batch=` calls until `done`.
 
