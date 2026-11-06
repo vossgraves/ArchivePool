@@ -3,15 +3,23 @@ import { NextResponse, type NextRequest } from "next/server"
 import { identifyReadKey, readKeyFromRequest } from "@/lib/api-keys"
 import { clientEncryptionEnabled, deriveClientKey } from "@/lib/crypto"
 import { leasePool } from "@/lib/queries"
-import { clientIp, keyId, rateLimit, tooManyRequests } from "@/lib/rate-limit"
+import {
+  clientIp,
+  clientKeyBucket,
+  keyFleetLimit,
+  keyId,
+  rateLimit,
+  tooManyRequests,
+} from "@/lib/rate-limit"
 
 export const dynamic = "force-dynamic"
 
-// Same rate-limit posture as /api/accounts: per-IP before auth (bounds key guessing), per-key
-// after auth (bounds pool-walking via lease rotation). See that route for the rationale.
+// Same posture as /api/accounts: per-IP before auth (bounds key guessing), per client after
+// auth (bounds one install's loop), and an opt-in per-key total. See that route for why the
+// bucket is key + address rather than the key alone.
 const IP_LIMIT = 120
 const IP_WINDOW_MS = 60_000
-const KEY_LIMIT = 30
+const KEY_LIMIT = 60
 const KEY_WINDOW_MS = 5 * 60_000
 
 /**
@@ -32,7 +40,8 @@ const KEY_WINDOW_MS = 5 * 60_000
  * receiving POOL_CLIENT_KEY ciphertext.
  */
 export async function GET(req: NextRequest) {
-  const ipVerdict = rateLimit(`feed-ip:${clientIp(req.headers)}`, IP_LIMIT, IP_WINDOW_MS)
+  const ip = clientIp(req.headers)
+  const ipVerdict = rateLimit(`feed-ip:${ip}`, IP_LIMIT, IP_WINDOW_MS)
   if (!ipVerdict.ok) return tooManyRequests(ipVerdict.retryAfterSec, "feed")
 
   const v2 = req.headers.get("x-pool-client")?.trim().toLowerCase() === "v2"
@@ -57,8 +66,14 @@ export async function GET(req: NextRequest) {
 
   const readKey = readKeyFromRequest(req)
   if (readKey) {
-    const keyVerdict = rateLimit(`feed-key:${keyId(readKey)}`, KEY_LIMIT, KEY_WINDOW_MS)
-    if (!keyVerdict.ok) return tooManyRequests(keyVerdict.retryAfterSec, "feed")
+    const id = keyId(readKey)
+    const clientVerdict = rateLimit(clientKeyBucket("feed-key", id, ip), KEY_LIMIT, KEY_WINDOW_MS)
+    if (!clientVerdict.ok) return tooManyRequests(clientVerdict.retryAfterSec, "feed")
+    const fleetLimit = keyFleetLimit()
+    if (fleetLimit > 0) {
+      const fleetVerdict = rateLimit(`feed-key-total:${id}`, fleetLimit, KEY_WINDOW_MS)
+      if (!fleetVerdict.ok) return tooManyRequests(fleetVerdict.retryAfterSec, "feed")
+    }
   }
 
   // Leases a few entries per category rather than returning the whole pool, so a leaked key

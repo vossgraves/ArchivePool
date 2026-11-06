@@ -2,8 +2,8 @@
 import "server-only"
 
 import { cfBindings } from "@/lib/cf-env"
-import { getDiscovery } from "@/lib/queries"
-import { SERVICES, type Service } from "@/lib/sources"
+import { getAllDiscovery } from "@/lib/queries"
+import { type Service } from "@/lib/sources"
 
 /**
  * The pool's servable instance URLs, snapshotted by the sweep and read back by the
@@ -73,11 +73,9 @@ export async function writeInstanceSnapshot(): Promise<void> {
   const useBlob = !store && Boolean(process.env.BLOB_READ_WRITE_TOKEN)
   if (!store && !useBlob) return
   try {
-    const discovered = await Promise.all(SERVICES.map((service) => getDiscovery(service)))
-    const snapshot = {} as Snapshot
-    SERVICES.forEach((service, index) => {
-      snapshot[service] = discovered[index]
-    })
+    // One query for every service. The previous per-service Promise.all ran five statements
+    // on every sweep/sync, and Hyperdrive Free meters each of them.
+    const snapshot = await getAllDiscovery()
     const body = JSON.stringify({ savedAt: Date.now(), data: snapshot } satisfies StoredSnapshot)
     if (store) {
       // Belt-and-braces expiry next to the readers' own savedAt check: a dead store
@@ -144,16 +142,22 @@ export async function readInstanceSnapshot(service: Service): Promise<Discovery 
  * Public caching is only honest while the feed is public. Vercel's CDN keys on the URL and does not
  * vary on `Authorization`, so a response cached from a keyed request would be handed straight to the
  * next anonymous caller — the key check would run once and then be bypassed for everyone afterwards.
- * With READ_KEYS_ENFORCED the answer is per-key and must stay private: the snapshot still saves the
- * database read, it just cannot also save the function invocation.
+ * With READ_KEYS_ENFORCED the answer must stay out of any shared cache; the client's own cache is a
+ * different thing, and letting it hold the public URL list is what saves the invocation.
  *
  * A function rather than a constant because this module initializes at isolate cold start, before
  * the worker's env is injected into process.env — a top-level const would freeze "enforced" to
  * whatever the (empty) build-time env said. All three instance/discovery routes must agree on the
  * answer; one of them diverging is the leak this exists to prevent.
+ *
+ * `private` (not `no-store`) when keys are enforced: the body is identical public instance URLs
+ * for every caller, so a shared cache must not store it (Vercel keys on URL, not Authorization),
+ * but the app's own HTTP cache may keep it for five minutes. That is what lets a client skip the
+ * revalidation request entirely and takes pressure off the Workers request quota. `no-store` also
+ * forbade the conditional requests the ETag on these routes exists to enable.
  */
 export function snapshotCacheControl(): string {
   return process.env.READ_KEYS_ENFORCED === "true"
-    ? "private, no-store"
+    ? "private, max-age=300, stale-while-revalidate=3600"
     : "public, s-maxage=300, stale-while-revalidate=3600"
 }

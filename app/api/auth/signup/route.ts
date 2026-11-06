@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { NextResponse, type NextRequest } from "next/server"
 import { webLoginDisabled } from "@/lib/cf-env"
+import { clientIp } from "@/lib/rate-limit"
 import { setSessionCookie } from "@/lib/sessions"
 import { USERNAME_PATTERN, countRecentUsersByIpUa, createUser, findUserByUsername } from "@/lib/users"
 
@@ -44,7 +45,7 @@ export async function POST(req: NextRequest) {
     )
   }
 
-  const ip = (req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? req.headers.get("x-real-ip") ?? "").slice(0, 64)
+  const ip = clientIp(req.headers)
   const ua = (req.headers.get("user-agent") ?? "").slice(0, 256)
   // Prevent mass account creation: at most 5 accounts per IP+UA per 24h
   if (ip && ua) {
@@ -52,7 +53,13 @@ export async function POST(req: NextRequest) {
     if (recent >= 5) {
       return NextResponse.json(
         { error: "rate_limited", detail: "Too many accounts from this device/network. Try again later." },
-        { status: 429 },
+        {
+          status: 429,
+          headers: {
+            "retry-after": "86400",
+            "cache-control": "private, no-store",
+          },
+        },
       )
     }
   }

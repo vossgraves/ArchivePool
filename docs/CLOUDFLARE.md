@@ -11,16 +11,98 @@ file changes how the app runs anywhere else.
 
 | Limit | This app |
 |---|---|
-| 100k requests/day | ~2,000 reports/day + feeds/status ≈ tens of thousands — headroom. |
+| 100k requests/day | Exceeding it returns Cloudflare **Error 1027** (a Cloudflare error page, not the app's JSON `429`). The app's own feeds are tens of thousands/day; see *Rate limits* below. |
 | 10 ms CPU/request | Reads are I/O-bound (Postgres, upstream fetches — wait time is unmetered). One hot spot: `scrypt` password verification (see *Known limits*). |
 | 3 MiB compressed worker | Measured ~2.0 MiB (`pnpm build:cf`, then `gzip -c .open-next/server-functions/default/handler.mjs`). |
 | 50 subrequests/request | Report path ≤ ~10; the sweep/instance sync are driven in `?batch=` slices (≤10 checks each) by GitHub Actions — see below. |
 | Cron triggers | Not needed — the existing GitHub Actions crons keep driving `/api/cron/*` via `HEALTH_URL`. |
-| Hyperdrive | Free. Pooled TCP to Neon; `pg` connects to the `HYPERDRIVE` binding's in-colo endpoint over a Workers socket. |
-| Workers KV | Free (1k writes / 100k reads / day, 25 MiB values). The `POOL_SNAPSHOTS` namespace replaces `@vercel/blob` for `pool/instances.json` — a few KB rewritten ~6×/day. Chosen over R2: R2 activation needs a payment method on the account; KV does not. |
+| Hyperdrive | **100,000 database statements/day on Free** — every `SELECT`, `INSERT`, `UPDATE`, `CREATE` and no-op `IF NOT EXISTS` counts; over the cap, statements fail (they are not throttled). Pooled TCP to Neon; `pg` connects to the `HYPERDRIVE` binding's in-colo endpoint over a Workers socket. This is the ceiling the pool reached first — see *Rate limits* below. |
+| Workers KV | Free (1k writes / 100k reads / day, 25 MiB values). The `POOL_SNAPSHOTS` namespace replaces `@vercel/blob` for `pool/instances.json` — a few KB rewritten ~6×/day — and also holds `schema:applied` (one write per deploy) and `pool/status.json` (one write per sweep). Read-key identities stay out of KV: their cache lives in the per-colo Cache API so a shared build key cannot spend the 1k/day write budget. Chosen over R2: R2 activation needs a payment method on the account; KV does not. |
 | R2 | Not needed — the snapshot lives in KV. |
 
-## One-time setup
+## Rate limits: what was hit, and what this branch changes
+
+Two independent limits both present as "rate limited", and they need different fixes.
+
+### 1. Hyperdrive's 100,000 statements/day (the one that took the database down)
+
+On 2026-11-06 the deployed Worker answered `GET /api/status` with
+`503 {"error":"database_unavailable","detail":"Failed query: select … from account_entries …"}`
+while `/api/accounts` (which rejects a missing key *before* any SQL) still answered `401`.
+That isolates the failure to database statements, not requests, CPU or subrequests:
+
+- Workers Free request quota returns Cloudflare **Error 1027** once exhausted, not a JSON 503.
+- CPU exhaustion returns **1102**. Exceeding 50 subrequests fails the invocation.
+- KV quota failures are caught by the snapshot read and fall back to SQL; they do not surface
+  as a SQL error.
+- `wrangler.jsonc` configures no D1, R2, Durable Object or rate-limit binding, and WAF rate
+  limiting rules are not part of the Free plan.
+- Hyperdrive Free's 100,000/day cap is the only configured Cloudflare limit where further
+  **statements fail** rather than being throttled.
+
+Before this branch, one day of ordinary traffic spent that budget on statements that did no
+useful work:
+
+| Path | Statements before | After |
+|---|---|---|
+| First request in every cold isolate | `ensureSchema()` ran **57** idempotent migrations (`globalThis` memo is per isolate, not global) | 1 KV read; 0 SQL after the version marker exists |
+| Every discovery poll (`/api/instances/*`, `/api/discovery/*`) | key SELECT + `use_count` UPDATE = 2, plus a discovery SELECT on a snapshot miss | per-colo Cache API identity (1 SQL per key per colo per 5 min); 0 `use_count` writes; snapshot from KV |
+| Legacy `/api/sources` lease | `stampLeases` ran one UPDATE per id (3 accounts + 10 instances) inside a transaction = 13 UPDATEs + BEGIN/COMMIT | one `UPDATE … FROM (VALUES …)` |
+| `/api/status` miss | 4 statements (entry scans, uptime aggregate, 14-day history) | edge/KV snapshot; database only when the sweep's copy is absent/stale |
+| Tidal lease refresh | up to 6 candidates refreshed concurrently (6 Tidal round trips) | bounded at 3 in flight |
+
+The schema gate is the big one: 57 statements per cold isolate, across however many isolates
+a global Worker gets in a day, is easily six figures on its own. The marker is written once
+per schema version, and the route caches stop repeat polls from reaching SQL at all.
+
+**Operator note:** after restoring or recreating the database, delete the `schema:applied` KV
+key (or bump `SCHEMA_VERSION` in `lib/db/ensure.ts`) — otherwise the Worker will assume the
+schema is already present. Any change to the statements array must bump `SCHEMA_VERSION`.
+
+### 2. The app's own 429s were fleet-wide, not per client
+
+`lib/rate-limit.ts` read only `x-forwarded-for` / `x-real-ip`. Cloudflare puts the peer in
+`cf-connecting-ip` and does **not** add XFF to a Worker request, so every caller resolved to
+the literal `"unknown"` and all clients shared one `feed-ip:` bucket per isolate. On top of
+that, a build bakes one read key into every install, so `feed-key:<id>` at 30 leases / 5 min
+capped the *whole fleet*, not one client — and 401 discovery polls still spent the IP bucket
+before auth.
+
+Changes:
+
+- `clientIp()` reads `cf-connecting-ip` on Workers (XFF stays primary on Vercel/Railway,
+  where the platform sets it; `cf-connecting-ip` is not trusted there, to avoid a spoofed
+  bucket per request).
+- Account/report key buckets are `key + client address` (60 leases / 5 min per client), with
+  an **opt-in** per-key total (`POOL_KEY_FLEET_LIMIT`, default off). Leases are sticky per
+  key for 72h, so a leaked key cannot walk the pool by rotating addresses anyway.
+- Discovery limits are 120/min per real address, and the read-key check is cached per colo
+  (including brief negative caching), so a broken build's 401 storm costs one SQL lookup per
+  key per colo per 5 minutes, not one per launch.
+- Every 429 carries `retry-after`; the database-unavailable 503 now carries
+  `retry-after: 60` so a client can tell a temporary database problem from a host failover.
+- Discovery responses when keys are enforced are `private, max-age=300` instead of
+  `no-store` (the body is identical public instance URLs), and carry a weak `ETag` honouring
+  `If-None-Match` → 304. That lets a client reuse a five-minute-old copy without a request.
+
+Upstream provider 429s (Tidal's `abuse_detected`, a Qobuz/Deezer instance answering 429) are
+already contained inside the health/refresh paths: they set a cooldown and are never returned
+to a client as a `429`. They are not the limit the apps see.
+
+### What to check in the Cloudflare dashboard
+
+The maintainer needs the Cloudflare connector for these; the code cannot observe them:
+
+- **Workers & Pages → archivepool → Metrics**: requests/day vs 100,000; Errors → Invocation
+  Statuses (`exceededCpu` = 1102, subrequest failures).
+- **Hyperdrive → archivepool-db**: queries/day vs 100,000. This should now be a small
+  fraction of the old figure; if it is still exhausted, the deployed version is old or the
+  schema marker was deleted against a schema that then re-ran.
+- **Workers KV → POOL_SNAPSHOTS**: reads/writes per day vs 100k/1k.
+- **Workers Logs** (or `wrangler tail`): the underlying SQL error text. Cloudflare's
+  Hyperdrive-limit error is explicit there; the route only surfaces "Failed query".
+
+
 
 ```bash
 # 1. Install deps (pnpm — the repo's package manager)

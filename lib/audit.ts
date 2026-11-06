@@ -5,6 +5,7 @@ import type { NextRequest } from "next/server"
 import { db } from "@/lib/db"
 import { auditLog, users } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
+import { clientIp } from "@/lib/request-ip"
 import type { AdminActor } from "@/lib/admin-auth"
 
 export type AuditAction =
@@ -21,11 +22,6 @@ export type AuditAction =
   | "entry.purge_dead"
   | "entry.purge"
   | "user.role_change"
-
-function clientIp(req: NextRequest): string {
-  const forwarded = req.headers.get("x-forwarded-for")
-  return (forwarded?.split(",")[0] ?? req.headers.get("x-real-ip") ?? "").trim().slice(0, 64)
-}
 
 /**
  * Append one audit row. Never throws: an action that succeeded must not be reported as failed
@@ -46,7 +42,7 @@ export async function recordAudit(
       actorUserId: actor.userId,
       actorLabel: actor.label,
       detail,
-      ipAddress: clientIp(req),
+      ipAddress: clientIp(req.headers),
     })
   } catch (err) {
     console.error("[audit] failed to record", action, target, err)

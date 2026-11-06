@@ -3,19 +3,30 @@ import { NextResponse, type NextRequest } from "next/server"
 import { identifyReadKey, readKeyFromRequest } from "@/lib/api-keys"
 import { clientEncryptionEnabled, deriveClientKey } from "@/lib/crypto"
 import { leaseAccounts } from "@/lib/queries"
-import { clientIp, keyId, rateLimit, tooManyRequests } from "@/lib/rate-limit"
+import {
+  clientIp,
+  clientKeyBucket,
+  keyFleetLimit,
+  keyId,
+  rateLimit,
+  tooManyRequests,
+} from "@/lib/rate-limit"
 
 export const dynamic = "force-dynamic"
 
 // Rate limits (defence against scripted abuse; the app itself fetches once per 15–24h):
 //  - per IP, before auth: 120/min — bounds key-guessing against the constant-time compare and
-//    DB lookups, without punishing users behind shared NAT.
-//  - per read key, after auth: 30 per 5 min — each request leases 3 accounts per service with
-//    rotation, so an unthrottled loop walks the entire pool; this keeps a (leaked) key to a
-//    crawl while never touching the app's natural cadence.
+//    DB lookups, without punishing users behind shared NAT. On Workers this used to be one
+//    global "unknown" bucket; see lib/request-ip.ts.
+//  - per client, after auth: 60 per 5 min on key + address. A build bakes ONE read key into
+//    every install, so keying on the key alone (the old 30/5 min) made the ~90th install in a
+//    window rate-limit the whole fleet. Leases are sticky per key for 72h, so this still
+//    bounds a leaked key: rotating addresses cannot reshuffle its credential set.
+//  - per key total: OFF by default. A low fleet-wide cap is exactly the global 429 this fixes.
+//    Set POOL_KEY_FLEET_LIMIT only for a generous tripwire (see lib/rate-limit.ts).
 const IP_LIMIT = 120
 const IP_WINDOW_MS = 60_000
-const KEY_LIMIT = 30
+const KEY_LIMIT = 60
 const KEY_WINDOW_MS = 5 * 60_000
 
 /**
@@ -35,7 +46,8 @@ const KEY_WINDOW_MS = 5 * 60_000
  * and are refused with 503 when that static key is not configured on the server.
  */
 export async function GET(req: NextRequest) {
-  const ipVerdict = rateLimit(`feed-ip:${clientIp(req.headers)}`, IP_LIMIT, IP_WINDOW_MS)
+  const ip = clientIp(req.headers)
+  const ipVerdict = rateLimit(`feed-ip:${ip}`, IP_LIMIT, IP_WINDOW_MS)
   if (!ipVerdict.ok) return tooManyRequests(ipVerdict.retryAfterSec, "feed")
 
   const v2 = req.headers.get("x-pool-client")?.trim().toLowerCase() === "v2"
@@ -63,8 +75,17 @@ export async function GET(req: NextRequest) {
 
   const readKey = readKeyFromRequest(req)
   if (readKey) {
-    const keyVerdict = rateLimit(`feed-key:${keyId(readKey)}`, KEY_LIMIT, KEY_WINDOW_MS)
-    if (!keyVerdict.ok) return tooManyRequests(keyVerdict.retryAfterSec, "feed")
+    const id = keyId(readKey)
+    // One client's budget: a shared build key must not turn one busy install (or its retry
+    // loop) into a fleet-wide 429.
+    const clientVerdict = rateLimit(clientKeyBucket("feed-key", id, ip), KEY_LIMIT, KEY_WINDOW_MS)
+    if (!clientVerdict.ok) return tooManyRequests(clientVerdict.retryAfterSec, "feed")
+    // Opt-in fleet tripwire; disabled unless the deployment sets a generous value.
+    const fleetLimit = keyFleetLimit()
+    if (fleetLimit > 0) {
+      const fleetVerdict = rateLimit(`feed-key-total:${id}`, fleetLimit, KEY_WINDOW_MS)
+      if (!fleetVerdict.ok) return tooManyRequests(fleetVerdict.retryAfterSec, "feed")
+    }
   }
 
   // Leases a few accounts per service rather than returning the whole pool, so a leaked key

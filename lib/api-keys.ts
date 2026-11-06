@@ -6,6 +6,7 @@ import { cfWaitUntil } from "@/lib/cf-env"
 import { db } from "@/lib/db"
 import { ensureSchema } from "@/lib/db/ensure"
 import { apiKeys, apiKeyRequests, users } from "@/lib/db/schema"
+import { edgeGet, edgePut } from "@/lib/edge-cache"
 import { isService, type Service } from "@/lib/sources"
 
 const KEY_PREFIX = "atp_"
@@ -61,9 +62,64 @@ export interface ReadKeyIdentity {
 export type KeyScope = Service | null
 
 /**
+ * One resolved key row. [keyHash] is the stored SHA-256 (already compared in constant time),
+ * never the presented plaintext.
+ */
+interface KeyRow {
+  id: number
+  scope: KeyScope
+  revoked: boolean
+}
+
+/**
+ * The single database lookup every auth path shares. Returns null for "no row" and for a row
+ * whose stored hash does not match in constant time, so callers cannot distinguish them.
+ */
+async function findKeyRow(keyHash: string): Promise<KeyRow | null> {
+  const [row] = await db
+    .select({ id: apiKeys.id, keyHash: apiKeys.keyHash, revoked: apiKeys.revoked, service: apiKeys.service })
+    .from(apiKeys)
+    .where(and(eq(apiKeys.keyHash, keyHash), eq(apiKeys.deleted, false)))
+    .limit(1)
+  if (!row) return null
+  const a = Buffer.from(row.keyHash)
+  const b = Buffer.from(keyHash)
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return null
+  return { id: row.id, scope: row && isService(row.service) ? row.service : null, revoked: row.revoked }
+}
+
+// `use_count` drives the dashboard and lets an operator retire a legacy baked-in key. It does
+// not need per-request precision, and on Workers each bump is a Hyperdrive statement — so it
+// is sampled at most once a minute per key per isolate. A cold isolate may add one bump.
+const USAGE_BUMP_INTERVAL_MS = 60_000
+const usageBumpedAt = new Map<number, number>()
+
+function bumpKeyUsage(id: number): void {
+  const now = Date.now()
+  const last = usageBumpedAt.get(id)
+  if (last != null && now - last < USAGE_BUMP_INTERVAL_MS) return
+  if (usageBumpedAt.size > 5_000) usageBumpedAt.clear()
+  usageBumpedAt.set(id, now)
+  // Best-effort; never block the request on it. On Workers the write rides
+  // ctx.waitUntil — a response-scoped promise there is dropped at return.
+  cfWaitUntil(
+    db
+      .update(apiKeys)
+      .set({ useCount: sql`${apiKeys.useCount} + 1`, lastUsedAt: new Date() })
+      .where(eq(apiKeys.id, id))
+      .then(() => {})
+      .catch(() => {}),
+  )
+}
+
+/**
  * Validates the key and resolves its row id in one lookup, so per-key leasing needs no second
  * query. [alwaysEnforce] is for credential-bearing feeds; discovery feeds carry only URLs and
  * can stay public unless READ_KEYS_ENFORCED is set.
+ *
+ * This is the *uncached* path, deliberately: `/api/accounts` and `/api/sources` serve secrets,
+ * so a revocation must take effect on the very next request. Discovery has its own cached
+ * variant below; it serves public instance URLs only.
  */
 export async function identifyReadKey(req: NextRequest, alwaysEnforce = false): Promise<ReadKeyIdentity> {
   const enforced = alwaysEnforce || process.env.READ_KEYS_ENFORCED === "true"
@@ -71,46 +127,115 @@ export async function identifyReadKey(req: NextRequest, alwaysEnforce = false): 
 
   // Gating off: allow, and skip the query entirely when nothing was presented.
   if (!enforced && !candidate) return { ok: true, keyId: null, scope: null }
-
   if (!candidate) return { ok: false, keyId: null, scope: null }
 
   const keyHash = hashKey(candidate)
-  const [row] = await db
-    .select({ id: apiKeys.id, keyHash: apiKeys.keyHash, revoked: apiKeys.revoked, service: apiKeys.service })
-    .from(apiKeys)
-    .where(and(eq(apiKeys.keyHash, keyHash), eq(apiKeys.deleted, false)))
-    .limit(1)
-
-  const scope: KeyScope = row && isService(row.service) ? row.service : null
+  await ensureSchema()
+  const row = await findKeyRow(keyHash)
 
   if (!enforced) {
     // Resolve the id for leasing only; skip the use_count bump, which would silently change
     // what that dashboard number counts on an unenforced deployment.
     if (!row || row.revoked) return { ok: true, keyId: null, scope: null }
-    const a = Buffer.from(row.keyHash)
-    const b = Buffer.from(keyHash)
-    if (a.length !== b.length || !timingSafeEqual(a, b)) return { ok: true, keyId: null, scope: null }
-    return { ok: true, keyId: row.id, scope }
+    return { ok: true, keyId: row.id, scope: row.scope }
   }
 
   if (!row || row.revoked) return { ok: false, keyId: null, scope: null }
+  bumpKeyUsage(row.id)
+  return { ok: true, keyId: row.id, scope: row.scope }
+}
 
-  const a = Buffer.from(row.keyHash)
-  const b = Buffer.from(keyHash)
-  if (a.length !== b.length || !timingSafeEqual(a, b)) return { ok: false, keyId: null, scope: null }
+/**
+ * Discovery-feed authentication with a short-lived cache.
+ *
+ * `/api/discovery/*` and `/api/instances/*` are polled far more often than credentials are
+ * leased, and each poll used to cost a SELECT for the key plus an UPDATE for `use_count`.
+ * Hyperdrive Free meters every statement against 100,000/day, so on a fleet sharing one baked
+ * key those two statements were the dominant per-request database cost.
+ *
+ * The cache holds no secret: the cache key is the SHA-256 of the presented key and the value
+ * is `{id, scope, revoked}` — the same non-secret row fields the route needs. It lives in the
+ * Cache API, not Workers KV: KV Free allows only 1,000 writes/day, and a shared build key on
+ * many isolates would spend that budget just refreshing identities. The Cache API is per-colo
+ * and unmetered for writes, which is exactly the right shape. Only the discovery feed uses
+ * this cache, so a revoked key still loses `/api/accounts` immediately; on discovery it can
+ * keep reading public instance URLs for at most the cache TTL below.
+ */
+const DISCOVERY_KEY_CACHE_SEC = 300
+const DISCOVERY_KEY_MEMO_MS = 60_000
+const DISCOVERY_KEY_NEGATIVE_MEMO_MS = 120_000
+const discoveryKeyMemo = new Map<string, { at: number; identity: ReadKeyIdentity }>()
 
-  // Best-effort; never block the request on it. On Workers the write rides
-  // ctx.waitUntil — a response-scoped promise there is dropped at return.
-  cfWaitUntil(
-    db
-      .update(apiKeys)
-      .set({ useCount: sql`${apiKeys.useCount} + 1`, lastUsedAt: new Date() })
-      .where(eq(apiKeys.id, row.id))
-      .then(() => {})
-      .catch(() => {}),
-  )
+interface CachedKeyIdentity {
+  id?: number | null
+  scope?: string | null
+  revoked?: boolean
+}
 
-  return { ok: true, keyId: row.id, scope }
+export async function identifyDiscoveryKey(req: NextRequest): Promise<ReadKeyIdentity> {
+  const enforced = process.env.READ_KEYS_ENFORCED === "true"
+  const candidate = extractKey(req)
+  if (!enforced && !candidate) return { ok: true, keyId: null, scope: null }
+  if (!candidate) return { ok: false, keyId: null, scope: null }
+
+  const keyHash = hashKey(candidate)
+  const now = Date.now()
+  const memo = discoveryKeyMemo.get(keyHash)
+  if (memo && now - memo.at < (memo.identity.ok ? DISCOVERY_KEY_MEMO_MS : DISCOVERY_KEY_NEGATIVE_MEMO_MS)) {
+    return memo.identity
+  }
+
+  const cacheKey = `key-id:${keyHash}`
+  let identity: ReadKeyIdentity | null = null
+
+  // 1) Per-colo Cache API. A miss and a cache outage look the same and fall through.
+  const raw = await edgeGet(cacheKey)
+  if (raw) {
+    try {
+      const cached = JSON.parse(raw) as CachedKeyIdentity
+      if (typeof cached.revoked === "boolean") {
+        identity =
+          cached.revoked && enforced
+            ? { ok: false, keyId: null, scope: null }
+            : {
+                ok: true,
+                keyId: typeof cached.id === "number" ? cached.id : null,
+                scope: cached.scope && isService(cached.scope) ? cached.scope : null,
+              }
+      }
+    } catch {
+      /* malformed entry — treat as a miss */
+    }
+  }
+
+  // 2) Database fallback: first poll for this key in this colo, or after the cache TTL.
+  if (identity == null) {
+    try {
+      await ensureSchema()
+      const row = await findKeyRow(keyHash)
+      identity =
+        !row || row.revoked
+          ? enforced
+            ? { ok: false, keyId: null, scope: null }
+            : { ok: true, keyId: null, scope: null }
+          : { ok: true, keyId: row.id, scope: row.scope }
+      // Cache rejections too, briefly: a revoked key retried on every app launch would
+      // otherwise keep paying for a SQL round trip in every colo.
+      await edgePut(
+        cacheKey,
+        JSON.stringify({ id: identity.keyId, scope: identity.scope, revoked: !identity.ok }),
+        DISCOVERY_KEY_CACHE_SEC,
+      )
+    } catch (err) {
+      console.error("[auth] discovery key lookup failed:", err instanceof Error ? err.message : err)
+      return { ok: false, keyId: null, scope: null }
+    }
+  }
+
+  if (identity == null) return { ok: false, keyId: null, scope: null }
+  if (discoveryKeyMemo.size > 5_000) discoveryKeyMemo.clear()
+  discoveryKeyMemo.set(keyHash, { at: now, identity })
+  return identity
 }
 
 /** Boolean-only wrapper over [identifyReadKey]. */

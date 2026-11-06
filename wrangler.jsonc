@@ -18,6 +18,12 @@
     {
       // Workers KV, not R2: the snapshot is a few KB rewritten a few times a day,
       // well inside KV's free tier (R2 needs a payment method to activate).
+      //
+      // Also holds two small, low-write keys added by the rate-limit fix:
+      //   schema:applied   — one write per deploy (stops 57 migration statements per isolate)
+      //   pool/status.json — one write per 6-hourly health sweep (status board without SQL)
+      // Read-key identities deliberately do NOT live here: KV Free is 1,000 writes/day and a
+      // shared build key would spend it; that cache is in the per-colo Cache API instead.
       "binding": "POOL_SNAPSHOTS",
       "id": "55052226236e4a69b298655e82110508",
     },
@@ -27,6 +33,12 @@
       "binding": "HYPERDRIVE",
       // Created with:  wrangler hyperdrive create archivepool-db --connection-string="$DATABASE_URL"
       // then pasted here. The runtime connection string it hands pg is worker-local.
+      //
+      // Free-plan ceiling: 100,000 database STATEMENTS per day (every SELECT/INSERT/UPDATE/
+      // CREATE counts, including no-op `IF NOT EXISTS` migrations). Exceeding it does not
+      // throttle — statements fail, which surfaced as `database_unavailable` on /api/status.
+      // This is the limit the app actually hits before the 100k Worker request cap; see
+      // docs/CLOUDFLARE.md. Upgrade to Workers Paid for unlimited queries.
       "id": "5a4f8ef01faa41c3b4272a79c57f8253",
       // `wrangler dev` talks to this instead of the real Hyperdrive service.
       // IPv4 literal: "localhost" can resolve to ::1 first, where nothing listens.
