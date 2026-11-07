@@ -57,7 +57,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "invalid_credentials" }, { status: 401 })
   }
 
-  const ip = (req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? req.headers.get("x-real-ip") ?? "").slice(0, 64)
+  const ip = clientIp(req.headers)
   const ua = (req.headers.get("user-agent") ?? "").slice(0, 256)
   // Best-effort; on Workers cfWaitUntil keeps it alive past the response.
   cfWaitUntil(updateLastLogin(user.id, ip, ua).catch(() => {}))

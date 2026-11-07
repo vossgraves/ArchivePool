@@ -40,3 +40,17 @@ Row 12 has zero uses and the same name and reason as row 15, which is live. It i
 Leases are per key (`api_key_leases`). Two apps on one key fight over the same sticky credential
 set, and a single bad actor gets every app's traffic rate-limited at once. One key per consumer
 keeps `/api/report` feedback attributable too.
+
+## How the feed limits are keyed
+
+The credential feeds limit **one client**, not one key: the bucket is
+`key + client address` (60 leases / 5 minutes). A build bakes one key into every install, so a
+bucket keyed on the key alone is a fleet-wide cap — the ~90th install to refresh in a window
+would 429 everyone. Leases are sticky per key for 72h, so a leaked key cannot walk the pool by
+rotating addresses; a per-key total is therefore **off by default**. Set
+`POOL_KEY_FLEET_LIMIT` (for example `3000`) only if you want a generous tripwire for one key
+rotating addresses, and remember it is per isolate, so it is approximate.
+
+Discovery feeds (`/api/instances/*`, `/api/discovery/*`) limit per client address at 120/min
+and cache the key check per colo for five minutes. A revoked key loses the credential feeds on
+the next request; it can keep reading the public instance URLs for at most five minutes.

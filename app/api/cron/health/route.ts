@@ -3,6 +3,7 @@ import { NextResponse, type NextRequest } from "next/server"
 import { isCronAuthorized as authorized } from "@/lib/admin-auth"
 import { runHealthSweep } from "@/lib/health-sweep"
 import { writeInstanceSnapshot } from "@/lib/edge-snapshot"
+import { writeStatusSnapshot } from "@/lib/status-snapshot"
 import { invalidate } from "@/lib/ttl-cache"
 
 export const dynamic = "force-dynamic"
@@ -58,6 +59,10 @@ export async function GET(req: NextRequest) {
     // Only the finishing batch publishes: rewriting the object N times per sweep would just burn
     // the same writes louder.
     await writeInstanceSnapshot()
+    // Memoize the finished board for /api/status in KV. The sweep has just touched every entry,
+    // so this is the cheapest moment to compute figures that otherwise cost four statements on
+    // every status poll (Hyperdrive meters each one against 100k/day).
+    await writeStatusSnapshot()
     invalidate("snapshot:")
   }
   return NextResponse.json({ ok: true, ...summary, ranAt: new Date().toISOString() })

@@ -1,8 +1,25 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { sql } from "drizzle-orm"
 import { db } from "./index"
+import { kvGetText, kvPutText } from "@/lib/pool-cache"
 
-/** Idempotent schema migration, run once per process. See docs/SCHEMA.md. */
+/**
+ * Bump whenever a statement is added below. The version is stored in KV after a clean run so
+ * the 57 idempotent statements do not run on every cold isolate.
+ *
+ * Why this is not just an optimisation: Hyperdrive Free meters **every database statement**
+ * against 100,000/day (a `CREATE INDEX IF NOT EXISTS` counts even when it is a no-op), and a
+ * Workers isolate is short-lived. Running this list on each new isolate burned 57 of those
+ * statements per cold start — easily six figures a day across a global worker — which is how
+ * the deployment hit Hyperdrive's daily limit and every SQL query started failing.
+ *
+ * The gate is a KV read (one per isolate), not a query. When KV is absent or unreadable the
+ * old run-every-process behaviour returns, so a non-Workers host is unchanged.
+ */
+export const SCHEMA_VERSION = "2026-11-06.1"
+const SCHEMA_MARKER_KEY = "schema:applied"
+
+/** Idempotent schema migration, run once per deploy (Workers) / process (elsewhere). See docs/SCHEMA.md. */
 const STATEMENTS: string[] = [
   // 2026-08-30: a database recreated from an older schema.sql 500'd the whole auth flow.
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS created_ip text NOT NULL DEFAULT ''`,
@@ -209,15 +226,51 @@ const STATEMENTS: string[] = [
 
 const globalForMigrations = globalThis as unknown as { __poolSchemaEnsured?: Promise<void> }
 
+/**
+ * True when this exact schema version already ran to a usable state. Read from KV, never the
+ * database: the whole point is to spend zero statements on a warm schema.
+ */
+async function schemaAlreadyApplied(): Promise<boolean> {
+  return (await kvGetText(SCHEMA_MARKER_KEY)) === SCHEMA_VERSION
+}
+
 export function ensureSchema(): Promise<void> {
   globalForMigrations.__poolSchemaEnsured ??= (async () => {
+    if (await schemaAlreadyApplied()) return
+
+    let failed = 0
     for (const statement of STATEMENTS) {
       try {
         await db.execute(sql.raw(statement))
       } catch (err) {
+        failed++
         // A concurrent instance running the same statement, or a missing source_entries on a
         // fresh database, must not break the request that triggered the migration.
         console.error("[db] ensureSchema statement failed:", err instanceof Error ? err.message : err)
+      }
+    }
+
+    // Only mark a *usable* schema. The legacy-copy INSERTs are expected to fail on a fresh
+    // database (there is no source_entries), so failures alone are not disqualifying — but a
+    // database that cannot answer even one trivial read is, and marking it would cache an
+    // outage as "migrated" for the lifetime of the version. A clean statement pass is also
+    // enough on its own: if the verification query is what hit the Hyperdrive cap, the schema
+    // itself did apply and every later isolate should skip the 57 statements.
+    let usable = failed === 0
+    if (!usable) {
+      try {
+        await db.execute(sql`select 1 from account_entries limit 1`)
+        usable = true
+      } catch (err) {
+        console.error("[db] ensureSchema verification failed:", err instanceof Error ? err.message : err)
+      }
+    }
+    if (usable) {
+      await kvPutText(SCHEMA_MARKER_KEY, SCHEMA_VERSION)
+      if (failed > 0) {
+        console.error(
+          `[db] ensureSchema marked ${SCHEMA_VERSION} applied with ${failed} best-effort statement(s) failed`,
+        )
       }
     }
   })()

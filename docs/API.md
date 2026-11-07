@@ -1,6 +1,9 @@
 # ArchivePool API
 
-Base URL for the public deployment: `https://archivepool.vercel.app`
+Base URL for the public deployment: `https://archivepool.natune.workers.dev`
+
+The old `https://archivepool.vercel.app` origin answers `402 DEPLOYMENT_DISABLED` and is kept
+only as a last-resort client fallback; do not treat it as a second live deployment.
 
 ArchivePool is a community source pool for ArchiveTune. People anonymously contribute
 Tidal/Qobuz/Deezer credentials and instances; the site health-checks them on a schedule and

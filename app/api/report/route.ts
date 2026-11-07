@@ -8,7 +8,13 @@ import { accountEntries, healthLog, instanceEntries } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
 import { leaseReplacement, releaseLease } from "@/lib/queries"
 import { checkEntryById } from "@/lib/health-sweep"
-import { clientIp, keyId, rateLimit, tooManyRequests } from "@/lib/rate-limit"
+import {
+  clientIp,
+  clientKeyBucket,
+  keyId,
+  rateLimit,
+  tooManyRequests,
+} from "@/lib/rate-limit"
 import { isKind, isService } from "@/lib/sources"
 
 export const dynamic = "force-dynamic"
@@ -60,11 +66,18 @@ export async function POST(req: NextRequest) {
     )
   }
 
-  const ipVerdict = rateLimit(`report-ip:${clientIp(req.headers)}`, REPORT_IP_LIMIT, REPORT_WINDOW_MS)
+  const ip = clientIp(req.headers)
+  const ipVerdict = rateLimit(`report-ip:${ip}`, REPORT_IP_LIMIT, REPORT_WINDOW_MS)
   if (!ipVerdict.ok) return tooManyRequests(ipVerdict.retryAfterSec, "report")
   const presentedKey = readKeyFromRequest(req)
   if (presentedKey) {
-    const keyVerdict = rateLimit(`report-key:${keyId(presentedKey)}`, REPORT_KEY_LIMIT, REPORT_WINDOW_MS)
+    // Key + address, not the shared build key alone: one install's report loop must not spend
+    // every other install's budget. See lib/rate-limit.ts.
+    const keyVerdict = rateLimit(
+      clientKeyBucket("report-key", keyId(presentedKey), ip),
+      REPORT_KEY_LIMIT,
+      REPORT_WINDOW_MS,
+    )
     if (!keyVerdict.ok) return tooManyRequests(keyVerdict.retryAfterSec, "report")
   }
 

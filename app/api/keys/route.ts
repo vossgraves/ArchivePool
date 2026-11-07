@@ -8,6 +8,7 @@ import {
   listUserApiKeys,
   listUserRequests,
 } from "@/lib/api-keys"
+import { clientIp } from "@/lib/rate-limit"
 import { isService } from "@/lib/sources"
 
 export const dynamic = "force-dynamic"
@@ -64,7 +65,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "invalid_input", detail: "Reason must be at least 10 characters." }, { status: 400 })
   }
 
-  const ip = (req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? req.headers.get("x-real-ip") ?? "").slice(0, 64)
+  const ip = clientIp(req.headers)
   const ua = (req.headers.get("user-agent") ?? "").slice(0, 256)
 
   // Enforce 1 active/pending request per IP+UA (30 days) to prevent spam
@@ -73,7 +74,15 @@ export async function POST(req: NextRequest) {
     if (recent >= 1) {
       return NextResponse.json(
         { error: "rate_limited", detail: "One request per device/network. You already have a pending or recent request." },
-        { status: 429 },
+        {
+          status: 429,
+          headers: {
+            // The window is 30 days; a day is a truthful "not soon" hint without pinning a
+            // client to a timestamp it cannot influence.
+            "retry-after": "86400",
+            "cache-control": "private, no-store",
+          },
+        },
       )
     }
   }

@@ -3,19 +3,31 @@ import "server-only"
 import { createHash } from "node:crypto"
 import { pool } from "@/lib/db"
 import { ensureSchema } from "@/lib/db/ensure"
+import { clientIp } from "@/lib/request-ip"
+
+export { clientIp }
 
 /**
  * Lightweight in-memory sliding-window rate limiter.
  *
- * Defends the credential feeds (per read key), the report endpoint (per IP) and the login
- * endpoint (per IP+username) against scripted abuse. No database writes per request — Neon
- * compute wakeups are metered, so a DB-backed bucket would cost more than the abuse it stops.
+ * Defends the credential feeds (per client, see below), the report endpoint (per IP) and the
+ * login endpoint (per IP+username) against scripted abuse. No database writes per request —
+ * Neon compute wakeups are metered, so a DB-backed bucket would cost more than the abuse it
+ * stops. (`dbRateLimit` exists for the one bucket that must hold across instances.)
  *
- * Honest limitation: Vercel serverless runs several concurrent instances, each with its own
- * window, so the effective ceiling is limit × instance-count. That is still a large raise of
- * the bar against the realistic threat (a leaked key walking the pool via lease rotation, or
- * report-spam disabling healthy entries), and it never punishes the ArchiveTune app itself,
- * which self-throttles to one fetch per 15–24h.
+ * Bucket identity matters more than the numbers. A build bakes ONE read key into every
+ * install, so a bucket keyed on the key alone is a fleet-wide cap: at 30 leases / 5 min the
+ * ~90th install to refresh in the same window gets a 429, and every install behind that key
+ * shares the punishment. The credential feeds therefore key the *client* bucket on
+ * `key + client address` (see lib/request-ip.ts for why XFF alone was "unknown" on Workers)
+ * and only use a per-key total as an opt-in backstop. Leases are sticky per key for 72h
+ * (`api_key_leases`), so a leaked key cannot walk the pool by rotating addresses anyway —
+ * the per-key total is not what protects the pool.
+ *
+ * Honest limitation: Vercel serverless and Workers isolates each keep their own window, so
+ * the effective ceiling is limit × instance-count on the fleet-wide (opt-in) bucket. Per
+ * client buckets still bound one client's retry loop, which is the failure mode observed in
+ * the field.
  *
  * Windows are pruned lazily on access; the Map is also capped so a flood of distinct keys
  * cannot grow memory unbounded (oldest buckets are evicted first).
@@ -115,10 +127,26 @@ export function keyId(readKey: string): string {
   return createHash("sha256").update(readKey).digest("hex").slice(0, 16)
 }
 
-/** Best-effort client IP from the proxy headers Vercel sets. Empty when absent. */
-export function clientIp(req: Headers): string {
-  const fwd = req.get("x-forwarded-for")?.split(",")[0]?.trim()
-  return (fwd || req.get("x-real-ip") || "unknown").slice(0, 64)
+/**
+ * A limiter bucket that follows one client rather than the whole fleet: the key a build bakes
+ * in is shared by every install, so keying on the key alone turns a per-client budget into a
+ * global one. [scope] names the endpoint ("feed-key", "report-key"), [id] is the non-reversible
+ * key id, and [ip] comes from [clientIp] — computed once by the route so both the per-IP and
+ * the per-client buckets agree on one address.
+ */
+export function clientKeyBucket(scope: string, id: string, ip: string): string {
+  return `${scope}:${id}:${ip}`
+}
+
+/**
+ * A fleet-wide backstop for one read key. Disabled by default (0): a low cap here is exactly
+ * the global 429 this fix removes. Set `POOL_KEY_FLEET_LIMIT` to a generous value (e.g. 3000
+ * per 5 minutes) only if you want a tripwire against one leaked key rotating addresses; the
+ * sticky per-key leases remain the thing that bounds what a key can actually walk.
+ */
+export function keyFleetLimit(): number {
+  const configured = Number(process.env.POOL_KEY_FLEET_LIMIT ?? 0)
+  return Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : 0
 }
 
 /** A `429` response with the standard backoff hint. */

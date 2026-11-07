@@ -5,8 +5,9 @@ import { decryptAtRest, encryptAtRest, encryptForClient } from "./crypto"
 import { db } from "./db"
 import { accountEntries, apiKeyLeases, apiKeyRequests, apiKeys, instanceEntries } from "./db/schema"
 import { ensureSchema } from "./db/ensure"
-import { CATEGORIES, type Kind, type Service } from "./sources"
+import { CATEGORIES, SERVICES, type Kind, type Service } from "./sources"
 import type { KeyScope } from "./api-keys"
+import { mapLimit } from "./concurrency"
 import { ensureFreshTidalToken, isTidalAccessExpired } from "./health"
 
 export interface CategoryStatus {
@@ -154,6 +155,14 @@ export const LEASE_PER_CATEGORY_ACCOUNT = 3 // tokens: 3 per app, only if dead
 export const LEASE_PER_CATEGORY_API = 10 // instances: more, stateless
 
 /**
+ * How many Tidal token refreshes one lease may have in flight. Each refresh is a claim UPDATE,
+ * a provider POST and a release UPDATE; an unbounded Promise.all over six candidates made a
+ * single lease up to six simultaneous Tidal round trips — past the six-connection Workers
+ * ceiling and straight into Tidal's per-client abuse scoring. Three covers the serve count.
+ */
+const TIDAL_REFRESH_CONCURRENCY = 3
+
+/**
  * Not 24h: that matches the app's refresh cadence exactly, so every lease would expire just as
  * the next refresh asked for a feed and the mechanism would degrade to reshuffling every time.
  */
@@ -246,29 +255,30 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
   // lease request.
   const tidalChecked = new Set<number>()
   const tidalExcluded = new Set<number>()
-  await Promise.all(
+  await mapLimit(
     rows
       .filter((r) => r.service === "tidal")
       // Refresh twice the serve count so a skipped entry can be substituted — still bounded,
       // unlike refreshing the whole pool per lease. Selection below serves ONLY from this
       // checked set — an unchecked candidate may be holding an expired token.
-      .slice(0, LEASE_PER_CATEGORY_ACCOUNT * 2)
-      .map(async (r) => {
-        tidalChecked.add(r.id)
-        const plain = decryptAtRest(r.payload)
-        const stored = String(plain.token ?? "").trim()
-        const fresh = await ensureFreshTidalToken(plain, r.fingerprint).catch(() => null)
-        if (fresh != null && fresh !== stored) {
-          r.payload = encryptAtRest({ ...plain, token: fresh })
-          return
-        }
-        // A credential that NEEDED a refresh and could not get one (claim lost, cooling,
-        // provider down) must not be served — the stored token is already dead and the app
-        // would just 401 on it. Exclude the entry from THIS lease; the next candidate moves up.
-        if (fresh == null && stored && isTidalAccessExpired(stored)) {
-          tidalExcluded.add(r.id)
-        }
-      }),
+      .slice(0, LEASE_PER_CATEGORY_ACCOUNT * 2),
+    TIDAL_REFRESH_CONCURRENCY,
+    async (r) => {
+      tidalChecked.add(r.id)
+      const plain = decryptAtRest(r.payload)
+      const stored = String(plain.token ?? "").trim()
+      const fresh = await ensureFreshTidalToken(plain, r.fingerprint).catch(() => null)
+      if (fresh != null && fresh !== stored) {
+        r.payload = encryptAtRest({ ...plain, token: fresh })
+        return
+      }
+      // A credential that NEEDED a refresh and could not get one (claim lost, cooling,
+      // provider down) must not be served — the stored token is already dead and the app
+      // would just 401 on it. Exclude the entry from THIS lease; the next candidate moves up.
+      if (fresh == null && stored && isTidalAccessExpired(stored)) {
+        tidalExcluded.add(r.id)
+      }
+    },
   )
 
   const leasedIds: number[] = []
@@ -365,8 +375,13 @@ export async function leasePool(clientKey?: Buffer | null, keyId?: number | null
 /**
  * Each id gets a DISTINCT timestamp, 1ms apart. One `SET last_leased_at = now()` across all of
  * them writes an identical value, and the next request's ORDER BY then breaks the tie
- * arbitrarily — entries recur instead of rotating. Errors are swallowed: a bookkeeping failure
- * must never deny a client credentials it already holds.
+ * arbitrarily — entries recur instead of rotating.
+ *
+ * One statement, not one per id: Hyperdrive Free meters every statement against 100,000/day,
+ * and the legacy combined feed leases three accounts plus ten instances, so the old
+ * transaction ran thirteen UPDATEs (plus BEGIN/COMMIT) per request. The VALUES list preserves
+ * the distinct timestamps, and a single UPDATE is atomic on its own. Errors are swallowed: a
+ * bookkeeping failure must never deny a client credentials it already holds.
  */
 async function stampLeases(
   ids: number[],
@@ -375,14 +390,16 @@ async function stampLeases(
   if (ids.length === 0) return
   try {
     const base = Date.now()
-    await db.transaction(async (tx) => {
-      for (const [i, id] of ids.entries()) {
-        await tx
-          .update(table)
-          .set({ lastLeasedAt: new Date(base + i) })
-          .where(eq(table.id, id))
-      }
-    })
+    const values = sql.join(
+      ids.map((id, i) => sql`(${id}::int, ${new Date(base + i)}::timestamptz)`),
+      sql`, `,
+    )
+    await db.execute(sql`
+      update ${table} as t
+      set last_leased_at = v.leased_at
+      from (values ${values}) as v(id, leased_at)
+      where t.id = v.id
+    `)
   } catch (err) {
     console.error("[pool] failed to stamp lease timestamps", err)
   }
@@ -475,8 +492,23 @@ export async function releaseLease(keyId: number, entryId: number): Promise<bool
   }
 }
 
+export interface DiscoveryFeed {
+  streaming: string[]
+  api: string[]
+}
+
+function discoveryUrls(rows: { payload: unknown }[]): string[] {
+  return Array.from(
+    new Set(
+      rows
+        .map((r) => (r.payload as { baseUrl?: string })?.baseUrl?.trim())
+        .filter((u): u is string => !!u && u.length > 0),
+    ),
+  )
+}
+
 /** Shaped as `{ streaming, api }` so the app's `discoverInstances()` parser is unchanged. */
-export async function getDiscovery(service: Service): Promise<{ streaming: string[]; api: string[] }> {
+export async function getDiscovery(service: Service): Promise<DiscoveryFeed> {
   await ensureSchema()
   const rows = await db
     .select({
@@ -485,26 +517,47 @@ export async function getDiscovery(service: Service): Promise<{ streaming: strin
       status: instanceEntries.status,
     })
     .from(instanceEntries)
-    .where(
-      and(
-        eq(instanceEntries.service, service),
-        eq(instanceEntries.removed, false),
-        eq(instanceEntries.disabled, false),
-        sql`${instanceEntries.status} in ('alive','preview')`,
-      ),
-    )
+    .where(and(instanceServableWhere, eq(instanceEntries.service, service)))
     .orderBy(desc(instanceEntries.premium), desc(instanceEntries.lastCheckedAt))
 
-  const urls = Array.from(
-    new Set(
-      rows
-        .map((r) => (r.payload as { baseUrl?: string })?.baseUrl?.trim())
-        .filter((u): u is string => !!u && u.length > 0),
-    ),
-  )
+  const urls = discoveryUrls(rows)
   // The app treats "streaming" as the preferred audio-serving list; we expose the same URLs
   // there so verified instances are tried first, and mirror them under "api".
   return { streaming: urls, api: urls }
+}
+
+/**
+ * Every service's discovery feed in ONE statement.
+ *
+ * The snapshot writer used to call [getDiscovery] once per service (five statements) on every
+ * health sweep and instance sync. Hyperdrive Free meters every statement against 100,000/day,
+ * so collapsing the read is worth doing even though it only runs a few times a day. The order
+ * inside each service is the same premium-then-freshest order the per-service read uses.
+ */
+export async function getAllDiscovery(): Promise<Record<Service, DiscoveryFeed>> {
+  await ensureSchema()
+  const rows = await db
+    .select({
+      service: instanceEntries.service,
+      payload: instanceEntries.payload,
+    })
+    .from(instanceEntries)
+    .where(instanceServableWhere)
+    .orderBy(desc(instanceEntries.premium), desc(instanceEntries.lastCheckedAt))
+
+  const grouped = new Map<string, { payload: unknown }[]>()
+  for (const row of rows) {
+    const list = grouped.get(row.service) ?? []
+    list.push(row)
+    grouped.set(row.service, list)
+  }
+
+  const feeds = {} as Record<Service, DiscoveryFeed>
+  for (const service of SERVICES) {
+    const urls = discoveryUrls(grouped.get(service) ?? [])
+    feeds[service] = { streaming: urls, api: urls }
+  }
+  return feeds
 }
 
 /*

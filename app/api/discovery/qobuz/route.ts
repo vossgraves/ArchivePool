@@ -1,51 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-import { NextResponse, type NextRequest } from "next/server"
-import { identifyReadKey } from "@/lib/api-keys"
-import { readInstanceSnapshot, snapshotCacheControl } from "@/lib/edge-snapshot"
-import { getDiscovery } from "@/lib/queries"
-import { clientIp, rateLimit } from "@/lib/rate-limit"
-import { DISCOVERY_TTL_MS, cached } from "@/lib/ttl-cache"
+import type { NextRequest } from "next/server"
+import { serveDiscovery } from "@/lib/discovery-feed"
 
 export const dynamic = "force-dynamic"
 
-// Shared posture with /api/instances/[service]: per-IP (so one client cannot starve the rest) and
-// far above what the app's one-fetch-per-15–24h rotation can hit. See lib/rate-limit.ts.
-const IP_LIMIT = 60
-const IP_WINDOW_MS = 60_000
-
-// App-compatible discovery feed for Qobuz instances ({ streaming, api } shape).
-// Requires a valid per-app key when READ_KEYS_ENFORCED=true; a key scoped to another service is
-// refused, and on any rejection we return an empty feed with 401 so the app degrades gracefully.
+/**
+ * App-compatible discovery feed for Qobuz instances (`{ streaming, api }` shape).
+ *
+ * Alias of `/api/instances/qobuz`, kept for app builds that predate the split. The shared
+ * implementation enforces the per-client rate limit, the scoped read key, the Cache API copy
+ * and the ETag in one place — see lib/discovery-feed.ts.
+ */
 export async function GET(req: NextRequest) {
-  const verdict = rateLimit(`feed-ip:${clientIp(req.headers)}`, IP_LIMIT, IP_WINDOW_MS)
-  if (!verdict.ok) {
-    return NextResponse.json(
-      { streaming: [], api: [] },
-      { status: 429, headers: { "retry-after": String(verdict.retryAfterSec) } },
-    )
-  }
-
-  const identity = await identifyReadKey(req)
-  if (!identity.ok || (identity.scope && identity.scope !== "qobuz")) {
-    return NextResponse.json({ streaming: [], api: [] }, { status: 401 })
-  }
-
-  try {
-    // Snapshot first (public URLs, zero database cost); see the instances route for the rationale.
-    const snapshot = await cached("snapshot:qobuz", DISCOVERY_TTL_MS, () =>
-      readInstanceSnapshot("qobuz"),
-    )
-    if (snapshot) {
-      return NextResponse.json(snapshot, {
-        headers: { "cache-control": snapshotCacheControl() },
-      })
-    }
-
-    const data = await cached("discovery:qobuz", DISCOVERY_TTL_MS, () => getDiscovery("qobuz"))
-    return NextResponse.json(data, {
-      headers: { "cache-control": "private, no-store" },
-    })
-  } catch {
-    return NextResponse.json({ streaming: [], api: [] })
-  }
+  return serveDiscovery("qobuz", req)
 }
