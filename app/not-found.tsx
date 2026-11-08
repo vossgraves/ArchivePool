@@ -1,40 +1,48 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import Link from "next/link"
+import { ArrowLeft, Home, Terminal } from "lucide-react"
 import { SiteHeader } from "@/components/site-header"
+import { buttonVariants } from "@/components/ui/button"
+import { cn } from "@/lib/utils"
 
 export const metadata = {
-  title: "Page not found",
+  title: "404 Not Found · ArchivePool",
+  description: "The requested endpoint or resource was not found.",
 }
 
 export default function NotFound() {
   return (
-    <div className="min-h-dvh">
+    <div className="min-h-dvh flex flex-col bg-background text-foreground">
       <SiteHeader />
 
-      <main id="content" className="mx-auto flex max-w-5xl flex-col gap-6 px-5 pb-16 pt-16 sm:pt-24">
-        <span className="font-mono text-xs uppercase tracking-[0.16em] text-muted-foreground">
-          Error 404
-        </span>
-        <h1 className="max-w-2xl text-pretty text-[2rem] font-semibold leading-[1.1] tracking-[-0.03em] sm:text-4xl">
-          That page doesn&apos;t exist
+      <main id="content" className="flex w-full flex-col items-center justify-center text-center gap-4 px-4 py-24 sm:py-32 flex-1">
+        <div className="inline-flex items-center gap-2 rounded-full border border-border bg-secondary/40 px-3 py-1 font-mono text-[11px] text-muted-foreground">
+          <span className="size-1.5 rounded-full bg-destructive" aria-hidden="true" />
+          <span>HTTP 404 // NOT_FOUND</span>
+        </div>
+
+        <h1 className="text-3xl font-bold tracking-tight text-foreground sm:text-4xl">
+          Resource Not Found
         </h1>
-        <p className="max-w-[56ch] text-pretty leading-relaxed text-muted-foreground">
-          The link may be out of date, or the page may have moved. The status board has everything
-          public about the pool.
+
+        <p className="max-w-md font-mono text-xs text-muted-foreground leading-relaxed">
+          The requested page, pool category, or feed endpoint could not be resolved.
         </p>
-        {/* Every dead end needs a way back, and the two routes below are the only public ones. */}
-        <div className="mt-2 flex flex-wrap gap-2.5">
+
+        <div className="mt-4 flex flex-wrap items-center justify-center gap-2.5">
           <Link
             href="/"
-            className="rounded-md bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground transition-all duration-200 hover:opacity-90 active:scale-[0.98]"
+            className={cn(buttonVariants({ variant: "default", size: "sm" }), "h-8 px-4 text-xs font-medium gap-1.5")}
           >
-            View status
+            <Home className="size-3.5" aria-hidden="true" />
+            <span>Return to Source Pool</span>
           </Link>
           <Link
-            href="/submit"
-            className="rounded-md border border-border bg-card px-4 py-2.5 text-sm font-medium transition-colors duration-200 hover:bg-secondary"
+            href="/docs"
+            className={cn(buttonVariants({ variant: "outline", size: "sm" }), "h-8 px-4 text-xs font-mono gap-1.5")}
           >
-            Contribute a source
+            <Terminal className="size-3.5 opacity-70" aria-hidden="true" />
+            <span>API Docs</span>
           </Link>
         </div>
       </main>

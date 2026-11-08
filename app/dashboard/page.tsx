@@ -9,6 +9,14 @@ import { getSessionUserId } from "@/lib/sessions"
 import { SiteHeader } from "@/components/site-header"
 import { PageHeader } from "@/components/page-header"
 import { Dashboard } from "@/components/dashboard"
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb"
 import { buttonVariants } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -36,7 +44,22 @@ export default async function DashboardPage() {
   return (
     <div className="min-h-dvh">
       <SiteHeader active="dashboard" />
-      <main id="content" className="mx-auto max-w-5xl px-4 pb-16 pt-8">
+      <main id="content" className="w-full px-3 pb-16 pt-6 sm:px-4 md:px-6 flex-1">
+        <Breadcrumb className="mb-4">
+          <BreadcrumbList>
+            <BreadcrumbItem>
+              <BreadcrumbLink href="/">ArchivePool</BreadcrumbLink>
+            </BreadcrumbItem>
+            <BreadcrumbSeparator />
+            <BreadcrumbItem>
+              <BreadcrumbLink href="/dashboard">Console</BreadcrumbLink>
+            </BreadcrumbItem>
+            <BreadcrumbSeparator />
+            <BreadcrumbItem>
+              <BreadcrumbPage>Dashboard</BreadcrumbPage>
+            </BreadcrumbItem>
+          </BreadcrumbList>
+        </Breadcrumb>
         <PageHeader
           eyebrow="Dashboard"
           title="Your pool"

@@ -6,16 +6,12 @@ import { useRouter } from "next/navigation"
 import { useState } from "react"
 import { motion, useReducedMotion } from "motion/react"
 import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Field } from "@/components/ui/field"
 import { Notice } from "@/components/ui/notice"
 
 /**
  * Shared auth form for /login and /signup.
- *
- * On success the header picks the session up on its next /api/auth/me fetch (or immediately via
- * router.refresh()). Failures come back from the route as `detail`/`error` and are rendered
- * against the form rather than as a generic "something went wrong", because the common causes
- * (taken username, weak password, wrong credentials) need different fixes.
  */
 export function AuthForm({ mode }: { mode: "login" | "signup" }) {
   const router = useRouter()
@@ -63,68 +59,74 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
           })}
       className="mx-auto w-full max-w-sm"
     >
-      <div className="rounded-lg border border-border bg-card p-5 edge-lit">
-        <h1 className="text-balance text-lg font-semibold tracking-tight">
-          {isSignup ? "Create your account" : "Welcome back"}
-        </h1>
-        <p className="mt-1 text-pretty text-sm leading-relaxed text-muted-foreground">
-          {isSignup
-            ? "An account lets you request and manage API keys for the source pool."
-            : "Sign in to manage your API keys."}
-        </p>
+      <Card className="border-border bg-card shadow-2xs">
+        <CardHeader className="p-5 pb-2">
+          <CardTitle className="text-balance text-lg font-semibold tracking-tight text-foreground">
+            {isSignup ? "Create your account" : "Welcome back"}
+          </CardTitle>
+          <CardDescription className="text-pretty text-xs leading-relaxed text-muted-foreground">
+            {isSignup
+              ? "An account lets you request and manage API keys for the streaming source pool."
+              : "Sign in to manage your active API keys and view pool leases."}
+          </CardDescription>
+        </CardHeader>
 
-        <form onSubmit={submit} className="mt-5 flex flex-col gap-4">
-          <Field
-            label="Username"
-            name="username"
-            value={username}
-            onValueChange={setUsername}
-            autoComplete="username"
-            required
-            hint={isSignup ? "3–24 characters: lowercase letters, digits and underscores." : undefined}
-            placeholder="record_collector"
-            minLength={3}
-            maxLength={24}
-          />
-          <Field
-            label="Password"
-            name="password"
-            type="password"
-            value={password}
-            onValueChange={setPassword}
-            autoComplete={isSignup ? "new-password" : "current-password"}
-            required
-            placeholder={isSignup ? "At least 8 characters" : "Your password"}
-            mono={false}
-            minLength={8}
-            maxLength={128}
-          />
+        <CardContent className="p-5 pt-3">
+          <form onSubmit={submit} className="flex flex-col gap-4">
+            <Field
+              label="Username"
+              name="username"
+              value={username}
+              onValueChange={setUsername}
+              autoComplete="username"
+              required
+              hint={isSignup ? "3–24 characters: lowercase letters, digits and underscores." : undefined}
+              placeholder="record_collector"
+              minLength={3}
+              maxLength={24}
+            />
+            <Field
+              label="Password"
+              name="password"
+              type="password"
+              value={password}
+              onValueChange={setPassword}
+              autoComplete={isSignup ? "new-password" : "current-password"}
+              required
+              placeholder={isSignup ? "At least 8 characters" : "Your password"}
+              mono={false}
+              minLength={8}
+              maxLength={128}
+            />
 
-          {error ? <Notice tone="error">{error}</Notice> : null}
+            {error ? <Notice tone="error">{error}</Notice> : null}
 
-          <Button type="submit" size="lg" disabled={busy}>
-            {busy ? "Working…" : isSignup ? "Create account" : "Sign in"}
-          </Button>
-        </form>
+            <Button type="submit" size="lg" disabled={busy} className="mt-1 font-mono text-xs">
+              {busy ? "Authenticating…" : isSignup ? "Create Account" : "Sign In"}
+            </Button>
+          </form>
+        </CardContent>
 
-        <p className="mt-5 text-center text-sm text-muted-foreground">
-          {isSignup ? (
-            <>
-              Already have an account?{" "}
-              <Link href="/login" className="font-medium text-foreground underline underline-offset-4">
-                Sign in
-              </Link>
-            </>
-          ) : (
-            <>
-              Need a key?{" "}
-              <Link href="/signup" className="font-medium text-foreground underline underline-offset-4">
-                Create an account
-              </Link>
-            </>
-          )}
-        </p>
-      </div>
+        <CardFooter className="justify-center border-t border-border/70 p-4 bg-secondary/10">
+          <p className="text-center text-xs text-muted-foreground">
+            {isSignup ? (
+              <>
+                Already have an account?{" "}
+                <Link href="/login" className="font-semibold text-foreground underline underline-offset-4">
+                  Sign in
+                </Link>
+              </>
+            ) : (
+              <>
+                Need a key?{" "}
+                <Link href="/signup" className="font-semibold text-foreground underline underline-offset-4">
+                  Create an account
+                </Link>
+              </>
+            )}
+          </p>
+        </CardFooter>
+      </Card>
     </motion.div>
   )
 }

@@ -13,9 +13,11 @@ import { cn } from "@/lib/utils"
  */
 export function Notice({
   tone,
+  className,
   children,
 }: {
   tone: "ok" | "error"
+  className?: string
   children: React.ReactNode
 }) {
   return (
@@ -27,6 +29,7 @@ export function Notice({
         tone === "ok"
           ? "border-ok/30 bg-ok/5 text-ok"
           : "border-destructive/30 bg-destructive/5 text-destructive",
+        className
       )}
     >
       {tone === "ok" ? (
