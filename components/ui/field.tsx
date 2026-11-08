@@ -158,3 +158,50 @@ export function CheckField({
     </label>
   )
 }
+
+export function FieldLabel({
+  className,
+  children,
+  ...props
+}: React.LabelHTMLAttributes<HTMLLabelElement>) {
+  return (
+    <label
+      className={cn("text-xs font-semibold text-foreground tracking-tight select-none", className)}
+      {...props}
+    >
+      {children}
+    </label>
+  )
+}
+
+export function FieldDescription({
+  className,
+  children,
+  ...props
+}: React.HTMLAttributes<HTMLParagraphElement>) {
+  return (
+    <p
+      className={cn("text-[11px] leading-relaxed text-muted-foreground", className)}
+      {...props}
+    >
+      {children}
+    </p>
+  )
+}
+
+export function FieldError({
+  className,
+  children,
+  ...props
+}: React.HTMLAttributes<HTMLParagraphElement>) {
+  if (!children) return null
+  return (
+    <p
+      className={cn("text-[11px] font-medium text-destructive", className)}
+      {...props}
+    >
+      {children}
+    </p>
+  )
+}
+

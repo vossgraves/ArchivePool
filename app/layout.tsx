@@ -4,6 +4,7 @@ import type { Metadata, Viewport } from "next"
 import { Geist, Geist_Mono } from "next/font/google"
 import type React from "react"
 import { ClickRipple } from "@/components/click-ripple"
+import { RailwayGridBg } from "@/components/railway-grid-bg"
 import { Toaster } from "@/components/ui/sonner"
 import "./globals.css"
 
@@ -12,17 +13,12 @@ const geistMono = Geist_Mono({ subsets: ["latin"], variable: "--font-geist-mono"
 
 export const metadata: Metadata = {
   title: {
-    default: "ArchiveTune Source Pool",
-    template: "%s · ArchiveTune Source Pool",
+    default: "ArchivePool · Source Pool",
+    template: "%s · ArchivePool",
   },
-  // Deezer is a live category in lib/sources.ts, so it belongs in the description too.
   description:
-    "Live health for the community-contributed Tidal, Qobuz and Deezer sources behind ArchiveTune. Every entry is checked on a schedule; only passing entries are served.",
-  applicationName: "ArchiveTune Source Pool",
-  // Without this, Next resolves the opengraph-image to http://localhost:3000 in production and
-  // the social preview silently breaks. Prefers an explicit site URL, then the deploy URL the
-  // host injects (VERCEL_URL on Vercel, RAILWAY_PUBLIC_DOMAIN on Railway, neither of which
-  // includes a scheme), and only falls back to localhost for local dev.
+    "Live health and credential pool for community-contributed streaming sources.",
+  applicationName: "ArchivePool",
   metadataBase: new URL(
     process.env.NEXT_PUBLIC_SITE_URL ??
       (process.env.VERCEL_PROJECT_PRODUCTION_URL
@@ -32,20 +28,18 @@ export const metadata: Metadata = {
           : "http://localhost:3000"),
   ),
   openGraph: {
-    title: "ArchiveTune Source Pool",
+    title: "ArchivePool · Source Pool",
     description:
-      "Live health for the community-contributed Tidal, Qobuz and Deezer sources behind ArchiveTune.",
+      "Live health and credential pool for community-contributed streaming sources.",
     type: "website",
-    siteName: "ArchiveTune Source Pool",
+    siteName: "ArchivePool",
   },
   twitter: {
     card: "summary_large_image",
-    title: "ArchiveTune Source Pool",
+    title: "ArchivePool · Source Pool",
     description:
-      "Live health for the community-contributed Tidal, Qobuz and Deezer sources behind ArchiveTune.",
+      "Live health and credential pool for community-contributed streaming sources.",
   },
-  // A status page has nothing to gain from search traffic and the submit form is not a landing
-  // page, so keep it out of indexes.
   robots: { index: false, follow: false },
 }
 
@@ -55,8 +49,6 @@ export const viewport: Viewport = {
   initialScale: 1,
   maximumScale: 5,
   viewportFit: "cover",
-  // Matches --background in each theme so mobile browser chrome blends into the page instead of
-  // banding. Re-sample if a token changes: these are build-time strings, not CSS reads.
   themeColor: [
     { media: "(prefers-color-scheme: dark)", color: "#030303" },
     { media: "(prefers-color-scheme: light)", color: "#f5f5f5" },
@@ -86,7 +78,10 @@ export default function RootLayout({
       <head>
         <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
       </head>
-      <body className="grain bg-background text-foreground font-sans antialiased">
+      <body className="grain bg-background text-foreground font-sans antialiased relative">
+        {/* Railway-inspired perspective wireframe grid background with glowing pulses and mouse spotlight */}
+        <RailwayGridBg />
+
         {/* Keyboard and screen-reader users can jump past the header straight to content. */}
         <a
           href="#content"
@@ -94,7 +89,9 @@ export default function RootLayout({
         >
           Skip to content
         </a>
-        {children}
+        <div className="relative z-10 flex min-h-dvh flex-col">
+          {children}
+        </div>
         {/* Pure-DOM pointer feedback: a ring at every click point. No state, no re-renders,
             and hidden entirely under prefers-reduced-motion (see globals.css). */}
         <ClickRipple />

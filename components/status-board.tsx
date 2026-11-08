@@ -1,18 +1,44 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import Link from "next/link"
 import useSWR from "swr"
 import { motion, useReducedMotion } from "motion/react"
+import {
+  Activity,
+  AlertTriangle,
+  ArrowUpRight,
+  Clock,
+  ExternalLink,
+  Layers,
+  LayoutGrid,
+  List,
+  RefreshCw,
+  Search,
+  ShieldCheck,
+  Terminal,
+  X,
+} from "lucide-react"
 import type { CategoryStatus, UptimePoint } from "@/lib/queries"
 import { Badge, StatusDot, TONE_TEXT, toneFor, type StatusTone } from "@/components/ui/badge"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { BarSeries, SegmentBar, Sparkline, TrendChart } from "@/components/ui/chart"
+import { CopyButton } from "@/components/ui/copy-button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Empty } from "@/components/ui/empty"
+import { Frame, FrameDescription, FrameFooter, FrameHeader, FramePanel, FrameTitle } from "@/components/ui/frame"
 import { Notice } from "@/components/ui/notice"
 import { Panel } from "@/components/ui/panel"
-import { Stat, useCountUp } from "@/components/ui/stat"
+import { Skeleton } from "@/components/ui/skeleton"
+import { Stat, StatIndicator, StatLabel, StatValue, useCountUp } from "@/components/ui/stat"
 import {
   Table,
   TableBody,
@@ -28,7 +54,6 @@ import { cn, formatAgo, formatCount, formatDateTime } from "@/lib/utils"
 interface StatusPayload {
   generatedAt: string
   categories: CategoryStatus[]
-  /** Added after the original payload, so an older cached response simply has no trend to draw. */
   history?: {
     days: number
     overall: UptimePoint[]
@@ -36,20 +61,11 @@ interface StatusPayload {
   }
 }
 
-/** The per-category figures the board draws, as returned by getStatus(). */
 type Stats = Pick<CategoryStatus, "total" | "alive" | "premium" | "dead" | "pending">
 
-/*
- * A non-2xx has to surface as an error. Parsing the body as JSON whatever the status made a failed
- * poll resolve to `undefined`, which the board then rendered as "there are no pools" instead of
- * "the feed is unreachable" — identical on screen, opposite in meaning.
- */
 async function fetcher(url: string): Promise<StatusPayload> {
   const res = await fetch(url)
   if (!res.ok) {
-    // The route reports *why* it failed — a suspended database, a rejected connection — so carry
-    // that through rather than a bare status code. "Not responding" and "the database is
-    // suspended" look identical on screen otherwise, and only one of them is actionable.
     const detail = await res
       .json()
       .then((body: { detail?: string }) => body?.detail)
@@ -61,17 +77,8 @@ async function fetcher(url: string): Promise<StatusPayload> {
   return (await res.json()) as StatusPayload
 }
 
-/*
- * Number of skeleton rows to show before the first payload arrives. Mirrors CATEGORIES.length in
- * lib/sources.ts — inlined rather than imported because that module pulls in node:crypto, which
- * has no business in a client bundle. If a category is added there, bump this. (It was left at 5
- * when Apple Music landed. The table renders one row per category, so a stale number here is a
- * visible jump on first paint rather than a cosmetic detail.)
- */
 const SKELETON_COUNT = 6
 
-/** Only the wording lives here. Colour comes from the shared tone map, which now answers for the
- *  health words too, so the board and the admin chips cannot disagree about what green means. */
 const HEALTH: Record<CategoryStatus["health"], { label: string; tone: StatusTone }> = {
   operational: { label: "Operational", tone: toneFor("operational") },
   degraded: { label: "Degraded", tone: toneFor("degraded") },
@@ -79,42 +86,35 @@ const HEALTH: Record<CategoryStatus["health"], { label: string; tone: StatusTone
   unknown: { label: "No data", tone: toneFor("unknown") },
 }
 
-/** The skeleton and zero-entry rows span COLUMN_COUNT, so adding one here cannot break them. */
 const COLUMNS: { label: string; head: string }[] = [
   { label: "Category", head: "text-left" },
   { label: "Health", head: "text-left" },
   { label: "Total", head: "text-right" },
-  // "Alive" already means servable: getStatus() counts alive OR preview and drops disabled.
   { label: "Alive", head: "text-right" },
   { label: "Premium", head: "text-right" },
   { label: "Pending", head: "text-right" },
   { label: "Dead", head: "text-right" },
   { label: "Uptime", head: "text-right" },
-  // Lifetime uptime cannot show a recovery or a slide; the sparkline beside it is the same figure
-  // per day for the window health_log keeps.
   { label: "14d", head: "text-left" },
   { label: "Mix", head: "text-left" },
   { label: "Checked", head: "text-left" },
 ]
 const COLUMN_COUNT = COLUMNS.length
 
-const NUM_CELL = "px-3 py-3 text-right font-mono whitespace-nowrap"
-const TXT_CELL = "px-3 py-3 whitespace-nowrap"
-// Softer than the primitive's default divider: ten columns of figures already carry enough
-// structure, and a full-strength rule between every row turns the board into a grid.
-const ROW = "border-border/60 last:border-0"
+const NUM_CELL = "px-3 py-2.5 text-right font-mono text-xs tabular-nums whitespace-nowrap"
+const TXT_CELL = "px-3 py-2.5 whitespace-nowrap text-xs"
+const ROW = "border-b border-border/60 transition-colors hover:bg-secondary/40 cursor-pointer"
 
 function overallHealth(cats: CategoryStatus[]) {
   const known = cats.filter((c) => c.health !== "unknown")
-  if (known.length === 0) return { label: "Awaiting first submissions", health: "unknown" as const }
+  if (known.length === 0) return { label: "Awaiting first data", health: "unknown" as const }
   if (known.every((c) => c.health === "operational"))
     return { label: "All systems operational", health: "operational" as const }
   if (known.some((c) => c.health === "down"))
-    return { label: "Partial outage", health: "down" as const }
+    return { label: "Partial outage detected", health: "down" as const }
   return { label: "Degraded performance", health: "degraded" as const }
 }
 
-/** Uptime is deliberately not averaged — the payload carries no denominators to weight it by. */
 function sumStats(cats: CategoryStatus[]): Stats {
   return cats.reduce<Stats>(
     (a, c) => ({
@@ -124,11 +124,10 @@ function sumStats(cats: CategoryStatus[]): Stats {
       dead: a.dead + c.dead,
       pending: a.pending + c.pending,
     }),
-    { total: 0, alive: 0, premium: 0, dead: 0, pending: 0 },
+    { total: 0, alive: 0, premium: 0, dead: 0, pending: 0 }
   )
 }
 
-/** A pass rate is only good news above ~95%: the sweep runs every 6 hours, so 90% is a daily failure. */
 function rateTone(pct: number | null): StatusTone {
   if (pct === null) return "neutral"
   return pct >= 95 ? "ok" : pct >= 80 ? "warn" : "danger"
@@ -138,7 +137,6 @@ function asPoints(points: UptimePoint[] | undefined) {
   return (points ?? []).map((p) => ({ label: p.label, value: p.pct, partial: p.partial }))
 }
 
-/** Segments for the shared meter: one category's composition, premium first. */
 function mixSegments(stats: Stats) {
   return [
     { value: stats.premium, tone: "ok" as const },
@@ -148,22 +146,11 @@ function mixSegments(stats: Stats) {
   ]
 }
 
-/**
- * Public status board. Tabular data, so a real <table>.
- *
- * `fallback` pre-seeds a server-side payload. Row times render relative ("4m ago"), so a seeded
- * payload can differ between the server and client pass by one bucket.
- */
 export function StatusBoard({ fallback }: { fallback?: StatusPayload }) {
   const reduce = useReducedMotion()
   const animate = !reduce
   const { data, error, isLoading, mutate } = useSWR("/api/status", fetcher, {
     fallbackData: fallback,
-    // Five hours, not a minute. The figures only change when the health sweep runs (every 6 hours
-    // from the cron workflow), so a 60s poll was 1,440 requests a day for a board that changes
-    // four times — and every one of those requests touches the database, which is what spends the
-    // free tier's compute budget. The manual refresh button and the focus revalidation still give
-    // an impatient reader a fresh read on demand.
     refreshInterval: 5 * 60 * 60 * 1000,
     revalidateOnFocus: true,
   })
@@ -181,16 +168,17 @@ export function StatusBoard({ fallback }: { fallback?: StatusPayload }) {
   const sparkFor = (service: string, kind: string) =>
     history?.categories.find((c) => c.service === service && c.kind === kind)?.points
 
-  /*
-   * Spoken status of the board. `aria-live` belongs on the updated line and nowhere else, and that
-   * region is only ever filled by a refresh the person asked for: SWR revalidates every 60s, and a
-   * live region whose text changes on every tick reads the header aloud once a minute forever. The
-   * region therefore stays mounted and empty between refreshes (a region that appears already
-   * populated is often ignored), and the quiet ticking "Nm ago" string is rendered beside it, not
-   * inside it.
-   */
   const [announcement, setAnnouncement] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
+  const [serviceFilter, setServiceFilter] = useState<string>("all")
+  const [searchQuery, setSearchQuery] = useState<string>("")
+  const [mobileLayout, setMobileLayout] = useState<"table" | "cards">("table")
+  const [selectedPool, setSelectedPool] = useState<CategoryStatus | null>(null)
+  // The diagnostics dialog only opens after a client-side click, so derive the host from the
+  // current tab rather than hardcoding one that is wrong for preview and self-hosted deploys.
+  const leaseUrl = selectedPool
+    ? `${typeof window !== "undefined" ? window.location.origin : ""}/api/sources?service=${selectedPool.service}&kind=${selectedPool.kind}`
+    : ""
 
   async function refresh() {
     if (refreshing) return
@@ -200,155 +188,243 @@ export function StatusBoard({ fallback }: { fallback?: StatusPayload }) {
       await mutate()
       setAnnouncement("Refreshed")
     } catch {
-      // The Notice underneath says the same thing in print; this is the spoken half of it. Not a
-      // second Notice — a failed manual refresh must not stack two messages.
       setAnnouncement("Refresh failed — showing the last good figures")
     } finally {
       setRefreshing(false)
     }
   }
 
-  // The message replaces the "Updated …" text, so it has to leave on its own or the line freezes on
-  // "Refreshed" while the board quietly carries on polling.
   useEffect(() => {
     if (!announcement) return
     const t = setTimeout(() => setAnnouncement(null), 6000)
     return () => clearTimeout(t)
   }, [announcement])
 
-  // No payload has ever arrived. The table renders its header either way, and the figures render as
-  // gaps rather than zeroes: "0" is a number a reader can believe.
   const skeleton = isLoading && !data
 
+  // Filtered categories for table display
+  const filteredCategories = useMemo(() => {
+    return categories.filter((c) => {
+      const matchesService =
+        serviceFilter === "all" || c.service.toLowerCase() === serviceFilter.toLowerCase()
+      const query = searchQuery.trim().toLowerCase()
+      const matchesSearch =
+        !query ||
+        c.label.toLowerCase().includes(query) ||
+        c.service.toLowerCase().includes(query) ||
+        c.kind.toLowerCase().includes(query)
+      return matchesService && matchesSearch
+    })
+  }, [categories, serviceFilter, searchQuery])
+
+  // Services available for filter tabs
+  const availableServices = useMemo(() => {
+    const set = new Set<string>()
+    categories.forEach((c) => set.add(c.service))
+    return Array.from(set)
+  }, [categories])
+
   return (
-    <div className="flex flex-col gap-5">
-      <Panel
-        label="Overall health"
-        actions={
-          <>
-            <p className="font-mono text-xs text-muted-foreground">
-              <span role="status" aria-live="polite">
-                {announcement}
+    <div className="flex flex-col gap-6">
+      {/* SECTION 1: LIVE TELEMETRY & HEALTH */}
+      <Frame className="border-border bg-card shadow-2xs">
+        <FrameHeader dots={true} className="[&>div]:flex-wrap [&>div]:gap-y-2 border-b border-border/80 bg-secondary/30 px-4 py-3 sm:px-5">
+          <div className="flex min-w-0 basis-full items-center gap-2.5 sm:basis-auto sm:flex-1">
+            <StatusDot
+              tone={HEALTH[overall.health].tone}
+              pulse={animate && overall.health === "operational"}
+              className="size-2.5 shrink-0"
+            />
+            <div className="flex min-w-0 flex-wrap items-baseline gap-x-2.5 gap-y-0.5">
+              <span className="text-sm font-semibold tracking-tight text-foreground">
+                {overall.label}
               </span>
-              {announcement
-                ? null
-                : data?.generatedAt
-                  ? `Updated ${formatAgo(data.generatedAt)}`
-                  : "Awaiting first data"}
-            </p>
+              <span className="font-mono text-xs text-muted-foreground">
+                {data
+                  ? `${categories.length} ${categories.length === 1 ? "pool" : "pools"} monitored · ${
+                      trouble.length === 0
+                        ? "zero active incidents"
+                        : `${trouble.length} reporting incident`
+                    }`
+                  : "Connecting to status feed…"}
+              </span>
+            </div>
+          </div>
+
+          <div className="ml-auto flex shrink-0 items-center gap-2.5 sm:ml-0">
+            <span
+              className="inline-flex items-center gap-1.5 font-mono text-xs text-muted-foreground"
+              title={data?.generatedAt ? formatDateTime(data.generatedAt) : undefined}
+            >
+              <Clock className="size-3 opacity-70" aria-hidden="true" />
+              <span role="status" aria-live="polite">
+                {announcement ? (
+                  announcement
+                ) : data?.generatedAt ? (
+                  `Checked ${formatAgo(data.generatedAt)}`
+                ) : (
+                  "Awaiting first data"
+                )}
+              </span>
+            </span>
+
             <Button
               variant="outline"
               size="sm"
               onClick={() => void refresh()}
               disabled={refreshing}
+              className="h-7 gap-1.5 px-2.5 text-xs font-mono"
             >
-              {refreshing ? "Refreshing…" : "Refresh"}
+              <RefreshCw
+                className={cn("size-3", refreshing && "animate-spin text-foreground")}
+                aria-hidden="true"
+              />
+              <span>{refreshing ? "Refreshing…" : "Refresh"}</span>
             </Button>
-          </>
-        }
-        bodyClassName="flex flex-col gap-3"
-      >
-        <motion.div
-          {...(animate
-            ? {
-                initial: { opacity: 0, y: 8 },
-                animate: { opacity: 1, y: 0 },
-                transition: { duration: 0.35, ease: "easeOut" as const },
-              }
-            : {})}
-          className="flex flex-wrap items-center justify-between gap-x-8 gap-y-4 rounded-md border border-border bg-background/40 px-4 py-3.5"
-        >
-          <div className="flex min-w-0 items-center gap-3">
-            <StatusDot
-              tone={HEALTH[overall.health].tone}
-              pulse={animate && overall.health === "operational"}
-              className="size-3"
-            />
-            <div className="min-w-0">
-              <h3 className="truncate text-sm font-medium">{overall.label}</h3>
-              <p className="mt-1 truncate text-xs text-muted-foreground">
-                {data
-                  ? `${formatCount(categories.length)} ${
-                      categories.length === 1 ? "pool" : "pools"
-                    } · ${
-                      trouble.length === 0
-                        ? "none reporting a problem"
-                        : `${formatCount(trouble.length)} reporting a problem`
-                    }`
-                  : "No figures yet — the feed has not answered this visit."}
-              </p>
+          </div>
+        </FrameHeader>
+
+        {/* 5-Column Metrics Grid */}
+        <div className="grid grid-cols-2 divide-x divide-y divide-border/60 sm:grid-cols-3 sm:divide-y-0 lg:grid-cols-5 bg-card">
+          {/* Stat 1: Total */}
+          <div className="flex flex-col justify-between p-4 sm:p-4.5">
+            <StatLabel>Total Sources</StatLabel>
+            <div className="mt-2 flex items-baseline gap-2">
+              {skeleton ? (
+                <Skeleton className="h-7 w-16" />
+              ) : (
+                <StatValue>{data ? formatCount(totals.total) : "—"}</StatValue>
+              )}
+            </div>
+            <StatIndicator tone="neutral" className="mt-1 text-muted-foreground">
+              Across all categories
+            </StatIndicator>
+          </div>
+
+          {/* Stat 2: Alive */}
+          <div className="flex flex-col justify-between p-4 sm:p-4.5">
+            <StatLabel>Alive & Serving</StatLabel>
+            <div className="mt-2 flex items-baseline gap-2">
+              {skeleton ? (
+                <Skeleton className="h-7 w-16" />
+              ) : (
+                <>
+                  <StatValue tone="ok">{data ? formatCount(aliveCount) : "—"}</StatValue>
+                  {data && totals.total > 0 && (
+                    <span className="font-mono text-xs text-muted-foreground tabular-nums">
+                      ({Math.round((totals.alive / totals.total) * 100)}%)
+                    </span>
+                  )}
+                </>
+              )}
+            </div>
+            <StatIndicator tone="ok" className="mt-1">
+              Passing health checks
+            </StatIndicator>
+          </div>
+
+          {/* Stat 3: Premium */}
+          <div className="flex flex-col justify-between p-4 sm:p-4.5">
+            <StatLabel>Premium Tier</StatLabel>
+            <div className="mt-2 flex items-baseline gap-2">
+              {skeleton ? (
+                <Skeleton className="h-7 w-14" />
+              ) : (
+                <StatValue className={totals.premium > 0 ? "text-foreground" : "text-muted-foreground"}>
+                  {data ? formatCount(premiumCount) : "—"}
+                </StatValue>
+              )}
+            </div>
+            <StatIndicator tone="neutral" className="mt-1 text-muted-foreground">
+              Hi-Res & lossless tier
+            </StatIndicator>
+          </div>
+
+          {/* Stat 4: Dead */}
+          <div className="flex flex-col justify-between p-4 sm:p-4.5">
+            <StatLabel>Unreachable</StatLabel>
+            <div className="mt-2 flex items-baseline gap-2">
+              {skeleton ? (
+                <Skeleton className="h-7 w-12" />
+              ) : (
+                <StatValue tone={totals.dead > 0 ? "danger" : "neutral"} className={totals.dead > 0 ? "text-destructive" : "text-muted-foreground"}>
+                  {data ? formatCount(totals.dead) : "—"}
+                </StatValue>
+              )}
+            </div>
+            <StatIndicator tone={totals.dead > 0 ? "danger" : "neutral"} className="mt-1">
+              {totals.dead > 0 ? "Quarantined by sweep" : "0 failing"}
+            </StatIndicator>
+          </div>
+
+          {/* Stat 5: Uptime */}
+          <div className="col-span-2 flex flex-col justify-between p-4 sm:col-span-1 sm:p-4.5">
+            <StatLabel>14d Pass Rate</StatLabel>
+            <div className="mt-2 flex items-baseline gap-2">
+              {skeleton ? (
+                <Skeleton className="h-7 w-16" />
+              ) : (
+                <StatValue tone={rateTone(windowPct)}>
+                  {windowPct === null ? "—" : `${windowPct}%`}
+                </StatValue>
+              )}
+            </div>
+            <StatIndicator tone="neutral" className="mt-1 text-muted-foreground">
+              {windowChecks > 0 ? `${formatCount(windowChecks)} sweep checks` : "Lifetime aggregate"}
+            </StatIndicator>
+          </div>
+        </div>
+
+        {/* Incident Alert if any pool degraded */}
+        {data && trouble.length > 0 ? (
+          <div className="border-t border-destructive/20 bg-destructive/5 px-4 py-3 sm:px-5">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden="true" />
+              <div className="flex-1">
+                <p className="text-xs font-semibold text-destructive">
+                  Degraded source categories detected
+                </p>
+                <ul className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 font-mono text-[11px] text-muted-foreground">
+                  {trouble.map((c) => (
+                    <li key={`${c.service}-${c.kind}`} className="flex items-center gap-1.5">
+                      <span className="text-foreground">{c.label}:</span>
+                      <span className={TONE_TEXT[HEALTH[c.health].tone]}>
+                        {formatCount(c.alive)} of {formatCount(c.total)} alive
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
             </div>
           </div>
-          <div className="flex flex-wrap items-end gap-x-7 gap-y-3">
-            {data ? (
-              <>
-                <Stat label="Entries" value={formatCount(totals.total)} />
-                <Stat label="Alive" value={formatCount(aliveCount)} />
-                <Stat
-                  label="Premium"
-                  value={formatCount(premiumCount)}
-                  tone={totals.premium > 0 ? toneFor("alive") : undefined}
-                />
-                <Stat
-                  label="Unreachable"
-                  value={formatCount(totals.dead)}
-                  tone={totals.dead > 0 ? toneFor("dead") : undefined}
-                />
-              </>
-            ) : (
-              <div className="flex gap-7" aria-hidden="true">
-                {Array.from({ length: 4 }).map((_, i) => (
-                  <div key={i} className="flex flex-col gap-1.5">
-                    <div className="h-5 w-11 animate-pulse rounded-md bg-secondary/60" />
-                    <div className="h-2.5 w-16 animate-pulse rounded-md bg-secondary/60" />
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </motion.div>
-
-        {/* Stale-while-revalidate: one failed poll must never blank a board that still has good
-            figures on screen, so the failure is reported above the data instead of replacing it. */}
-        {error ? (
-          <Notice tone="error">
-            {data
-              ? `The board could not be refreshed. These are the last good figures, from ${formatDateTime(
-                  data.generatedAt,
-                )}.`
-              : "The board could not be loaded."}{" "}
-            <span className="font-mono text-xs opacity-80">
-              {error instanceof Error ? error.message : "status feed unavailable"}
-            </span>{" "}
-            It retries every five hours, or hit Refresh now.
-          </Notice>
         ) : null}
+      </Frame>
 
-        {data && trouble.length > 0 ? (
-          <ul className="flex flex-col gap-1.5 border-t border-border pt-3">
-            {trouble.map((c) => (
-              <li key={`${c.service}-${c.kind}`} className="flex items-center gap-2 text-xs">
-                <Badge tone={HEALTH[c.health].tone}>{HEALTH[c.health].label}</Badge>
-                <span className="min-w-0 truncate text-muted-foreground">
-                  {c.label} — {formatCount(c.alive)} of {formatCount(c.total)}{" "}
-                  {c.alive === 1 ? "entry" : "entries"} serving
-                </span>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-      </Panel>
+      {/* Error Notice */}
+      {error ? (
+        <Notice tone="error">
+          {data
+            ? `Could not refresh status feed. Displaying cached snapshot from ${formatDateTime(data.generatedAt)}.`
+            : "The status feed could not be loaded."}{" "}
+          <span className="font-mono text-xs opacity-80">
+            {error instanceof Error ? error.message : "feed unavailable"}
+          </span>
+        </Notice>
+      ) : null}
 
+      {/* SECTION 2: UPTIME TREND & CHECKS ANALYTICS */}
       {history && windowChecks > 0 ? (
         <Panel
-          label={`Uptime · last ${history.days} days`}
-          description="Scheduled checks only. A day with no bar was a day the sweep did not run, which is not the same as a day everything failed."
-          bodyClassName="grid gap-5 md:grid-cols-2"
+          label={`Uptime & Verification · Last ${history.days} days`}
+          description="Automated sweep health results. A day without bars indicates sweep pause or maintenance window."
+          bodyClassName="grid gap-6 md:grid-cols-2"
         >
           <div className="flex flex-col gap-2">
             <div className="flex items-baseline justify-between gap-3">
-              <h3 className="label-mono">Pass rate</h3>
-              <span className="font-mono text-sm">
+              <h3 className="font-mono text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                Daily Pass Rate
+              </h3>
+              <span className="font-mono text-sm font-semibold tabular-nums text-foreground">
                 {windowPct === null ? "—" : `${formatCount(windowPct)}%`}
               </span>
             </div>
@@ -360,18 +436,21 @@ export function StatusBoard({ fallback }: { fallback?: StatusPayload }) {
               points={asPoints(history.overall)}
             />
           </div>
+
           <div className="flex flex-col gap-2">
             <div className="flex items-baseline justify-between gap-3">
-              <h3 className="label-mono">Checks per day</h3>
-              <span className="font-mono text-sm">{formatCount(windowChecks)}</span>
+              <h3 className="font-mono text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                Verification Sweeps
+              </h3>
+              <span className="font-mono text-sm font-semibold tabular-nums text-foreground">
+                {formatCount(windowChecks)} total
+              </span>
             </div>
             <BarSeries
               format={(n) => formatCount(n)}
               columns={history.overall.map((p) => ({
                 label: p.label,
                 partial: p.partial,
-                // Failures on top: a stack reads from the baseline up, so the anomaly has to cap
-                // the column or a bad day looks like a short one.
                 segments: [
                   { label: "failed", value: p.checks - p.ok, tone: "danger" as const },
                   { label: "passed", value: p.ok, tone: "ok" as const },
@@ -382,208 +461,534 @@ export function StatusBoard({ fallback }: { fallback?: StatusPayload }) {
         </Panel>
       ) : null}
 
-      <Panel
-        label="Pools"
-        description="One row per category the public feed exposes. Total is everything the pool holds; Alive is only what it may hand to an app. Aggregate health is all that is public — entries never are."
-        bodyClassName="p-0"
-      >
-        {/*
-         * One table for every state, including the two with no rows in them yet: the header stays on
-         * screen while the rows are placeholders, so nothing reflows when a payload lands, and an
-         * empty board still shows which figures are missing.
-         */}
-        {/* The primitive's row hover is kept: at ten columns and a 56rem minimum the reader is
-            tracking a figure back to its category across a horizontal scroll, and a highlight
-            that follows the pointer is what makes that possible. It is --muted, so it stays
-            achromatic and cannot be mistaken for a status. */}
-        <Table className="min-w-[62rem] text-left text-xs">
-          <TableCaption className="sr-only">
-            Pool status by category: entry counts, uptime and the time of the last health check
-          </TableCaption>
-          <TableHeader>
-            <TableRow className="hover:bg-transparent">
-              {COLUMNS.map((col) => (
-                <TableHead
-                  key={col.label}
-                  scope="col"
-                  // label-mono owns the colour; TableHead's own text-foreground has to be
-                  // displaced or every column heading outshouts the figures beneath it.
+      {/* SECTION 3: POOLS HEALTH & ROBUSTNESS TABLE */}
+      <section className="overflow-hidden rounded-lg border border-border bg-card shadow-2xs">
+        {/* Table Toolbar */}
+        <div className="flex flex-col gap-3 border-b border-border/80 p-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="font-mono text-xs font-semibold tracking-wider uppercase text-muted-foreground">
+                Pool Categories
+              </h2>
+              <Badge tone="neutral" className="text-[10px]">
+                {data ? `${filteredCategories.length} of ${categories.length}` : "6 pools"}
+              </Badge>
+            </div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Total is everything pooled; Alive is served by API. Click any category to inspect telemetry.
+            </p>
+          </div>
+
+          {/* Filter tabs and search */}
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Category filter tabs */}
+            <div className="flex items-center rounded-md border border-border/80 bg-secondary/40 p-0.5">
+              <button
+                type="button"
+                onClick={() => setServiceFilter("all")}
+                className={cn(
+                  "rounded-sm px-2.5 py-1 font-mono text-[11px] font-medium transition-colors",
+                  serviceFilter === "all"
+                    ? "bg-background text-foreground shadow-2xs"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                All
+              </button>
+              {availableServices.map((svc) => (
+                <button
+                  key={svc}
+                  type="button"
+                  onClick={() => setServiceFilter(svc)}
                   className={cn(
-                    "label-mono h-auto px-3 py-2.5 font-medium text-muted-foreground",
-                    col.head,
+                    "rounded-sm px-2.5 py-1 font-mono text-[11px] font-medium capitalize transition-colors",
+                    serviceFilter === svc
+                      ? "bg-background text-foreground shadow-2xs"
+                      : "text-muted-foreground hover:text-foreground"
                   )}
                 >
-                  {col.label}
-                </TableHead>
+                  {svc}
+                </button>
               ))}
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {skeleton ? (
-              // Rows sized to match a real row, at the real count, so the panel does not grow.
-              Array.from({ length: SKELETON_COUNT }).map((_, i) => (
-                <TableRow key={i} className={cn(ROW, "hover:bg-transparent")}>
-                  <TableCell colSpan={COLUMN_COUNT} className="px-4 py-3">
-                    <div className="h-8 animate-pulse rounded-md bg-secondary/60" />
+            </div>
+
+            {/* Quick search input */}
+            <div className="relative">
+              <Search
+                className="pointer-events-none absolute left-2.5 top-1/2 size-3 -translate-y-1/2 text-muted-foreground"
+                aria-hidden="true"
+              />
+              <input
+                type="text"
+                placeholder="Filter pools…"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="h-7 w-32 rounded-md border border-border/80 bg-background/50 pl-7 pr-6 font-mono text-[11px] text-foreground transition-colors placeholder:text-muted-foreground focus:border-ring focus:outline-none sm:w-40"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery("")}
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground p-0.5 cursor-pointer"
+                  aria-label="Clear filter"
+                >
+                  <X className="size-3" />
+                </button>
+              )}
+            </div>
+
+            {/* Mobile View Toggle */}
+            <div className="flex sm:hidden items-center rounded-md border border-border/80 bg-secondary/40 p-0.5">
+              <button
+                type="button"
+                onClick={() => setMobileLayout("table")}
+                aria-label="Table view"
+                className={cn(
+                  "rounded-sm p-1 transition-colors",
+                  mobileLayout === "table" ? "bg-background text-foreground shadow-2xs" : "text-muted-foreground"
+                )}
+              >
+                <List className="size-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setMobileLayout("cards")}
+                aria-label="Cards view"
+                className={cn(
+                  "rounded-sm p-1 transition-colors",
+                  mobileLayout === "cards" ? "bg-background text-foreground shadow-2xs" : "text-muted-foreground"
+                )}
+              >
+                <LayoutGrid className="size-3.5" />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Mobile Cards View */}
+        {mobileLayout === "cards" && (
+          skeleton ? (
+            <div className="flex flex-col divide-y divide-border/60 sm:hidden">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div key={i} className="flex flex-col gap-3 p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex flex-col gap-1.5">
+                      <Skeleton className="h-4 w-32" />
+                      <Skeleton className="h-2.5 w-20" />
+                    </div>
+                    <Skeleton variant="pill" className="h-5 w-20" />
+                  </div>
+                  <div className="grid grid-cols-4 gap-2 border-y border-border/40 py-2.5">
+                    {Array.from({ length: 4 }).map((_, j) => (
+                      <div key={j} className="flex flex-col items-center gap-1.5">
+                        <Skeleton className="h-2.5 w-8" />
+                        <Skeleton className="h-3.5 w-10" />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="flex flex-col divide-y divide-border/60 sm:hidden">
+              {filteredCategories.length === 0 ? (
+                <div className="p-6">
+                  <Empty title="No matching pools">
+                    No pools matched the selected filter or search term.
+                  </Empty>
+                </div>
+              ) : (
+                filteredCategories.map((cat) => {
+                  const health = HEALTH[cat.health]
+                  return (
+                    <div
+                      key={`${cat.service}-${cat.kind}`}
+                      onClick={() => setSelectedPool(cat)}
+                      className="flex flex-col gap-3 p-4 hover:bg-secondary/20 transition-colors cursor-pointer"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <h4 className="text-sm font-semibold text-foreground">{cat.label}</h4>
+                          <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                            {cat.service} · {cat.kind}
+                          </span>
+                        </div>
+                        <Badge tone={health.tone} dot>
+                          {health.label}
+                        </Badge>
+                      </div>
+
+                      <div className="grid grid-cols-4 gap-2 border-y border-border/40 py-2.5 text-center">
+                        <div>
+                          <span className="block font-mono text-[10px] text-muted-foreground">TOTAL</span>
+                          <span className="font-mono text-xs font-semibold tabular-nums text-foreground">
+                            {formatCount(cat.total)}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="block font-mono text-[10px] text-muted-foreground">ALIVE</span>
+                          <span className="font-mono text-xs font-semibold tabular-nums text-ok">
+                            {formatCount(cat.alive)}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="block font-mono text-[10px] text-muted-foreground">PREM</span>
+                          <span className="font-mono text-xs font-semibold tabular-nums text-foreground">
+                            {formatCount(cat.premium)}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="block font-mono text-[10px] text-muted-foreground">UPTIME</span>
+                          <span className="font-mono text-xs font-semibold tabular-nums text-foreground">
+                            {cat.uptimePct === null ? "—" : `${formatCount(cat.uptimePct)}%`}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-[10px]">Mix:</span>
+                          <SegmentBar segments={mixSegments(cat)} className="w-24" />
+                        </div>
+                        <span className="font-mono text-[10px]">
+                          {formatAgo(cat.lastCheckedAt)}
+                        </span>
+                      </div>
+                    </div>
+                  )
+                })
+              )}
+            </div>
+          )
+        )}
+
+        {/* Standard High-Density Data Table */}
+        <div className={cn("relative w-full overflow-x-auto", mobileLayout === "cards" && "hidden sm:block")}>
+          <Table className="min-w-[62rem] text-left text-xs">
+            <TableCaption className="sr-only">
+              Pool status by category: entry counts, uptime and the time of the last health check
+            </TableCaption>
+            <TableHeader>
+              <TableRow className="border-b border-border/80 bg-secondary/30 hover:bg-secondary/30">
+                {COLUMNS.map((col) => (
+                  <TableHead
+                    key={col.label}
+                    scope="col"
+                    className={cn(
+                      "h-8 px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-muted-foreground",
+                      col.head
+                    )}
+                  >
+                    {col.label}
+                  </TableHead>
+                ))}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {skeleton ? (
+                Array.from({ length: SKELETON_COUNT }).map((_, i) => (
+                  <TableRow key={i} className="border-b border-border/60 hover:bg-transparent">
+                    <TableCell className="px-3 py-2.5">
+                      <div className="flex flex-col gap-1.5">
+                        <Skeleton className="h-3.5 w-28 sm:w-32" />
+                        <Skeleton className="h-2.5 w-16" />
+                      </div>
+                    </TableCell>
+                    <TableCell className={TXT_CELL}>
+                      <Skeleton variant="pill" className="h-5 w-20" />
+                    </TableCell>
+                    <TableCell className={NUM_CELL}>
+                      <Skeleton className="ml-auto h-4 w-8" />
+                    </TableCell>
+                    <TableCell className={NUM_CELL}>
+                      <Skeleton className="ml-auto h-4 w-8" />
+                    </TableCell>
+                    <TableCell className={NUM_CELL}>
+                      <Skeleton className="ml-auto h-4 w-8" />
+                    </TableCell>
+                    <TableCell className={NUM_CELL}>
+                      <Skeleton className="ml-auto h-4 w-8" />
+                    </TableCell>
+                    <TableCell className={NUM_CELL}>
+                      <Skeleton className="ml-auto h-4 w-8" />
+                    </TableCell>
+                    <TableCell className={NUM_CELL}>
+                      <Skeleton className="ml-auto h-4 w-12" />
+                    </TableCell>
+                    <TableCell className="px-3 py-2.5">
+                      <Skeleton className="h-4 w-16" />
+                    </TableCell>
+                    <TableCell className="px-3 py-2.5">
+                      <Skeleton className="h-2 w-20" />
+                    </TableCell>
+                    <TableCell className={TXT_CELL}>
+                      <Skeleton className="h-3.5 w-16" />
+                    </TableCell>
+                  </TableRow>
+                ))
+              ) : filteredCategories.length === 0 ? (
+                <TableRow className="border-0 hover:bg-transparent">
+                  <TableCell colSpan={COLUMN_COUNT} className="p-8">
+                    <Empty
+                      title={data ? "No matching pools" : "Awaiting first data"}
+                      action={
+                        <Button variant="outline" size="sm" onClick={() => void refresh()}>
+                          Refresh status
+                        </Button>
+                      }
+                    >
+                      {data
+                        ? "No pools matched your current search and filter settings."
+                        : "No figures yet — the feed has not answered this visit."}
+                    </Empty>
                   </TableCell>
                 </TableRow>
-              ))
-            ) : categories.length === 0 ? (
-              <TableRow className="border-0 hover:bg-transparent">
-                <TableCell colSpan={COLUMN_COUNT} className="px-4 py-3">
-                  <Empty>
-                    {error
-                      ? "Nothing to show yet — the status feed has never answered."
-                      : "No pools are being tracked yet."}
-                  </Empty>
-                </TableCell>
-              </TableRow>
-            ) : (
-              categories.map((cat) => {
-                const health = HEALTH[cat.health]
-                return (
-                  <TableRow key={`${cat.service}-${cat.kind}`} className={cn(ROW, "align-middle")}>
-                    <TableHead
-                      scope="row"
-                      className="h-auto px-4 py-3 text-left font-medium text-foreground"
+              ) : (
+                filteredCategories.map((cat) => {
+                  const health = HEALTH[cat.health]
+                  return (
+                    <TableRow
+                      key={`${cat.service}-${cat.kind}`}
+                      className={ROW}
+                      onClick={() => setSelectedPool(cat)}
+                      title="Click to view category details"
                     >
-                      <span className="block max-w-56 truncate">{cat.label}</span>
-                      <span className="label-mono mt-1 block truncate">
-                        {cat.service} · {cat.kind}
-                      </span>
-                    </TableHead>
-                    {cat.total === 0 ? (
-                      // An empty category keeps its row, with the reason in words rather than
-                      // a line of zeroes. Apple Music is account-only.
-                      <TableCell colSpan={COLUMN_COUNT - 1} className="px-3 py-2">
-                        <Empty
-                          className="gap-2 px-3 py-3 sm:flex-row sm:justify-center"
-                          action={
+                      {/* Column 1: Category */}
+                      <TableHead
+                        scope="row"
+                        className="h-auto px-3 py-2.5 text-left font-medium text-foreground whitespace-nowrap"
+                      >
+                        <div className="flex flex-col">
+                          <span className="font-medium text-foreground">{cat.label}</span>
+                          <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                            {cat.service} · {cat.kind}
+                          </span>
+                        </div>
+                      </TableHead>
+
+                      {cat.total === 0 ? (
+                        <TableCell colSpan={COLUMN_COUNT - 1} className="px-3 py-2">
+                          <div className="flex items-center justify-between rounded-md border border-dashed border-border/80 bg-secondary/20 px-3 py-2 text-xs">
+                            <span className="text-muted-foreground">No entries in this pool yet.</span>
                             <Link
                               href="/submit"
-                              className={cn(buttonVariants({ variant: "outline", size: "xs" }))}
+                              onClick={(e) => e.stopPropagation()}
+                              className={cn(buttonVariants({ variant: "outline", size: "xs" }), "h-6 text-[10px]")}
                             >
                               Contribute one
                             </Link>
-                          }
-                        >
-                          No entries in this pool yet.
-                        </Empty>
-                      </TableCell>
-                    ) : (
-                      <>
-                        <TableCell className={TXT_CELL}>
-                          <span className="flex items-center gap-2">
-                            <StatusDot
-                              tone={HEALTH[cat.health].tone}
-                              pulse={animate && cat.health === "operational"}
-                            />
-                            {/* The word, not the colour: the dot repeats it, it never replaces it. */}
-                            <Badge tone={health.tone}>{health.label}</Badge>
-                          </span>
+                          </div>
                         </TableCell>
-                        <TableCell className={NUM_CELL}>{formatCount(cat.total)}</TableCell>
-                        <TableCell className={NUM_CELL}>{formatCount(cat.alive)}</TableCell>
-                        <TableCell
-                          className={cn(NUM_CELL, cat.premium > 0 && TONE_TEXT[toneFor("alive")])}
-                        >
-                          {formatCount(cat.premium)}
-                        </TableCell>
-                        <TableCell
-                          className={cn(NUM_CELL, cat.pending > 0 && TONE_TEXT[toneFor("pending")])}
-                        >
-                          {formatCount(cat.pending)}
-                        </TableCell>
-                        <TableCell
-                          className={cn(NUM_CELL, cat.dead > 0 && TONE_TEXT[toneFor("dead")])}
-                        >
-                          {formatCount(cat.dead)}
-                        </TableCell>
-                        <TableCell className={NUM_CELL}>
-                          {cat.uptimePct === null ? (
-                            /* Uptime is only defined once the sweep has checked something. A bare
-                               "0%" would read as an outage and a "—" alone as a missing column, so
-                               the dash is visual and the words go to assistive tech. */
-                            <>
-                              <span aria-hidden="true">—</span>
-                              <span className="sr-only">No checks yet</span>
-                            </>
-                          ) : (
-                            `${formatCount(cat.uptimePct)}%`
-                          )}
-                        </TableCell>
-                        <TableCell className="px-3 py-3">
-                          {/* Deliberately no figure of its own: the Uptime cell to its left is the
-                              number, and this is only its shape over the retained window. */}
-                          <Sparkline
-                            className="h-6 w-16"
-                            max={100}
-                            tone={rateTone(cat.uptimePct)}
-                            points={asPoints(sparkFor(cat.service, cat.kind))}
-                            label={`${cat.label}: daily pass rate over the retained window`}
-                          />
-                        </TableCell>
-                        <TableCell className="px-3 py-3">
-                          <SegmentBar segments={mixSegments(cat)} />
-                        </TableCell>
-                        <TableCell className={cn(TXT_CELL, "text-muted-foreground")}>
-                          <span
-                            title={cat.lastCheckedAt ? formatDateTime(cat.lastCheckedAt) : undefined}
+                      ) : (
+                        <>
+                          {/* Column 2: Health */}
+                          <TableCell className={TXT_CELL}>
+                            <Badge tone={health.tone} dot>
+                              {health.label}
+                            </Badge>
+                          </TableCell>
+
+                          {/* Column 3: Total */}
+                          <TableCell className={NUM_CELL}>{formatCount(cat.total)}</TableCell>
+
+                          {/* Column 4: Alive */}
+                          <TableCell className={cn(NUM_CELL, "font-medium text-foreground")}>
+                            {formatCount(cat.alive)}
+                          </TableCell>
+
+                          {/* Column 5: Premium */}
+                          <TableCell
+                            className={cn(NUM_CELL, cat.premium > 0 && TONE_TEXT[toneFor("alive")])}
                           >
-                            {formatAgo(cat.lastCheckedAt)}
-                          </span>
-                        </TableCell>
-                      </>
+                            {formatCount(cat.premium)}
+                          </TableCell>
+
+                          {/* Column 6: Pending */}
+                          <TableCell
+                            className={cn(NUM_CELL, cat.pending > 0 && TONE_TEXT[toneFor("pending")])}
+                          >
+                            {formatCount(cat.pending)}
+                          </TableCell>
+
+                          {/* Column 7: Dead */}
+                          <TableCell
+                            className={cn(NUM_CELL, cat.dead > 0 && TONE_TEXT[toneFor("dead")])}
+                          >
+                            {formatCount(cat.dead)}
+                          </TableCell>
+
+                          {/* Column 8: Uptime */}
+                          <TableCell className={NUM_CELL}>
+                            {cat.uptimePct === null ? (
+                              <span aria-hidden="true" className="text-muted-foreground">
+                                —
+                              </span>
+                            ) : (
+                              `${formatCount(cat.uptimePct)}%`
+                            )}
+                          </TableCell>
+
+                          {/* Column 9: 14d Sparkline */}
+                          <TableCell className="px-3 py-2.5">
+                            <Sparkline
+                              className="h-5 w-16"
+                              max={100}
+                              tone={rateTone(cat.uptimePct)}
+                              points={asPoints(sparkFor(cat.service, cat.kind))}
+                              label={`${cat.label}: daily pass rate over 14 days`}
+                            />
+                          </TableCell>
+
+                          {/* Column 10: Mix Segment */}
+                          <TableCell className="px-3 py-2.5">
+                            <SegmentBar segments={mixSegments(cat)} />
+                          </TableCell>
+
+                          {/* Column 11: Checked */}
+                          <TableCell className={cn(TXT_CELL, "font-mono text-[11px] text-muted-foreground")}>
+                            <span title={cat.lastCheckedAt ? formatDateTime(cat.lastCheckedAt) : undefined}>
+                              {formatAgo(cat.lastCheckedAt)}
+                            </span>
+                          </TableCell>
+                        </>
+                      )}
+                    </TableRow>
+                  )
+                })
+              )}
+            </TableBody>
+
+            {/* Summary Footer Row */}
+            {data && filteredCategories.length > 0 && (
+              <TableFooter className="border-t border-border/80 bg-secondary/35 font-medium">
+                <TableRow className="hover:bg-transparent">
+                  <TableHead
+                    scope="row"
+                    className="h-auto px-3 py-2.5 font-mono text-[11px] font-semibold uppercase tracking-wider text-muted-foreground"
+                  >
+                    All Pools Summary
+                  </TableHead>
+                  <TableCell className="px-3 py-2.5">
+                    <Badge tone={HEALTH[overall.health].tone} dot>
+                      {HEALTH[overall.health].label}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className={NUM_CELL}>{formatCount(totals.total)}</TableCell>
+                  <TableCell className={cn(NUM_CELL, "font-semibold text-foreground")}>
+                    {formatCount(totals.alive)}
+                  </TableCell>
+                  <TableCell className={cn(NUM_CELL, "text-ok")}>
+                    {formatCount(totals.premium)}
+                  </TableCell>
+                  <TableCell className={cn(NUM_CELL, totals.pending > 0 && "text-warn")}>
+                    {formatCount(totals.pending)}
+                  </TableCell>
+                  <TableCell className={cn(NUM_CELL, totals.dead > 0 && "text-destructive")}>
+                    {formatCount(totals.dead)}
+                  </TableCell>
+                  <TableCell className={NUM_CELL}>
+                    {windowPct === null ? (
+                      "—"
+                    ) : (
+                      <span className={TONE_TEXT[rateTone(windowPct)]}>{windowPct}%</span>
                     )}
-                  </TableRow>
-                )
-              })
+                  </TableCell>
+                  <TableCell className="px-3 py-2.5">
+                    <Sparkline
+                      className="h-5 w-16"
+                      max={100}
+                      tone={rateTone(windowPct)}
+                      points={asPoints(history?.overall)}
+                      label="All pools pass rate over 14 days"
+                    />
+                  </TableCell>
+                  <TableCell className="px-3 py-2.5">
+                    <SegmentBar segments={mixSegments(totals)} />
+                  </TableCell>
+                  <TableCell className={cn(TXT_CELL, "font-mono text-[11px] text-muted-foreground")}>
+                    {formatAgo(data.generatedAt)}
+                  </TableCell>
+                </TableRow>
+              </TableFooter>
             )}
-          </TableBody>
-          {data ? (
-            <TableFooter className="border-border bg-secondary/40 font-normal">
-              <TableRow className="hover:bg-transparent">
-                <TableHead
-                  scope="row"
-                  className="label-mono h-auto px-4 py-2.5 text-left font-medium text-muted-foreground"
-                >
-                  All pools
-                </TableHead>
-                <TableCell className="px-3 py-2.5" />
-                <TableCell className={cn(NUM_CELL, "py-2.5")}>{formatCount(totals.total)}</TableCell>
-                <TableCell className={cn(NUM_CELL, "py-2.5")}>{formatCount(totals.alive)}</TableCell>
-                <TableCell className={cn(NUM_CELL, "py-2.5")}>
-                  {formatCount(totals.premium)}
-                </TableCell>
-                <TableCell className={cn(NUM_CELL, "py-2.5")}>
-                  {formatCount(totals.pending)}
-                </TableCell>
-                <TableCell className={cn(NUM_CELL, "py-2.5")}>{formatCount(totals.dead)}</TableCell>
-                <TableCell className={cn(NUM_CELL, "py-2.5")}>
-                  {/* No pooled figure — see sumStats(). */}
-                  <span aria-hidden="true">—</span>
-                  <span className="sr-only">Not pooled</span>
-                </TableCell>
-                <TableCell className="px-3 py-2.5">
-                  <Sparkline
-                    className="h-6 w-16"
-                    max={100}
-                    tone={rateTone(windowPct)}
-                    points={asPoints(history?.overall)}
-                    label="All pools: daily pass rate over the retained window"
-                  />
-                </TableCell>
-                <TableCell className="px-3 py-2.5">
-                  <SegmentBar segments={mixSegments(totals)} />
-                </TableCell>
-                <TableCell className={cn(TXT_CELL, "py-2.5 text-muted-foreground")}>
-                  {formatAgo(data.generatedAt)}
-                </TableCell>
-              </TableRow>
-            </TableFooter>
-          ) : null}
-        </Table>
-      </Panel>
+          </Table>
+        </div>
+      </section>
+
+      {/* IN-DEPTH POOL DIAGNOSTICS & TELEMETRY DIALOG */}
+      {selectedPool && (
+        <Dialog
+          open={selectedPool !== null}
+          onClose={() => setSelectedPool(null)}
+          title={`${selectedPool.label} Diagnostics`}
+          description={`Telemetry, rotation health, and consumption endpoints for ${selectedPool.service} (${selectedPool.kind}).`}
+          footer={
+            <div className="flex w-full items-center justify-between gap-2">
+              <Link
+                href={`/submit?service=${selectedPool.service}&kind=${selectedPool.kind}`}
+                className={cn(buttonVariants({ variant: "outline", size: "sm" }), "text-xs font-mono gap-1")}
+              >
+                <span>Contribute Source</span>
+                <ArrowUpRight className="size-3" />
+              </Link>
+              <Button size="sm" onClick={() => setSelectedPool(null)}>
+                Close
+              </Button>
+            </div>
+          }
+        >
+          <div className="flex flex-col gap-4 font-mono text-xs">
+            <div className="grid grid-cols-2 gap-2 rounded-lg border border-border/80 bg-secondary/30 p-3 sm:grid-cols-4">
+              <div>
+                <span className="block text-[10px] text-muted-foreground uppercase">STATUS</span>
+                <Badge tone={HEALTH[selectedPool.health].tone} dot className="mt-1">
+                  {HEALTH[selectedPool.health].label}
+                </Badge>
+              </div>
+              <div>
+                <span className="block text-[10px] text-muted-foreground uppercase">SERVING</span>
+                <span className="text-sm font-semibold tabular-nums text-ok">
+                  {formatCount(selectedPool.alive)} / {formatCount(selectedPool.total)}
+                </span>
+              </div>
+              <div>
+                <span className="block text-[10px] text-muted-foreground uppercase">PREMIUM</span>
+                <span className="text-sm font-semibold tabular-nums text-foreground">
+                  {formatCount(selectedPool.premium)}
+                </span>
+              </div>
+              <div>
+                <span className="block text-[10px] text-muted-foreground uppercase">14D PASS</span>
+                <span className={cn("text-sm font-semibold tabular-nums", TONE_TEXT[rateTone(selectedPool.uptimePct)])}>
+                  {selectedPool.uptimePct !== null ? `${selectedPool.uptimePct}%` : "—"}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <span className="text-[11px] font-semibold text-foreground uppercase tracking-wider">
+                Test Lease Endpoint
+              </span>
+              <div className="flex items-center justify-between rounded-md border border-border bg-background p-2.5">
+                <code className="text-[11px] text-foreground/90 truncate mr-2">
+                  curl -H &quot;Authorization: Bearer YOUR_KEY&quot; &quot;{leaseUrl}&quot;
+                </code>
+                <CopyButton
+                  value={`curl -H "Authorization: Bearer YOUR_KEY" "${leaseUrl}"`}
+                  className="shrink-0 h-6 px-2 text-[10px]"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between text-[11px] text-muted-foreground border-t border-border/60 pt-2">
+              <span>Last sweep verification:</span>
+              <span className="text-foreground">
+                {selectedPool.lastCheckedAt ? formatDateTime(selectedPool.lastCheckedAt) : "Never checked"}
+              </span>
+            </div>
+          </div>
+        </Dialog>
+      )}
     </div>
   )
 }

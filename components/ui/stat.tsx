@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import * as React from "react"
 import Link from "next/link"
 import { ArrowUpRight } from "lucide-react"
 import { TONE_TEXT, type StatusTone } from "@/components/ui/badge"
@@ -13,12 +13,10 @@ import { cn } from "@/lib/utils"
  * ramps that fight over state.
  */
 export function useCountUp(value: number, animate: boolean, duration = 700) {
-  const [display, setDisplay] = useState(value)
-  // What is on screen right now. Held in a ref rather than as "the last target" so an interrupted
-  // ramp hands the next one the number the user was actually shown.
-  const drawn = useRef(value)
+  const [display, setDisplay] = React.useState(value)
+  const drawn = React.useRef(value)
 
-  useEffect(() => {
+  React.useEffect(() => {
     if (!animate) {
       drawn.current = value
       setDisplay(value)
@@ -43,33 +41,135 @@ export function useCountUp(value: number, animate: boolean, duration = 700) {
   return display
 }
 
-/** Figure over mono label, for a row of numbers inside a panel that already has a heading. */
+interface StatProps extends React.HTMLAttributes<HTMLDivElement> {
+  label?: string
+  value?: string | number
+  subvalue?: string
+  tone?: StatusTone
+}
+
+/**
+ * Stat Root. Supports both compositional children (<StatLabel>, <StatValue>)
+ * and direct props (label, value, subvalue, tone).
+ */
 export function Stat({
   label,
   value,
+  subvalue,
   tone,
   className,
-}: {
-  label: string
-  value: string
-  tone?: StatusTone
-  className?: string
-}) {
+  children,
+  ...props
+}: StatProps) {
+  if (children) {
+    return (
+      <div
+        data-slot="stat"
+        className={cn("flex min-w-0 flex-col gap-1.5", className)}
+        {...props}
+      >
+        {children}
+      </div>
+    )
+  }
+
   return (
-    <div className={cn("flex min-w-0 flex-col gap-1", className)}>
-      <span className={cn("font-mono text-lg leading-none", tone ? TONE_TEXT[tone] : undefined)}>
-        {value}
-      </span>
-      <span className="label-mono">{label}</span>
+    <div
+      data-slot="stat"
+      className={cn("flex min-w-0 flex-col gap-1.5", className)}
+      {...props}
+    >
+      <div className="flex items-baseline gap-2">
+        <span
+          className={cn(
+            "font-mono text-xl font-semibold leading-none tabular-nums tracking-tight text-foreground",
+            tone ? TONE_TEXT[tone] : undefined
+          )}
+        >
+          {value}
+        </span>
+        {subvalue ? (
+          <span className="font-mono text-xs text-muted-foreground tabular-nums">
+            {subvalue}
+          </span>
+        ) : null}
+      </div>
+      {label ? (
+        <span className="font-mono text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+          {label}
+        </span>
+      ) : null}
     </div>
   )
 }
 
+export function StatLabel({
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLParagraphElement>) {
+  return (
+    <p
+      data-slot="stat-label"
+      className={cn(
+        "font-mono text-[11px] font-medium uppercase tracking-wider text-muted-foreground",
+        className
+      )}
+      {...props}
+    />
+  )
+}
+
+export function StatValue({
+  className,
+  tone,
+  ...props
+}: React.HTMLAttributes<HTMLHeadingElement> & { tone?: StatusTone }) {
+  return (
+    <div
+      data-slot="stat-value"
+      className={cn(
+        "font-mono text-2xl font-semibold leading-none tracking-tight tabular-nums text-foreground",
+        tone ? TONE_TEXT[tone] : undefined,
+        className
+      )}
+      {...props}
+    />
+  )
+}
+
+export function StatDescription({
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLParagraphElement>) {
+  return (
+    <p
+      data-slot="stat-description"
+      className={cn("text-xs leading-relaxed text-muted-foreground text-pretty", className)}
+      {...props}
+    />
+  )
+}
+
+export function StatIndicator({
+  tone = "neutral",
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLSpanElement> & { tone?: StatusTone }) {
+  return (
+    <span
+      data-slot="stat-indicator"
+      className={cn(
+        "inline-flex items-center gap-1 font-mono text-xs tabular-nums",
+        TONE_TEXT[tone],
+        className
+      )}
+      {...props}
+    />
+  )
+}
+
 /**
- * A standalone KPI card: one figure, one sentence of context, and an optional visual in the
- * footer slot. Tiles are the same height in a row whatever they hold, so a row of them reads as
- * one instrument panel rather than four boxes — hence the flex column with the slot pinned to the
- * bottom rather than each tile sizing to its content.
+ * StatTile / KPI Card: one figure, one sentence of context, and an optional visual in the footer slot.
  */
 export function StatTile({
   label,
@@ -82,7 +182,7 @@ export function StatTile({
   className,
 }: {
   label: string
-  value: string
+  value: string | number
   hint?: string
   tone?: StatusTone
   href?: string
@@ -92,27 +192,30 @@ export function StatTile({
 }) {
   return (
     <div
+      data-slot="stat-tile"
       className={cn(
-        "flex min-w-0 flex-col gap-3 rounded-lg border border-border bg-card p-4 edge-lit",
-        className,
+        "flex min-w-0 flex-col gap-3 rounded-lg border border-border bg-card p-4 shadow-2xs transition-colors",
+        className
       )}
     >
       <div className="flex items-start justify-between gap-2">
-        <p className="label-mono">{label}</p>
+        <p className="font-mono text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+          {label}
+        </p>
         {href ? (
           <Link
             href={href}
-            className="inline-flex items-center gap-1 font-mono text-[0.625rem] uppercase tracking-[0.1em] text-muted-foreground transition-colors hover:text-foreground"
+            className="inline-flex items-center gap-1 font-mono text-[11px] text-muted-foreground transition-colors hover:text-foreground"
           >
-            {linkLabel ?? "Open"}
+            {linkLabel ?? "View"}
             <ArrowUpRight className="size-3" aria-hidden="true" />
           </Link>
         ) : null}
       </div>
       <p
         className={cn(
-          "font-mono text-2xl leading-none tracking-tight",
-          tone ? TONE_TEXT[tone] : undefined,
+          "font-mono text-2xl font-semibold leading-none tracking-tight tabular-nums text-foreground",
+          tone ? TONE_TEXT[tone] : undefined
         )}
       >
         {value}

@@ -19,7 +19,7 @@ export default async function LoginPage() {
   return (
     <div className="min-h-dvh">
       <SiteHeader />
-      <main className="mx-auto flex max-w-5xl flex-col gap-6 px-5 pb-16 pt-14 sm:pt-20">
+      <main className="flex w-full flex-col px-3 pb-16 pt-10 sm:px-4 md:px-6">
         <Suspense>
           <GitHubAuth />
         </Suspense>

@@ -10,10 +10,10 @@ import { cn } from "@/lib/utils"
  * your attention", and anything that is merely informational must not compete with that.
  */
 const TONES = {
-  ok: "border-ok/30 text-ok",
-  warn: "border-warn/30 text-warn",
-  danger: "border-destructive/30 text-destructive",
-  neutral: "border-border text-muted-foreground",
+  ok: "border-ok/25 bg-ok/10 text-ok dark:bg-ok/15 dark:border-ok/30",
+  warn: "border-warn/25 bg-warn/10 text-warn dark:bg-warn/15 dark:border-warn/30",
+  danger: "border-destructive/25 bg-destructive/10 text-destructive dark:bg-destructive/15 dark:border-destructive/30",
+  neutral: "border-border bg-secondary/60 text-muted-foreground",
 } as const
 
 export type StatusTone = keyof typeof TONES
@@ -76,20 +76,28 @@ export const TONE_VAR: Record<StatusTone, string> = {
 export function Badge({
   children,
   tone = "neutral",
+  dot = false,
   className,
 }: {
   children: React.ReactNode
   tone?: StatusTone
+  dot?: boolean
   className?: string
 }) {
   return (
     <span
       className={cn(
-        "inline-flex shrink-0 items-center gap-1 rounded-sm border px-1.5 py-0.5 font-mono text-[0.625rem] uppercase tracking-[0.1em]",
+        "inline-flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-0.5 font-mono text-[11px] font-medium leading-none tracking-tight",
         TONES[tone],
         className,
       )}
     >
+      {dot && (
+        <span
+          className={cn("size-1.5 rounded-full shrink-0", TONE_BG[tone])}
+          aria-hidden="true"
+        />
+      )}
       {children}
     </span>
   )
@@ -106,7 +114,7 @@ export function StatusDot({
   className?: string
 }) {
   return (
-    <span className={cn("relative flex shrink-0", className ?? "size-2")} aria-hidden="true">
+    <span className={cn("relative flex shrink-0 items-center justify-center", className ?? "size-2")} aria-hidden="true">
       {pulse ? (
         <span
           className={cn(

@@ -2,7 +2,7 @@
 import { ImageResponse } from "next/og"
 import { BRAND_MARK } from "@/components/brand-mark"
 
-export const alt = "ArchiveTune Source Pool — live status for Tidal, Qobuz and Deezer sources"
+export const alt = "ArchivePool · Streaming Source Infrastructure & Live Health Pool"
 export const size = { width: 1200, height: 630 }
 export const contentType = "image/png"
 
@@ -20,7 +20,7 @@ export default function OpengraphImage() {
         display: "flex",
         flexDirection: "column",
         justifyContent: "space-between",
-        backgroundColor: "#080a0d",
+        backgroundColor: "#09090b",
         padding: "72px",
         fontFamily: "sans-serif",
       }}
@@ -49,28 +49,28 @@ export default function OpengraphImage() {
         <div
           style={{
             display: "flex",
-            color: "#a2a6ad",
-            fontSize: "22px",
-            letterSpacing: "0.14em",
+            color: "#a1a1aa",
+            fontSize: "24px",
+            letterSpacing: "0.1em",
             textTransform: "uppercase",
           }}
         >
-          ArchiveTune · Source Pool
+          ArchivePool · Streaming Infrastructure
         </div>
       </div>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
         <div
           style={{
             display: "flex",
-            color: "#f5f6f7",
-            fontSize: "76px",
-            fontWeight: 600,
+            color: "#fafafa",
+            fontSize: "68px",
+            fontWeight: 800,
             letterSpacing: "-0.03em",
             lineHeight: 1.05,
           }}
         >
-          Live status for every source in the pool
+          Source Pool & Health Telemetry
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
           <div
@@ -79,11 +79,11 @@ export default function OpengraphImage() {
               width: "12px",
               height: "12px",
               borderRadius: "999px",
-              backgroundColor: "#37c98a",
+              backgroundColor: "#10b981",
             }}
           />
-          <div style={{ display: "flex", color: "#a2a6ad", fontSize: "28px" }}>
-            Tidal · Qobuz · Deezer — health-checked hourly
+          <div style={{ display: "flex", color: "#a1a1aa", fontSize: "28px" }}>
+            E2E Encrypted · Continuous Synthetic Sweeps · Scoped API Keys
           </div>
         </div>
       </div>

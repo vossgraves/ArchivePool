@@ -4,14 +4,29 @@
 import { useState } from "react"
 import { useRouter } from "next/navigation"
 import { AnimatePresence, motion, useReducedMotion } from "motion/react"
-import { ChevronRight, KeyRound } from "lucide-react"
+import { KeyRound, ShieldAlert } from "lucide-react"
 import { toast } from "sonner"
 import type { DashboardSnapshot, DashboardKey, DashboardLease, DashboardRequest } from "@/lib/queries"
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { Badge, toneFor } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { BarList } from "@/components/ui/chart"
 import { CopyButton } from "@/components/ui/copy-button"
-import { Dialog } from "@/components/ui/dialog"
 import { Empty } from "@/components/ui/empty"
 import { Field } from "@/components/ui/field"
 import { Notice } from "@/components/ui/notice"
@@ -25,19 +40,11 @@ import { SERVICES, SERVICE_LABELS, type Service } from "@/lib/sources"
 
 /**
  * A key the user is entitled to but has not seen yet: approved by an admin, no key minted so far.
- * Approval deliberately does not generate the key, so the plaintext can be handed to exactly one
- * audience — the requester — at exactly one moment.
  */
 function isClaimable(r: DashboardRequest) {
   return r.status === "approved" && r.resultingKeyId === null
 }
 
-/**
- * The signed-in view of the pool. Every figure here is server-rendered from getDashboard(), and
- * mutations go through the same REST routes as before and then `router.refresh()` — so the panel
- * that changed and the tiles above it can never disagree, which they did while the list was fetched
- * client-side and the summary was computed from a second copy of it.
- */
 export function Dashboard({
   username,
   snapshot,
@@ -178,7 +185,7 @@ export function Dashboard({
   }
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-8">
       {snapshot.failed.length > 0 ? (
         <Notice tone="error">
           Could not load {snapshot.failed.join(", ")} — those panels are showing nothing rather than
@@ -188,34 +195,24 @@ export function Dashboard({
 
       <DashboardSummary snapshot={snapshot} />
 
-      <AnimatePresence initial={false}>
-        {revealed
-          ? reduce ? (
-              <RevealedKey revealed={revealed} />
-            ) : (
-              <motion.div
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: "auto" }}
-                exit={{ opacity: 0, height: 0 }}
-                className="overflow-hidden"
-              >
-                <RevealedKey revealed={revealed} />
-              </motion.div>
-            )
-          : null}
+      <AnimatePresence>
+        {revealed ? (
+          <motion.div {...motionProps}>
+            <RevealedKey revealed={revealed} />
+          </motion.div>
+        ) : null}
       </AnimatePresence>
 
       <Panel
         label="Your keys"
-        description={`Signed in as @${username} · ${formatCount(activeCount)} active ${activeCount === 1 ? "key" : "keys"}. Revoking stops a key authenticating and can be undone; deleting removes it for good — only its hash was stored, so there is nothing to recover.`}
+        description={`Signed in as @${username} · ${formatCount(activeCount)} active ${activeCount === 1 ? "key" : "keys"}. Revoking stops a key authenticating and can be undone; deleting removes it for good.`}
         bodyClassName="flex flex-col gap-3"
         className="scroll-mt-20"
       >
         <span id="keys" className="sr-only" />
         {keys.length === 0 ? (
-          <Empty>
-            No keys yet. Request one below — an admin reviews requests by hand, and your key appears
-            here the moment one is approved.
+          <Empty title="No active keys">
+            No keys yet. Request one below — an admin reviews requests by hand, and your key appears here the moment one is approved.
           </Empty>
         ) : (
           <>
@@ -223,13 +220,13 @@ export function Dashboard({
               <motion.div
                 key={key.id}
                 {...motionProps}
-                className="flex flex-col gap-3 rounded-md border border-border bg-background/40 p-3.5"
+                className="flex flex-col gap-3 rounded-lg border border-border bg-card p-4 shadow-2xs"
               >
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="min-w-0 truncate text-sm font-medium">{key.name}</span>
-                      <Badge tone={toneFor(key.revoked ? "revoked" : "active")}>
+                      <span className="min-w-0 truncate text-sm font-semibold text-foreground">{key.name}</span>
+                      <Badge tone={toneFor(key.revoked ? "revoked" : "active")} dot>
                         {key.revoked ? "revoked" : "active"}
                       </Badge>
                       {key.heldEntries > 0 ? (
@@ -239,9 +236,7 @@ export function Dashboard({
                       ) : null}
                     </div>
                     <p className="mt-1 font-mono text-xs text-muted-foreground">
-                      {key.prefix}… · {formatCount(key.useCount)} {key.useCount === 1 ? "request" : "requests"} ·
-                      last used {key.lastUsedAt ? formatAgo(key.lastUsedAt) : "never"} · created{" "}
-                      {formatDay(key.createdAt)}
+                      {key.prefix}… · {formatCount(key.useCount)} {key.useCount === 1 ? "request" : "requests"} · last used {key.lastUsedAt ? formatAgo(key.lastUsedAt) : "never"} · created {formatDay(key.createdAt)}
                     </p>
                     {key.reason ? (
                       <p className="mt-1 max-w-[70ch] text-xs leading-relaxed text-muted-foreground text-pretty">
@@ -274,7 +269,7 @@ export function Dashboard({
 
             {keys.some((k) => k.useCount > 0) ? (
               <div className="mt-1 flex flex-col gap-3 border-t border-border pt-4">
-                <h3 className="label-mono">Traffic by key</h3>
+                <h3 className="font-mono text-xs font-semibold uppercase tracking-wider text-muted-foreground">Traffic by key</h3>
                 <BarList
                   format={(n) => `${formatCount(n)} req`}
                   items={keys.map((key) => ({
@@ -299,33 +294,32 @@ export function Dashboard({
       >
         <span id="requests" className="sr-only" />
         {requests.length === 0 ? (
-          <Empty>No requests yet. The form below is the only way to get a read key.</Empty>
+          <Empty title="No pending requests">
+            No requests yet. Use the registration form below to request a read key.
+          </Empty>
         ) : (
           requests.map((r) => (
             <motion.div
               key={r.id}
               {...motionProps}
-              className="flex flex-wrap items-start justify-between gap-3 rounded-md border border-border bg-background/40 p-3.5"
+              className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-border bg-card p-4 shadow-2xs"
             >
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="min-w-0 truncate text-sm font-medium">{r.subject}</span>
-                  <Badge tone={toneFor(r.status)}>{r.status}</Badge>
+                  <span className="min-w-0 truncate text-sm font-semibold text-foreground">{r.subject}</span>
+                  <Badge tone={toneFor(r.status)} dot>{r.status}</Badge>
                 </div>
                 <p className="mt-1 max-w-[70ch] text-xs leading-relaxed text-muted-foreground text-pretty">
                   “{r.reason}”
                 </p>
-                <p className="mt-1 font-mono text-[0.6875rem] text-muted-foreground">
+                <p className="mt-1 font-mono text-[11px] text-muted-foreground">
                   requested {formatDay(r.createdAt)}
                   {r.reviewedAt ? ` · reviewed ${formatDateTime(r.reviewedAt)}` : " · awaiting review"}
                 </p>
                 {r.status === "rejected" && r.reviewNote ? (
                   <p className="mt-2 max-w-[70ch] rounded-md border-l-2 border-destructive/50 bg-destructive/5 py-1.5 pl-3 pr-2 text-xs leading-relaxed text-foreground/80">
-                    <span className="label-mono">Admin’s reason</span>
+                    <span className="font-mono text-[10px] uppercase font-semibold text-destructive">Admin note:</span>
                     <span className="mt-1 block text-pretty">“{r.reviewNote}”</span>
-                    <span className="mt-1 block text-muted-foreground">
-                      Fix what they asked for and send a new request.
-                    </span>
                   </p>
                 ) : null}
               </div>
@@ -343,103 +337,106 @@ export function Dashboard({
           ))
         )}
 
-        <details
-          open={formOpen}
-          onToggle={(e) => setFormOpen((e.currentTarget as HTMLDetailsElement).open)}
-          className="rounded-md border border-border bg-background/40"
+        <Accordion
+          type="single"
+          collapsible
+          className="w-full"
+          value={formOpen ? "request-form" : ""}
+          onValueChange={(v) => setFormOpen(v === "request-form")}
         >
-          <summary className="flex cursor-pointer list-none items-center gap-2 px-3.5 py-3 text-sm font-medium [&::-webkit-details-marker]:hidden">
-            <ChevronRight
-              className={cn("size-3.5 transition-transform", formOpen && "rotate-90")}
-              aria-hidden="true"
-            />
-            Request {keys.length > 0 || requests.length > 0 ? "another" : "a"} key
-          </summary>
-          {/* The text controls go through the shared Field, which is where the label/
-              `aria-describedby` wiring lives. `mono` is off: these are prose, not credentials. */}
-          <form onSubmit={createRequest} className="flex flex-col gap-3 border-t border-border p-3.5">
-            <div className="flex flex-col gap-1.5">
-              <span className="text-sm font-medium">Source</span>
-              <div className="inline-flex w-full flex-wrap rounded-md border border-border p-1">
-                {(["any", ...SERVICES] as const).map((opt) => (
-                  <button
-                    key={opt}
-                    type="button"
-                    onClick={() => setRequestService(opt)}
-                    className={`flex-1 whitespace-nowrap rounded px-3 py-1.5 text-sm font-medium transition-colors ${
-                      requestService === opt
-                        ? "bg-primary text-primary-foreground"
-                        : "text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    {opt === "any" ? "Any" : SERVICE_LABELS[opt]}
-                  </button>
-                ))}
-              </div>
-              <p className="text-xs leading-relaxed text-muted-foreground text-pretty">
-                A key scoped to one source never receives another's credentials.
-              </p>
-            </div>
-            <Field
-              label="Subject"
-              name="subject"
-              required
-              mono={false}
-              maxLength={64}
-              placeholder="Which app or device is this for?"
-              value={subject}
-              onValueChange={setSubject}
-            />
-            <Field
-              label="Reason"
-              name="reason"
-              required
-              mono={false}
-              rows={3}
-              maxLength={500}
-              placeholder="What will you use the pool for? At least 10 characters — a real sentence gets approved faster."
-              hint={`${formatCount(reason.trim().length)}/10 minimum`}
-              value={reason}
-              onValueChange={setReason}
-            />
-            <div className="grid gap-3 sm:grid-cols-2">
-              <Field
-                label="Discord ID"
-                name="discordId"
-                mono={false}
-                maxLength={64}
-                placeholder="Optional"
-                value={discord}
-                onValueChange={setDiscord}
-              />
-              <Field
-                label="Telegram ID"
-                name="telegramId"
-                mono={false}
-                maxLength={64}
-                placeholder="Optional"
-                value={telegram}
-                onValueChange={setTelegram}
-              />
-            </div>
-            <Field
-              label="Note"
-              name="contactNote"
-              mono={false}
-              rows={2}
-              maxLength={500}
-              placeholder="Optional — anything else the reviewer should know"
-              value={contactNote}
-              onValueChange={setContactNote}
-            />
-            <div className="flex justify-end">
-              <Button type="submit" disabled={creating}>
-                {creating ? "Sending…" : "Send request"}
-              </Button>
-            </div>
-            {formError ? <Notice tone="error">{formError}</Notice> : null}
-          </form>
-        </details>
+          <AccordionItem value="request-form" className="rounded-lg border border-border bg-card shadow-2xs">
+            <AccordionTrigger className="px-4 py-3 text-xs font-mono font-medium text-foreground hover:bg-secondary/30">
+              Request {keys.length > 0 || requests.length > 0 ? "another" : "a"} key
+            </AccordionTrigger>
+            <AccordionContent className="border-t border-border/80 p-4 sm:p-5">
+              <form onSubmit={createRequest} className="flex flex-col gap-4">
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-xs font-mono font-semibold text-foreground uppercase tracking-wider">
+                    Source Scope
+                  </span>
+                  <div className="inline-flex w-full flex-wrap rounded-md border border-border/80 bg-secondary/35 p-1">
+                    {(["any", ...SERVICES] as const).map((opt) => (
+                      <button
+                        key={opt}
+                        type="button"
+                        onClick={() => setRequestService(opt)}
+                        className={cn(
+                          "flex-1 whitespace-nowrap rounded px-3 py-1.5 text-xs font-mono font-medium transition-all sm:flex-none",
+                          requestService === opt
+                            ? "bg-background text-foreground shadow-2xs border border-border/60"
+                            : "text-muted-foreground hover:text-foreground"
+                        )}
+                      >
+                        {opt === "any" ? "Any" : SERVICE_LABELS[opt]}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[11px] leading-relaxed text-muted-foreground text-pretty">
+                    A key scoped to one source never receives another&apos;s credentials.
+                  </p>
+                </div>
+                <Field
+                  label="Subject"
+                  name="subject"
+                  required
+                  mono={false}
+                  maxLength={64}
+                  placeholder="Which app or device is this for?"
+                  value={subject}
+                  onValueChange={setSubject}
+                />
+                <Field
+                  label="Reason"
+                  name="reason"
+                  required
+                  mono={false}
+                  rows={3}
+                  maxLength={500}
+                  placeholder="What will you use the pool for? At least 10 characters — a real sentence gets approved faster."
+                  hint={`${formatCount(reason.trim().length)}/10 minimum`}
+                  value={reason}
+                  onValueChange={setReason}
+                />
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <Field
+                    label="Discord ID"
+                    name="discordId"
+                    mono={false}
+                    maxLength={64}
+                    placeholder="Optional"
+                    value={discord}
+                    onValueChange={setDiscord}
+                  />
+                  <Field
+                    label="Telegram ID"
+                    name="telegramId"
+                    mono={false}
+                    maxLength={64}
+                    placeholder="Optional"
+                    value={telegram}
+                    onValueChange={setTelegram}
+                  />
+                </div>
+                <Field
+                  label="Note"
+                  name="contactNote"
+                  mono={false}
+                  rows={2}
+                  maxLength={500}
+                  placeholder="Optional — anything else the reviewer should know"
+                  value={contactNote}
+                  onValueChange={setContactNote}
+                />
+                <div className="flex justify-end pt-2">
+                  <Button type="submit" disabled={creating} className="font-mono text-xs">
+                    {creating ? "Submitting Request…" : "Send Key Request"}
+                  </Button>
+                </div>
+                {formError ? <Notice tone="error">{formError}</Notice> : null}
+              </form>
+            </AccordionContent>
+          </AccordionItem>
+        </Accordion>
       </Panel>
 
       <DashboardLegacyRecovery />
@@ -453,101 +450,97 @@ export function Dashboard({
 
       <DashboardPool pool={snapshot.pool} history={snapshot.poolHistory} />
 
-      <Dialog
-        open={confirmDelete !== null}
-        onClose={() => setConfirmDelete(null)}
-        title="Delete this key?"
-        description={
-          confirmDelete
-            ? `“${confirmDelete.name}” (${confirmDelete.prefix}…) is removed from the database permanently. Apps still using it start failing, and the value cannot be shown again — you would need a new request.`
-            : undefined
-        }
-        footer={
-          <>
-            <Button variant="outline" onClick={() => setConfirmDelete(null)}>
+      {/* CONFIRMATION DIALOG FOR PERMANENT KEY DELETION */}
+      <AlertDialog open={confirmDelete !== null} onOpenChange={(open) => !open && setConfirmDelete(null)}>
+        <AlertDialogContent className="border-border bg-card">
+          <AlertDialogHeader>
+            <div className="flex items-center gap-2">
+              <ShieldAlert className="size-5 text-destructive" />
+              <AlertDialogTitle>Delete this API key?</AlertDialogTitle>
+            </div>
+            <AlertDialogDescription className="text-xs leading-relaxed text-muted-foreground pt-1">
+              {confirmDelete
+                ? `“${confirmDelete.name}” (${confirmDelete.prefix}…) will be permanently removed from the database. Any audio client or backend service still presenting this key will immediately fail authentication.`
+                : "This key will be permanently removed."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className="mt-4 gap-2">
+            <AlertDialogCancel onClick={() => setConfirmDelete(null)}>
               Cancel
-            </Button>
-            <Button
-              variant="destructive"
+            </AlertDialogCancel>
+            <AlertDialogAction
               disabled={deleteBusy}
               onClick={() => confirmDelete && void permanentlyDelete(confirmDelete)}
             >
-              {deleteBusy ? "Deleting…" : "Delete key"}
-            </Button>
-          </>
-        }
-      >
-        <p className="text-xs text-muted-foreground">
-          Just want to stop it for now? Close this and use Revoke instead — that is reversible.
-        </p>
-      </Dialog>
+              {deleteBusy ? "Deleting…" : "Delete key permanently"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }
 
-/**
- * Which pool entries this key is sticky on. Collapsed by default and native `<details>` rather than
- * state: it is detail for the one reader debugging "why does my app keep getting this token", and
- * the summary line above already carries the count.
- */
 function KeyLeases({ leases, keyName }: { leases: DashboardLease[]; keyName: string }) {
   if (leases.length === 0) {
     return (
-      <p className="font-mono text-[0.6875rem] text-muted-foreground">
+      <p className="font-mono text-[11px] text-muted-foreground">
         holding no entries — the pool assigns them on the next feed fetch
       </p>
     )
   }
+
   return (
-    <details className="rounded-md border border-border bg-card/60">
-      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 font-mono text-[0.6875rem] uppercase tracking-[0.1em] text-muted-foreground [&::-webkit-details-marker]:hidden">
-        <ChevronRight className="size-3" aria-hidden="true" />
-        Entries {keyName} currently holds ({formatCount(leases.length)})
-      </summary>
-      <ul className="flex flex-col gap-2 border-t border-border p-3">
-        {leases.map((lease) => {
-          const expiry = expiryState(lease.expiresAt)
-          return (
-            <li
-              key={lease.entryId}
-              className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5"
-            >
-              <span className="flex min-w-0 items-center gap-2">
-                <span className="min-w-0 truncate text-xs">{lease.label}</span>
-                <Badge tone={toneFor(lease.status)}>{lease.status}</Badge>
-                {lease.premium ? <Badge tone={toneFor("premium")}>premium</Badge> : null}
-                {expiry === "expiring" || expiry === "expired" ? (
-                  <Badge tone={toneFor(expiry)}>{formatUntil(lease.expiresAt)}</Badge>
-                ) : null}
-              </span>
-              <span className="font-mono text-[0.625rem] text-muted-foreground">
-                leased {formatAgo(lease.leasedAt)} · checked {formatAgo(lease.lastCheckedAt)}
-              </span>
-            </li>
-          )
-        })}
-      </ul>
-    </details>
+    <Accordion type="single" collapsible className="w-full">
+      <AccordionItem value="leases" className="rounded-md border border-border/70 bg-secondary/15">
+        <AccordionTrigger className="px-3 py-2 text-xs font-mono text-muted-foreground hover:text-foreground">
+          Entries {keyName} currently holds ({formatCount(leases.length)})
+        </AccordionTrigger>
+        <AccordionContent className="flex flex-col gap-2 border-t border-border/60 p-3 bg-background/40">
+          {leases.map((lease) => {
+            const expiry = expiryState(lease.expiresAt)
+            return (
+              <div
+                key={lease.entryId}
+                className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5"
+              >
+                <span className="flex min-w-0 items-center gap-2">
+                  <span className="min-w-0 truncate text-xs font-medium text-foreground">{lease.label}</span>
+                  <Badge tone={toneFor(lease.status)} dot>{lease.status}</Badge>
+                  {lease.premium ? <Badge tone={toneFor("premium")}>premium</Badge> : null}
+                  {expiry === "expiring" || expiry === "expired" ? (
+                    <Badge tone={toneFor(expiry)}>{formatUntil(lease.expiresAt)}</Badge>
+                  ) : null}
+                </span>
+                <span className="font-mono text-[10px] text-muted-foreground">
+                  leased {formatAgo(lease.leasedAt)} · checked {formatAgo(lease.lastCheckedAt)}
+                </span>
+              </div>
+            )
+          })}
+        </AccordionContent>
+      </AccordionItem>
+    </Accordion>
   )
 }
 
 function RevealedKey({ revealed }: { revealed: { key: string; prefix: string } }) {
   return (
-    <Panel className="border-primary/40 bg-primary/5">
+    <Panel className="border-ok/40 bg-ok/5">
       <div className="flex items-start gap-3">
-        <KeyRound className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden="true" />
+        <KeyRound className="mt-0.5 size-4 shrink-0 text-ok" aria-hidden="true" />
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium">Your new key</p>
+          <p className="text-sm font-semibold text-foreground">Your newly minted API key</p>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            Shown once. Store it now — reloading this page will not bring it back.
+            Shown once. Copy and store it in your client secrets right now — reloading this page will not bring it back.
           </p>
           <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-            <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded-md bg-background/70 px-3 py-2 font-mono text-xs">
+            <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded-md border border-border bg-background px-3 py-2 font-mono text-xs text-foreground">
               {revealed.key}
             </code>
             <CopyButton value={revealed.key} />
           </div>
-          <p className="mt-2 font-mono text-[0.6875rem] text-muted-foreground">
+          <p className="mt-2 font-mono text-[11px] text-muted-foreground">
             Send it as: <span className="text-foreground" translate="no">Authorization: Bearer &lt;key&gt;</span>
           </p>
         </div>

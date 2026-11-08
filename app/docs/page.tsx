@@ -1,135 +1,95 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import Link from "next/link"
+import { ArrowLeft, Terminal } from "lucide-react"
+import { DocsContent } from "@/components/docs-content"
 import { SiteHeader } from "@/components/site-header"
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb"
 import { buttonVariants } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
-export const metadata = { title: "API documentation" }
-
-const ENDPOINTS = [
-  {
-    method: "GET",
-    path: "/api/sources",
-    auth: "API key — always required",
-    desc: "The credential feed consumed by the ArchiveTune app. Leases a small rotating slice of live sources per service (least-recently-used), so a leaked key exposes a handful of entries, not the whole pool. Sensitive fields are AES-256-GCM ciphertext the app decrypts locally.",
-  },
-  {
-    method: "GET",
-    path: "/api/status",
-    auth: "public",
-    desc: "Aggregate, credential-free health per category (alive/dead/premium counts, uptime) plus a daily pass-rate history for the window the health log retains. This is what the home page renders.",
-  },
-  {
-    method: "GET",
-    path: "/api/discovery/tidal",
-    auth: "API key when read-key enforcement is on",
-    desc: "Public instance base URLs for one service (no account secrets). Same shape for /api/discovery/qobuz.",
-  },
-]
-
-function Code({ children }: { children: string }) {
-  return (
-    <pre className="overflow-x-auto rounded-md border border-border bg-background/60 p-3.5 font-mono text-xs leading-relaxed">
-      {children}
-    </pre>
-  )
+export const metadata = {
+  title: "API Documentation & Specifications · ArchivePool",
+  description: "REST API endpoints, cryptographic lease formats, and pool governance specifications.",
 }
 
 export default function DocsPage() {
   return (
-    <div className="min-h-dvh">
+    <div className="min-h-dvh flex flex-col bg-transparent text-foreground">
       <SiteHeader active="docs" />
-      <main className="mx-auto max-w-3xl px-5 pb-20 pt-10 sm:pt-14">
-        <header className="mb-10">
-          <h1 className="text-balance text-3xl font-semibold tracking-[-0.02em] sm:text-4xl">
-            Source Pool API
-          </h1>
-          <p className="mt-3 max-w-[62ch] text-pretty leading-relaxed text-muted-foreground">
-            The pool hands live, health-checked streaming credentials to approved clients. Keys are
-            free — create an account, request a key, and pass it as a Bearer token.
-          </p>
+
+      <main id="content" className="w-full px-3 pb-16 pt-6 sm:px-4 md:px-6 flex-1">
+        {/* Navigation Breadcrumb & Header */}
+        <Breadcrumb className="mb-4">
+          <BreadcrumbList>
+            <BreadcrumbItem>
+              <BreadcrumbLink href="/">ArchivePool</BreadcrumbLink>
+            </BreadcrumbItem>
+            <BreadcrumbSeparator />
+            <BreadcrumbItem>
+              <BreadcrumbLink href="/">Documentation</BreadcrumbLink>
+            </BreadcrumbItem>
+            <BreadcrumbSeparator />
+            <BreadcrumbItem>
+              <BreadcrumbPage>API Reference</BreadcrumbPage>
+            </BreadcrumbItem>
+          </BreadcrumbList>
+        </Breadcrumb>
+
+        <header className="mb-6 flex flex-col gap-3">
+          <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
+            <div className="max-w-3xl">
+              <div className="flex items-center gap-2 mb-1.5 font-mono text-[11px] text-muted-foreground">
+                <span className="font-semibold text-foreground uppercase tracking-wider">
+                  API Reference
+                </span>
+                <span aria-hidden="true">·</span>
+                <span>v1.0 Specification</span>
+              </div>
+              <h1 className="text-2xl font-bold tracking-tight text-foreground sm:text-3xl">
+                Source Pool API
+              </h1>
+              <p className="mt-2 text-xs leading-relaxed text-muted-foreground sm:text-sm text-pretty">
+                ArchivePool provides live, health-verified streaming credentials to approved clients.
+                Keys are free, instant, and authenticated as standard Bearer tokens. Explore endpoints,
+                lease lifecycles, and error policies below.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <Link
+                href="/signup"
+                className={cn(buttonVariants({ variant: "default", size: "sm" }), "h-8 text-xs font-medium")}
+              >
+                Get API Key
+              </Link>
+              <Link
+                href="/dashboard"
+                className={cn(buttonVariants({ variant: "outline", size: "sm" }), "h-8 text-xs font-mono")}
+              >
+                Dashboard
+              </Link>
+            </div>
+          </div>
         </header>
 
-        <section className="flex flex-col gap-6">
-          <div className="rounded-lg border border-border bg-card p-5">
-            <h2 className="text-lg font-semibold tracking-tight">1 · Request an API key</h2>
-            <ol className="mt-3 flex list-decimal flex-col gap-1.5 pl-5 text-sm leading-relaxed text-muted-foreground">
-              <li>
-                <Link href="/signup" className="font-medium text-primary hover:underline">
-                  Create an account
-                </Link>{" "}
-                (username + password — no email needed).
-              </li>
-              <li>
-                Open your{" "}
-                <Link href="/dashboard" className="font-medium text-primary hover:underline">
-                  dashboard
-                </Link>{" "}
-                and press “Request API key”.
-              </li>
-              <li>Copy the key when it is shown. It is displayed exactly once — we store only a hash.</li>
-            </ol>
-          </div>
+        {/* Accordion Documentation System */}
+        <DocsContent />
 
-          <div className="rounded-lg border border-border bg-card p-5">
-            <h2 className="text-lg font-semibold tracking-tight">2 · Use the key</h2>
-            <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-              Send it as a Bearer token (an <code className="font-mono text-xs">x-api-key</code>{" "}
-              header also works). Query-string keys are rejected by convention — they leak into logs.
-            </p>
-            <div className="mt-4 flex flex-col gap-3">
-              <Code>{`curl -H "Authorization: Bearer atp_YOUR_KEY" \\
-  https://archivepool.vercel.app/api/sources`}</Code>
-              <Code>{`# A healthy response (credentials arrive as ciphertext):
-{
-  "version": 1,
-  "encrypted": true,
-  "tidal": {
-    "apis":    [ { "id": 12, "premium": true, "status": "alive", ... } ],
-    "accounts": [ ... ]
-  },
-  "qobuz":   { "apis": [...], "accounts": [...] },
-  "deezer":  { "apis": [...], "accounts": [...] }
-}`}</Code>
-            </div>
+        {/* Footer */}
+        <footer className="mt-12 border-t border-border/80 pt-6 flex flex-wrap items-center justify-between gap-3 text-xs font-mono text-muted-foreground">
+          <div className="flex items-center gap-2">
+            <Terminal className="size-3.5 text-muted-foreground" />
+            <span>ArchivePool Public API v1.0.0</span>
           </div>
-
-          <div className="rounded-lg border border-border bg-card p-5">
-            <h2 className="text-lg font-semibold tracking-tight">3 · Endpoints</h2>
-            <div className="mt-3 flex flex-col gap-4">
-              {ENDPOINTS.map((e) => (
-                <div key={e.path} className="rounded-md border border-border bg-background/40 p-3.5">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="rounded-lg bg-primary/15 px-2 py-0.5 font-mono text-xs font-semibold text-primary">
-                      {e.method}
-                    </span>
-                    <code className="font-mono text-sm font-medium">{e.path}</code>
-                    <span className="ml-auto rounded-full bg-secondary px-2.5 py-0.5 font-mono text-[0.6rem] uppercase tracking-[0.12em] text-muted-foreground">
-                      {e.auth}
-                    </span>
-                  </div>
-                  <p className="mt-2 text-pretty text-sm leading-relaxed text-muted-foreground">{e.desc}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="rounded-lg border border-border bg-card p-5">
-            <h2 className="text-lg font-semibold tracking-tight">Rules of the pool</h2>
-            <ul className="mt-3 flex list-disc flex-col gap-1.5 pl-5 text-sm leading-relaxed text-muted-foreground">
-              <li>Keys are free, personal and revocable — don’t share them. Revoked keys stop working immediately.</li>
-              <li>Keep a maximum of 10 active keys per account.</li>
-              <li>The credential feed rotates: each call leases a few entries per service, not the whole pool.</li>
-              <li>Contributing a working source keeps the pool alive for everyone — you don’t need an account for that.</li>
-            </ul>
-            <Link
-              href="/submit"
-              className={cn(buttonVariants({ size: "lg" }), "mt-4 w-fit")}
-            >
-              Contribute a source
-            </Link>
-          </div>
-        </section>
+          <span>Cryptographically signed · Zero telemetry</span>
+        </footer>
       </main>
     </div>
   )
