@@ -792,6 +792,27 @@ async function tryRefreshTidalToken(
   }
 }
 
+/**
+ * Reads Tidal's /users/{id}/subscription body. A keyword scan cannot work here: every free account
+ * answers `"premiumAccess":false`, which contains "premium". Unreadable bodies stay optimistic so a
+ * format change cannot disable the whole pool.
+ */
+export function tidalSubscriptionIsPremium(body: string): boolean {
+  let json: { premiumAccess?: unknown; highestSoundQuality?: unknown; subscription?: { type?: unknown } }
+  try {
+    json = JSON.parse(body)
+  } catch {
+    return true
+  }
+  if (!json || typeof json !== "object") return true
+  if (typeof json.premiumAccess === "boolean") return json.premiumAccess
+  const type = typeof json.subscription?.type === "string" ? json.subscription.type.toUpperCase() : ""
+  if (type === "FREE") return false
+  const quality = typeof json.highestSoundQuality === "string" ? json.highestSoundQuality.toUpperCase() : ""
+  if (quality) return quality === "LOSSLESS" || quality.startsWith("HI_RES")
+  return true
+}
+
 async function checkTidalAccount(
   payload: Record<string, unknown>,
   entryFingerprint?: string,
@@ -871,10 +892,7 @@ async function checkTidalAccount(
           { headers: tidalHeaders(token) },
           deadline,
         )
-        if (sub.res.ok) {
-          const body = (await sub.res.text()).toLowerCase()
-          premium = /hi_res|hires|lossless|premium|hifi/.test(body)
-        }
+        if (sub.res.ok) premium = tidalSubscriptionIsPremium(await sub.res.text())
       }
     } catch {
       /* keep optimistic premium=true */

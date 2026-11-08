@@ -594,14 +594,38 @@ func checkTidalAccount(ctx context.Context, database *db.DB, payload map[string]
 			"/subscription?countryCode=" + url.QueryEscape(session.CountryCode)
 		if sub, err := httpx.Get(ctx, subURL, headers(token), timeoutMs); err == nil {
 			if text, err := httpx.ReadText(sub); err == nil {
-				premium = tidalPremiumRe.MatchString(strings.ToLower(text))
+				premium = tidalSubscriptionIsPremium(text)
 			}
 		}
 	}
 	return CheckResult{OK: true, Premium: premium, Status: classify(true, premium), LatencyMs: ms, Detail: "session ok"}
 }
 
-var tidalPremiumRe = regexp.MustCompile(`hi_res|hires|lossless|premium|hifi`)
+// tidalSubscriptionIsPremium reads Tidal's /users/{id}/subscription body. A keyword scan cannot work
+// here: every free account answers "premiumAccess":false, which contains "premium". Unreadable
+// bodies stay optimistic so a format change cannot disable the whole pool. Mirrors lib/health.ts.
+func tidalSubscriptionIsPremium(body string) bool {
+	var sub struct {
+		PremiumAccess       *bool  `json:"premiumAccess"`
+		HighestSoundQuality string `json:"highestSoundQuality"`
+		Subscription        struct {
+			Type string `json:"type"`
+		} `json:"subscription"`
+	}
+	if err := json.Unmarshal([]byte(body), &sub); err != nil {
+		return true
+	}
+	if sub.PremiumAccess != nil {
+		return *sub.PremiumAccess
+	}
+	if strings.EqualFold(sub.Subscription.Type, "FREE") {
+		return false
+	}
+	if q := strings.ToUpper(sub.HighestSoundQuality); q != "" {
+		return q == "LOSSLESS" || strings.HasPrefix(q, "HI_RES")
+	}
+	return true
+}
 
 func qobuzHeaders(appID, token string) map[string]string {
 	return map[string]string{
