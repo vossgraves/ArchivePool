@@ -13,6 +13,8 @@ export interface IngestResult {
   status: string
   premium: boolean
   detail: string
+  /** The check reached no verdict (rate limited / refresh cooling): nothing was persisted. */
+  skipped?: boolean
 }
 
 export interface IngestOptions {
@@ -60,6 +62,20 @@ export async function ingestSource(
   const fp = fingerprint(service, kind, payload)
   const label = maskLabel(service, kind, payload)
   const result: CheckResult = await runCheck(service, kind, payload, fp)
+
+  // A check that reached no verdict (a Tidal refresh cooling down, or the instance's own rate
+  // limiter answering 429) is not a rejection: nothing was learned about the source, so telling the
+  // contributor it failed would be wrong. Nothing is persisted and they can retry.
+  if (result.skipped) {
+    return {
+      ok: false,
+      saved: false,
+      status: result.status,
+      premium: result.premium,
+      detail: `could not be verified — not a verdict (${result.detail}); try again shortly`,
+      skipped: true,
+    }
+  }
 
   // Pool admission policy: only WORKING + PREMIUM sources are stored. A candidate that fails
   // its live check, or one that works but carries no premium/lossless entitlement, is rejected

@@ -12,6 +12,7 @@ import (
 	"archivepool/server/internal/cache"
 	"archivepool/server/internal/crypto"
 	"archivepool/server/internal/db"
+	"archivepool/server/internal/health"
 	"archivepool/server/internal/pool"
 )
 
@@ -125,7 +126,7 @@ func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	if v2 && readKey != "" {
 		clientKey = crypto.DeriveClientKey(readKey)
 	}
-	result, err := pool.LeaseAccounts(r.Context(), s.DB, clientKey, identity.KeyID, identity.Scope)
+	result, err := pool.LeaseAccounts(r.Context(), s.DB, clientKey, identity.KeyID, identity.Scope, s.leaseMaintenance())
 	if err != nil {
 		writeEmpty(w, http.StatusInternalServerError)
 		return
@@ -150,6 +151,17 @@ func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 		"cache-control":               "private, no-store",
 		"access-control-allow-origin": "*",
 	})
+}
+
+// leaseMaintenance supplies the pool's per-lease credential upkeep. Tidal access tokens live about
+// an hour while the sweep runs every six, so without a renewal the token a lease hands out is
+// routinely dead on arrival — the app then 401s on a credential the pool considers alive.
+func (s *Server) leaseMaintenance() *pool.AccountLeaseMaintenance {
+	return &pool.AccountLeaseMaintenance{
+		FreshTidalToken: func(ctx context.Context, fingerprint string, payload map[string]any) (map[string]any, bool) {
+			return health.FreshTidalCredential(ctx, s.DB, fingerprint, payload)
+		},
+	}
 }
 
 // handleSources serves the legacy combined pool feed.
@@ -190,7 +202,7 @@ func (s *Server) handleSources(w http.ResponseWriter, r *http.Request) {
 		clientKey = crypto.DeriveClientKey(readKey)
 	}
 
-	accounts, err := pool.LeaseAccounts(r.Context(), s.DB, clientKey, identity.KeyID, identity.Scope)
+	accounts, err := pool.LeaseAccounts(r.Context(), s.DB, clientKey, identity.KeyID, identity.Scope, s.leaseMaintenance())
 	if err != nil {
 		writeEmpty(w, http.StatusInternalServerError)
 		return

@@ -99,6 +99,22 @@ func NormalizeURL(raw string) string {
 	return strings.ToLower(strings.TrimRight(strings.TrimSpace(raw), "/"))
 }
 
+// IsBlockedInstanceURL is lib/sources.ts isBlockedInstanceUrl: hosts the upstream projects
+// themselves refuse to serve, so probing them only spends fetches on instances no client will use.
+//
+// `.squid.wtf` subdomains are dropped by both consumers of this pool's data:
+// `monochrome-music/monochrome` `js/storage.js` filters them out of every feed it reads
+// (`isBlockedInstance`) and ArchiveTune's `TidalPoolDiscovery` does the same on arrival. Bare
+// `squid.wtf` is NOT matched — only the blocked subdomains are (the bare domain is a Qobuz host in
+// SpotiFLAC's list).
+func IsBlockedInstanceURL(raw string) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return strings.HasSuffix(strings.ToLower(parsed.Hostname()), ".squid.wtf")
+}
+
 // Fingerprint is the deterministic dedupe key for a contribution. The basis selection is
 // transcribed from lib/sources.ts — a different basis here would re-insert every existing row.
 func Fingerprint(service Service, kind Kind, payload map[string]any) string {

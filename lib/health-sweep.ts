@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-import { eq, sql } from "drizzle-orm"
-import { atRestEncryptionEnabled, decryptAtRest, encryptAtRest } from "@/lib/crypto"
+import { and, eq, sql } from "drizzle-orm"
+import { atRestEncryptionEnabled, decryptAtRest, encryptAtRest, hasPlaintextSecret } from "@/lib/crypto"
 import { db } from "@/lib/db"
 import { accountEntries, healthLog, instanceEntries } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
@@ -30,12 +30,22 @@ const ATTEMPT_MAX = 12
 // STARTS a row when a full ceiling still fits the remaining request budget; a row that
 // hits the ceiling is an explicit no-verdict skip (starved) — consumed, so the cursor
 // still advances past it and it can never starve the queue.
+//
+// The full-ceiling admission is deliberate and is what scripts/sim-fetch-budget.mjs pins: with a
+// smaller reserve, several rows are admitted whose ceilings together exceed the budget, so the
+// request budget can cut every one of them mid-check and none reaches a verdict. Admitting only
+// what a whole ceiling fits keeps each started row finishable; rows then serialize and the
+// unspent share of a finished ceiling is what lets the next one start.
 const PER_ENTRY_FETCH_MAX = 24
 // A cursor before every real row in the stalest-first order: pending=1 is the leading
 // rank and ts=0/id=0 precedes any row (ids start at 1). Returned when a batch is cut
 // before its first row so the driver retries the same position instead of a null.
 const SWEEP_START_CURSOR = "1:0:0"
-const STALE_AFTER_MS = 6 * 60 * 60 * 1000
+// Deliberately shorter than the 6-hourly cron that drives the sweep: with a window equal to the
+// cadence, a row checked just under 6 h ago is "fresh" at the next run and is skipped again,
+// so every row was really verified only every other run (12 h) — which is also how long a Tidal
+// account could sit on an hour-dead access token. 5 h guarantees each run sweeps every row.
+const STALE_AFTER_MS = 5 * 60 * 60 * 1000
 
 type PoolEntry = {
   id: number
@@ -91,6 +101,10 @@ export interface HealthSweepSummary {
   checked: number
   /** Rows that got no verdict this call — fresh entries plus no-verdict skips. */
   skipped: number
+  /** Of `skipped`: rows inside the stale window. Deliberate — they were verified recently and
+   *  will be picked up again once they age out. Split out because "3 checked, 8 skipped" reads
+   *  like starvation otherwise. */
+  fresh: number
   /** Entries that burned through their per-entry fetch ceiling — consumed as a
    *  no-verdict skip (no dead verdict, no cooldown) so the cursor still advances. */
   starved: number
@@ -140,6 +154,22 @@ function afterCursor(e: PoolEntry, c: SweepCursor): boolean {
   return k.pending < c.pending || (k.pending === c.pending && (k.ts > c.ts || (k.ts === c.ts && k.id > c.id)))
 }
 
+/**
+ * Encrypt a row an older deployment stored in plaintext, before the check runs so a rotation the
+ * check persists is never overwritten afterwards. Already-encrypted rows are left alone and the
+ * write is conditional on the payload this run read: the lease path refreshes Tidal credentials
+ * while a sweep is in flight, and writing the sweep's snapshot back unconditionally would replace
+ * a rotated refresh token with the spent one.
+ */
+async function migrateAtRest(entry: Pick<PoolEntry, "id" | "kind" | "payload">) {
+  if (!hasPlaintextSecret(entry.payload)) return
+  const table = entry.kind === "account" ? accountEntries : instanceEntries
+  await db
+    .update(table)
+    .set({ payload: encryptAtRest(entry.payload) })
+    .where(and(eq(table.id, entry.id), sql`${table.payload} = ${JSON.stringify(entry.payload)}::jsonb`))
+}
+
 export async function runHealthSweep(
   options: HealthSweepOptions | boolean = {},
 ): Promise<HealthSweepSummary> {
@@ -186,6 +216,7 @@ export async function runHealthSweep(
   let starved = 0
   let disabled = 0
   let reenabled = 0
+  const fresh = allEntries.length - stale.length
 
   // Drain the keyset-filtered list until `limit` verdicts are written, `maxAttempts`
   // rows are consumed, the per-request fetch budget trips, or it ends. A row whose check
@@ -199,12 +230,7 @@ export async function runHealthSweep(
     runWithFetchCeiling(PER_ENTRY_FETCH_MAX, async () => {
     const table = entry.kind === "account" ? accountEntries : instanceEntries
     const plaintextPayload = decryptAtRest(entry.payload)
-    // Migrate rows written by older deployments before checking. A Tidal check may rotate its
-    // refresh token, so migrating afterwards could overwrite the newly issued credential.
-    await db
-      .update(table)
-      .set({ payload: encryptAtRest(plaintextPayload) })
-      .where(eq(table.id, entry.id))
+    await migrateAtRest(entry)
     const result = await runCheck(entry.service as Service, entry.kind as Kind, plaintextPayload, entry.fingerprint)
     // A verdict computed after the request's fetch budget tripped is unreliable: the
     // declining chargeFetch may have been flattened into a "dead" by a check's own
@@ -262,7 +288,7 @@ export async function runHealthSweep(
     })
 
   let budgetHit = false
-  let headroomHit = false
+  let headroomBlocked = false
   // Rows whose attempt RETURNED (verdict persisted or clean no-verdict skip) are the
   // consumed prefix; a row that hit the fetch budget throws and stays unconsumed, so
   // the emitted cursor ends before it — done:false and it leads the next batch.
@@ -286,7 +312,12 @@ export async function runHealthSweep(
       // and the head-room it returns can admit the next row (unlike a true budget
       // trip, which is terminal for every worker).
       if (fetchHeadroom() < PER_ENTRY_FETCH_MAX) {
-        headroomHit = true
+        // This worker stops; it does NOT follow that the batch ran out of budget. The worker above
+        // may still drain the queue — a sweep whose last row is taken by another worker used to log
+        // `budgetExhausted: true` and read like starvation (observed: checked=3, remaining=0,
+        // done=true, budgetExhausted=true). The flag is decided after the workers join, from what is
+        // actually left unconsumed.
+        headroomBlocked = true
         break
       }
       const idx = i++
@@ -334,6 +365,7 @@ export async function runHealthSweep(
   return {
     checked,
     skipped,
+    fresh,
     starved,
     disabled,
     reenabled,
@@ -341,7 +373,11 @@ export async function runHealthSweep(
     remaining,
     done: remaining === 0,
     cursor: nextCursor,
-    budgetExhausted: budgetHit || headroomHit,
+    // Budget exhaustion means "work was left over because the request ran out of fetches": a
+    // head-room block alone does not say that (another worker may have taken the last row), and the
+    // driver reads this flag to decide whether an unchanged cursor is a retry or a bug. Reporting it
+    // on a drained sweep made the log read like starvation when the queue was actually finished.
+    budgetExhausted: budgetHit || (headroomBlocked && remaining > 0),
   }
 }
 
@@ -368,12 +404,7 @@ export async function checkEntryById(id: number, deadline?: AbortSignal) {
 
   const table = entry.kind === "account" ? accountEntries : instanceEntries
   const plaintextPayload = decryptAtRest(entry.payload)
-  // Migrate before checking: a Tidal check can rotate its refresh token, so writing the
-  // migrated payload afterwards could clobber the newly issued credential.
-  await db
-    .update(table)
-    .set({ payload: encryptAtRest(plaintextPayload) })
-    .where(eq(table.id, entry.id))
+  await migrateAtRest(entry)
 
   const result = await runCheck(
     entry.service as Service,

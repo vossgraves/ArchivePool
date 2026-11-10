@@ -132,7 +132,9 @@ The full pool as the app consumes it. Leases **up to 3 entries per category**
 (`LEASE_PER_CATEGORY`) rather than the whole pool: selection is premium-first, then
 least-recently-leased, and the server stamps `last_leased_at` so rotation advances across
 requests. `apis` carries instance URLs for every service that has an instance tier: Tidal, Qobuz,
-Deezer and Amazon Music (its instances answer `GET {baseUrl}/health`; Deezer ones answer
+Deezer and Amazon Music (Tidal instances are verified by resolving a real lossless track on the
+API they speak, not by fetching their root — see `checkTidalInstance` in `lib/health.ts`; Amazon
+instances answer `GET {baseUrl}/health`; Deezer ones answer
 `GET {baseUrl}/health` too, with either an `{ok,user}` or an `{ok,accounts}` document). Apple Music
 is the only `apis` list that is always empty — it has no self-hosted instance tier.
 
@@ -236,8 +238,14 @@ Runs one health sweep and republishes the instance snapshot. Used by the GitHub 
 workflow in this repo every 6 hours.
 
 ```json
-{ "ok": true, "checked": 0, "skipped": 0, "starved": 0, "disabled": 0, "reenabled": 0, "remaining": 0, "done": true, "ranAt": "..." }
+{ "ok": true, "checked": 0, "skipped": 0, "fresh": 0, "starved": 0, "disabled": 0, "reenabled": 0, "remaining": 0, "done": true, "ranAt": "..." }
 ```
+
+A row counts as stale once its last check is older than **5 hours** — deliberately shorter
+than the 6-hourly cadence: with a window equal to it, a row checked just under 6 h ago is
+still "fresh" at the next run and gets skipped again, so every row was really verified only
+every other run (12 h), which is also how long a Tidal account could sit on an hour-dead
+access token.
 
 Optional `?batch=N&cursor=C` (N: 1–10, default 8) runs at most N real checks — and
 at most min(2N, 12) consumed rows — per call for hosts with a per-request budget
@@ -249,6 +257,11 @@ outbound-fetch budget (40 on Workers, unlimited elsewhere) can stop a call earli
 `budgetedFetch` charges every probe including each redirect hop — when `budgetExhausted`
 is true the cursor already ends before the cut-off row, so the same loop just resumes it
 with a fresh budget; a verdict computed after the budget tripped is never persisted.
+`budgetExhausted` means exactly that: rows were left over because the request ran out of
+fetch budget, not merely that one worker's admission check declined a row another worker
+then took (a drained sweep reports `false`, `skipped`, `fresh` and `starved` report how
+many rows got no verdict this call and why: `fresh` are inside the stale window, `starved`
+burned through their own ceiling).
 Each row additionally has a 24-fetch ceiling: a batch only starts a row when the
 request still holds a full ceiling, and a row that burns through it is reported as a
 consumed no-verdict skip under `starved` (no dead verdict, no cooldown) — the cursor
@@ -275,6 +288,20 @@ Batched mode for request-budgeted hosts:
   the sorted set converges even when its membership shifts mid-sweep.
 - `?publish=1` — republish the instance snapshot once every feed has drained (the workflows
   call it after their feed loops). No parameters: the whole sync still runs in one request.
+
+Every response also carries `deferred` — candidates whose probe reached no verdict because the
+instance's own rate limiter answered `429`; nothing is persisted and the next sweep re-probes
+them — and `results`, the first 12 per-candidate verdicts as
+`{ url, status, ok, premium, detail }`. The verdicts exist because the cron log is the only place
+a failing candidate's reason is visible: an all-fail run used to report "12 checked, 12 failed"
+with no way to tell a dead host from a rate-limited one. Candidates on hosts the consumers
+themselves block (`*.squid.wtf`) are dropped before any probe — see `isBlockedInstanceUrl`, which
+mirrors the filter in monochrome's own client and in ArchiveTune's instance discovery.
+
+Feed candidates are verified as Tidal instances: the probe resolves a real lossless track on
+`/trackManifests/` (falling back to `/track/?quality=LOSSLESS` on the older 2.x API), so a host
+whose root merely answers `{"version","Repo"}` is no longer mistaken for a healthy instance that
+cannot stream.
 
 ### `GET /api/cron/purge-dead`
 
@@ -432,16 +459,27 @@ Submissions are handled by the web UI (`/submit`) through a Next.js server actio
 validation server-side. The `/submit` page supports:
 
 - **Tidal accounts** — one-click **Sign in with Tidal** (OAuth device flow via
-  `/api/tidal/device/start` + `/api/tidal/device/poll`), or pasting a token manually.
+  `/api/tidal/device/start` + `/api/tidal/device/poll`), or pasting a token manually. The pool
+  renews these itself: every sweep checks the access token's own `exp` claim and refreshes it
+  before the session probe (Tidal access tokens live about an hour while the sweep runs every
+  six), and a credential that is about to be leased is refreshed on the spot rather than served
+  after it has already expired.
 - **Qobuz accounts** — username/password login proxied through `/api/qobuz/login`, or
   pasting an appId/token pair. Password sign-in **retains the credential** (encrypted at rest
   inside the pool record, and never returned by any endpoint) so the pool can re-login and
   renew the account itself: a Qobuz `user_auth_token` has no refresh endpoint, so a
   token-only contribution is a one-shot that dies the first time Qobuz invalidates it.
-  Token-only submissions have nothing to renew with and are checked as before.
+  Token-only submissions have nothing to renew with and are checked as before — their failure
+  detail says so, because no amount of retrying can renew them. Renewal tries the entry's own
+  `appId` first and the login-capable registration second: Qobuz has several public
+  registrations and only some accept `user/login`, so a rotation on Qobuz's side must not look
+  like a wrong password (a rejection is only a verdict when every pair says so).
 - **Deezer accounts** — pasting an `arl` cookie.
 - **API instances** — a `baseUrl` for Tidal/Qobuz restream instances, and for Deezer instances,
-  which are verified against their own `/health` document (see `/api/instances/deezer`).
+  which are verified against their own `/health` document (see `/api/instances/deezer`). A Tidal
+  restream is verified by resolving a real lossless track (`/trackManifests/`, falling back to
+  `/track/?quality=LOSSLESS`) rather than by fetching its root, which answers `{"version","Repo"}`
+  and says nothing about streaming.
 - **Amazon Music instances** — a `baseUrl` verified against that instance's own `/health`
   document, with optional instance auth material: the operator's `bypassToken`, or a pre-minted
   `turnstileJwt` plus its `turnstileJwtExpiresAt`.

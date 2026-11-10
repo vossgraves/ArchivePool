@@ -7,6 +7,34 @@ import "testing"
 // script). A fingerprint is the dedupe key of every contribution, so a mismatch here would either
 // duplicate every existing row or silently merge unrelated credentials.
 
+// TestIsBlockedInstanceURL mirrors lib/sources.ts isBlockedInstanceUrl. Blocking is deliberately
+// narrow: it removes only the hosts the upstream clients refuse to use, so probing a feed for them
+// would spend the pool's fetches on an instance nothing can consume — while a bare domain that is
+// itself a valid instance under another service must stay.
+func TestIsBlockedInstanceURL(t *testing.T) {
+	cases := []struct {
+		url  string
+		want bool
+	}{
+		{"https://triton.squid.wtf", true},
+		{"https://triton.squid.wtf/", true},
+		{"https://Triton.Squid.WTF", true},
+		{"https://squid.wtf", false},
+		{"https://tidal-api.binimum.org", false},
+		{"https://hifi-one.spotisaver.net", false},
+		{"https://tracks.monochrome.st", false},
+		// A host that merely contains the substring is not a subdomain of it.
+		{"https://notsquid.wtf.evil.example", false},
+		{"", false},
+		{"not a url", false},
+	}
+	for _, tc := range cases {
+		if got := IsBlockedInstanceURL(tc.url); got != tc.want {
+			t.Errorf("IsBlockedInstanceURL(%q) = %v, want %v", tc.url, got, tc.want)
+		}
+	}
+}
+
 func TestFingerprintMatchesTypeScript(t *testing.T) {
 	cases := []struct {
 		name     string

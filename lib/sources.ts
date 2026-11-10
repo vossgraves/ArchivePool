@@ -84,6 +84,24 @@ export function normalizeUrl(url: string): string {
   return trimmed.toLowerCase()
 }
 
+/**
+ * Hosts the upstream projects themselves refuse to serve, so pooling them only spends probes on
+ * hosts no client will use.
+ *
+ * `.squid.wtf` subdomains are dropped by both consumers of this pool's data:
+ * `monochrome-music/monochrome` `js/storage.js` filters them out of every feed it reads
+ * (`isBlockedInstance`) and ArchiveTune's `TidalPoolDiscovery` does the same on arrival
+ * ("like the official frontend, drop dead .squid.wtf hosts"). Bare `squid.wtf` is NOT matched —
+ * only the blocked subdomains are (the bare domain is a Qobuz host in SpotiFLAC's list).
+ */
+export function isBlockedInstanceUrl(url: string): boolean {
+  try {
+    return /\.squid\.wtf$/i.test(new URL(url).hostname)
+  } catch {
+    return false
+  }
+}
+
 /** A short, non-reversible label safe to show publicly. */
 export function maskLabel(service: Service, kind: Kind, payload: Record<string, unknown>): string {
   const svc = SERVICE_LABELS[service]

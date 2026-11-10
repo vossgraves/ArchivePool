@@ -54,17 +54,20 @@ func TestLiveLeaseQueries(t *testing.T) {
 	}
 
 	cases := []struct {
-		name  string
-		query string
-		args  []any
+		name string
+		// fingerprint marks the queries whose rows the lease path reads a fingerprint from, so the
+		// column is asserted present (Str yields "" for a missing column, hiding the slip).
+		fingerprint bool
+		query       string
+		args        []any
 	}{
-		{"accounts lease, keyed and scoped", accountsLeaseQuery(true, true), []any{keyID, LEASE_TTL_HOURS, "tidal"}},
-		{"accounts lease, keyed and global", accountsLeaseQuery(true, false), []any{keyID, LEASE_TTL_HOURS}},
-		{"accounts lease, anonymous and scoped", accountsLeaseQuery(false, true), []any{"tidal"}},
-		{"accounts lease, anonymous and global", accountsLeaseQuery(false, false), nil},
-		{"instances lease, scoped", instancesLeaseQuery(true), []any{"tidal"}},
-		{"instances lease, global", instancesLeaseQuery(false), nil},
-		{"replacement lease", replacementLeaseQuery, []any{"tidal", 0, keyID, LEASE_TTL_HOURS}},
+		{"accounts lease, keyed and scoped", true, accountsLeaseQuery(true, true), []any{keyID, LEASE_TTL_HOURS, "tidal"}},
+		{"accounts lease, keyed and global", true, accountsLeaseQuery(true, false), []any{keyID, LEASE_TTL_HOURS}},
+		{"accounts lease, anonymous and scoped", true, accountsLeaseQuery(false, true), []any{"tidal"}},
+		{"accounts lease, anonymous and global", true, accountsLeaseQuery(false, false), nil},
+		{"instances lease, scoped", false, instancesLeaseQuery(true), []any{"tidal"}},
+		{"instances lease, global", false, instancesLeaseQuery(false), nil},
+		{"replacement lease", false, replacementLeaseQuery, []any{"tidal", 0, keyID, LEASE_TTL_HOURS}},
 	}
 
 	for _, tc := range cases {
@@ -83,6 +86,11 @@ func TestLiveLeaseQueries(t *testing.T) {
 					_ = r.IntPtr("latency_ms")
 					_ = db.AnyISOPtr(r.Any("last_checked_at"))
 					_ = r.JSON("payload")
+					if tc.fingerprint {
+						if _, ok := r.StrOK("fingerprint"); !ok {
+							t.Errorf("%s: the accounts lease query must return the fingerprint column", tc.name)
+						}
+					}
 					scanned++
 				}
 				return errRollback
@@ -117,7 +125,7 @@ func TestLiveLeaseFunctionsWriteNothing(t *testing.T) {
 	}
 
 	if emptyAccountService != "" {
-		result, err := LeaseAccounts(ctx, database, nil, keyID, emptyAccountService)
+		result, err := LeaseAccounts(ctx, database, nil, keyID, emptyAccountService, nil)
 		if err != nil {
 			t.Fatalf("LeaseAccounts(%s): %v", emptyAccountService, err)
 		}

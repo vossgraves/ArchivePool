@@ -23,6 +23,11 @@ import { syncInstanceUrls, type InstanceSyncResult } from "@/lib/instance-sync"
  * its source) — there is no upstream JSON feed to poll. Add or remove hosts here as the project's
  * list changes.
  *
+ * The list is kept verbatim, but `*.squid.wtf` is filtered out of it by the shared sync core
+ * (`isBlockedInstanceUrl`): monochrome blocks those hosts in its own client and ArchiveTune drops
+ * them from whatever the pool serves, so probing `triton.squid.wtf` only ever spends fetches on an
+ * instance no consumer will use.
+ *
  * Provenance (re-checked 2026-09): the wiki page this list came from lives in the wiki's git
  * history — `spotbye/SpotiFLAC-Next.wiki` commit b97d862 deleted
  * `Available-HiFi-API-Instances.md`, whose table lists Spotisaver's `hifi-one`/`hifi-two` hosts.
@@ -82,10 +87,18 @@ export type SpotiFlacSyncResult = { tidal: InstanceSyncResult; qobuz: InstanceSy
  * Re-verified 2026-09: SpotiFLAC (desktop) transcribes no Deezer instance list and its wiki only
  * teaches users to obtain their own ARL, so there is no Deezer seed to add here.
  */
-export async function syncSpotiFlacInstances(): Promise<SpotiFlacSyncResult> {
+export async function syncSpotiFlacInstances(
+  opts: { detailLimit?: number } = {},
+): Promise<SpotiFlacSyncResult> {
   const [tidal, qobuz] = await Promise.all([
-    syncInstanceUrls("tidal", SPOTIFLAC_TIDAL_INSTANCES, { note: "spotiflac" }),
-    syncInstanceUrls("qobuz", SPOTIFLAC_QOBUZ_INSTANCES, { note: "spotiflac" }),
+    syncInstanceUrls("tidal", SPOTIFLAC_TIDAL_INSTANCES, {
+      note: "spotiflac",
+      detailLimit: opts.detailLimit,
+    }),
+    syncInstanceUrls("qobuz", SPOTIFLAC_QOBUZ_INSTANCES, {
+      note: "spotiflac",
+      detailLimit: opts.detailLimit,
+    }),
   ])
   return { tidal, qobuz }
 }
