@@ -58,6 +58,7 @@
   },
   "observability": {
     "enabled": true,
+    "head_sampling_rate": 0.1,
   },
   // Instance snapshots are only ever written under this one pathname; the bucket is
   // private — the worker reads it back through the binding, nothing is public.
