@@ -26,7 +26,7 @@ const GRACE_DAYS = 7
 const eligible = (table: typeof accountEntries | typeof instanceEntries) =>
   and(
     eq(table.removed, false),
-    or(eq(table.status, "dead"), eq(table.disabled, true)),
+    or(eq(table.status, "dead"), eq(table.disabled, true), sql`${table.expiresAt} < now() - interval '7 days'`),
     sql`${table.createdAt} < now() - make_interval(days => ${GRACE_DAYS})`,
     sql`not exists (
           select 1 from health_log hl

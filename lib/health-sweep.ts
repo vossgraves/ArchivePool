@@ -77,6 +77,37 @@ async function allPoolEntries(): Promise<PoolEntry[]> {
   ]
 }
 
+async function sweepBatch(force: boolean, cursor: SweepCursor | null) {
+  const stale = force ? sql`true` : sql`status = 'pending' or last_checked_at is null or last_checked_at < now() - interval '5 hours'`
+  const pending = sql`case when status = 'pending' then 1 else 0 end`
+  // Millisecond precision matches the public cursor, including Postgres timestamps with µs.
+  const ts = sql`floor(extract(epoch from coalesce(last_checked_at, 'epoch'::timestamptz)) * 1000)`
+  const after = cursor ? sql`(${pending} < ${cursor.pending} or (${pending} = ${cursor.pending} and
+    (${ts} > ${cursor.ts} or (${ts} = ${cursor.ts} and id > ${cursor.id}))))` : sql`true`
+  const result = await db.execute(sql`
+    with entries as materialized (
+      select id, service, label, payload, fingerprint, status, premium, detail, latency_ms,
+        consecutive_failures, check_count, ok_count, disabled, removed, last_checked_at, last_leased_at, created_at, 'account' as kind
+      from account_entries where not removed and (expires_at is null or expires_at > now())
+      union all
+      select id, service, label, payload, fingerprint, status, premium, detail, latency_ms,
+        consecutive_failures, check_count, ok_count, disabled, removed, last_checked_at, last_leased_at, created_at, 'api' as kind
+      from instance_entries where not removed and (expires_at is null or expires_at > now())
+    ), stale as materialized (select * from entries where ${stale}),
+    queue as materialized (select * from stale where ${after}),
+    batch as (select * from queue order by (status = 'pending') desc, last_checked_at asc nulls first, id limit 13)
+    select (select count(*) from entries)::int as total,
+      ((select count(*) from entries) - (select count(*) from stale))::int as fresh,
+      (select count(*) from queue)::int as remaining, row_to_json(batch) as entry
+    from (select 1) seed left join batch on true
+  `)
+  const rows = result.rows as { total: number; fresh: number; remaining: number; entry: Record<string, unknown> | null }[]
+  const entries = rows.filter((r) => r.entry).map((r) => Object.fromEntries(
+    Object.entries(r.entry!).map(([key, value]) => [key.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase()), value]),
+  ) as PoolEntry)
+  return { entries, total: rows[0]?.total ?? 0, fresh: rows[0]?.fresh ?? 0, remaining: rows[0]?.remaining ?? 0 }
+}
+
 export interface HealthSweepOptions {
   /** Re-check every non-removed entry, ignoring the stale window. */
   force?: boolean
@@ -178,7 +209,8 @@ export async function runHealthSweep(
     typeof options === "boolean" ? { force: options, cursor: undefined } : options
   const limit = cfBindings() ? Math.min(requestedLimit ?? 8, 10) : requestedLimit
   await ensureSchema()
-  const allEntries = await allPoolEntries()
+  const batch = limit == null ? null : await sweepBatch(force, parseCursor(rawCursor))
+  const allEntries = batch ? batch.entries : await allPoolEntries()
   if (allEntries.some((entry) => entry.kind === "account") && !atRestEncryptionEnabled()) {
     throw new Error("POOL_ENCRYPTION_KEY is required to process account credentials")
   }
@@ -218,7 +250,7 @@ export async function runHealthSweep(
   let starved = 0
   let disabled = 0
   let reenabled = 0
-  const fresh = allEntries.length - stale.length
+  const fresh = batch ? batch.fresh : allEntries.length - stale.length
 
   // Drain the keyset-filtered list until `limit` verdicts are written, `maxAttempts`
   // rows are consumed, the per-request fetch budget trips, or it ends. A row whose check
@@ -352,8 +384,8 @@ export async function runHealthSweep(
   let consumed = 0
   while (consumed < queue.length && finished[consumed]) consumed++
   const attempted = consumed
-  const remaining = queue.length - consumed
-  const skipped = allEntries.length - checked - remaining
+  const remaining = (batch?.remaining ?? queue.length) - consumed
+  const skipped = (batch?.total ?? allEntries.length) - checked - remaining
   // Zero rows consumed (a budget cut on the first row): echo the incoming cursor —
   // or the start sentinel on the first call — so a non-null position always comes back
   // and the driver retries it rather than aborting on a missing cursor.

@@ -11,7 +11,10 @@
     "build:cf": "CF_BUILD=1 opennextjs-cloudflare build",
     "preview:cf": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
     "deploy:cf": "CF_BUILD=1 opennextjs-cloudflare build && opennextjs-cloudflare deploy",
-    "cf-typegen": "wrangler types"
+    "cf-typegen": "wrangler types",
+    "typecheck": "tsc --noEmit --incremental false",
+    "test:limits": "node --test --test-concurrency=1 tests/*.cjs",
+    "measure:limits": "node tests/measure.cjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",

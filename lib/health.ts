@@ -1176,27 +1176,26 @@ async function healQobuzAppSecret(
   staleSecret: string,
   probeToken: string,
   deadline?: AbortSignal,
+  entryFingerprint?: string,
 ): Promise<string | null> {
   const fresh = await scrapeQobuzAppSecret(appId, deadline)
   if (!fresh || fresh === staleSecret) return null
   const probe = await checkQobuzAppSecret(appId, fresh, probeToken, deadline)
   if (!probe.ok) return null
 
-  // The fingerprint derives from the user token, not the secret, so this does not fork dedupe.
-  const rows = await db.select().from(accountEntries).where(eq(accountEntries.service, "qobuz"))
-  for (const row of rows) {
-    let plain: Record<string, unknown>
-    try {
-      plain = decryptAtRest(row.payload)
-    } catch {
-      continue
+  if (entryFingerprint) {
+    const [row] = await db.select({ payload: accountEntries.payload }).from(accountEntries)
+      .where(eq(accountEntries.fingerprint, entryFingerprint)).limit(1)
+    if (row) {
+      const plain = decryptAtRest(row.payload)
+      if (String(plain.appId ?? "").trim() === appId && String(plain.appSecret ?? "").trim() === staleSecret) {
+        const encrypted = encryptAtRest({ appSecret: fresh }).appSecret
+        await db.update(accountEntries).set({
+          payload: sql`jsonb_set(${accountEntries.payload}, '{appSecret}', ${JSON.stringify(encrypted)}::jsonb)`,
+        }).where(and(eq(accountEntries.fingerprint, entryFingerprint),
+          sql`${accountEntries.payload}->>'appSecret' = ${String(row.payload.appSecret ?? "")}`))
+      }
     }
-    if (String(plain.appId ?? "").trim() !== appId || String(plain.appSecret ?? "").trim() !== staleSecret) continue
-    await db
-      .update(accountEntries)
-      .set({ payload: encryptAtRest({ ...plain, appSecret: fresh }) })
-      .where(eq(accountEntries.id, row.id))
-      .catch(() => { /* best-effort — a single row must not abort the heal */ })
   }
   return fresh
 }
@@ -1354,8 +1353,9 @@ async function checkQobuzAccount(
     if (!secretCheck.ok) {
       // A failed signature on a token that just authenticated is almost always a rotated
       // app_secret, not a bad account.
-      const healed = await healQobuzAppSecret(appId, appSecret, token, deadline).catch(() => null)
+      const healed = await healQobuzAppSecret(appId, appSecret, token, deadline, entryFingerprint).catch(() => null)
       if (healed) {
+        payload.appSecret = healed
         const retest = await checkQobuzAppSecret(appId, healed, token, deadline)
         if (retest.ok) {
           return {
