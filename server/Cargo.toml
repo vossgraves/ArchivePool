@@ -7,7 +7,7 @@ license = "GPL-3.0-or-later"
 
 [dependencies]
 aes-gcm = "0.10"
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 futures-util = "0.3"

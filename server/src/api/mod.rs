@@ -9,7 +9,9 @@ use axum::{
 use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 pub mod auth;
+pub mod feeds;
 pub mod keys;
+pub mod submit;
 
 pub struct Context {
     pub headers: HeaderMap,
@@ -30,12 +32,21 @@ impl Context {
             .unwrap_or("")
     }
     pub fn ip(&self) -> String {
-        let f = self.header("x-forwarded-for");
-        if !f.is_empty() {
-            f.split(',').next().unwrap_or("").trim().to_owned()
+        let forwarded = self
+            .header("x-forwarded-for")
+            .split(',')
+            .next()
+            .unwrap_or("")
+            .trim();
+        let real = self.header("x-real-ip").trim();
+        let ip = if !forwarded.is_empty() {
+            forwarded
+        } else if !real.is_empty() {
+            real
         } else {
-            self.header("x-real-ip").to_owned()
-        }
+            "unknown"
+        };
+        ip.chars().take(64).collect()
     }
     pub fn ua(&self) -> String {
         self.header("user-agent").chars().take(256).collect()
@@ -308,6 +319,16 @@ async fn dispatch(app: &Arc<App>, ctx: &Context, route: &str) -> db::Result<Resp
         | "/api/admin/requests/{id}"
         | "/api/admin/users"
         | "/api/admin/audit" => keys::admin_route(app, ctx, route).await,
+        "/api/accounts"
+        | "/api/sources"
+        | "/api/status"
+        | "/api/instances/{service}"
+        | "/api/discovery/tidal"
+        | "/api/discovery/qobuz" => feeds::route(app, ctx, route).await,
+        "/api/submit" => submit::route(app, ctx).await,
+        "/api/tidal/device/start" | "/api/tidal/device/poll" | "/api/qobuz/login" => {
+            submit::credentials(app, ctx, route).await
+        }
         _ => Ok(empty(501)),
     }
 }
