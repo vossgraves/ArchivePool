@@ -963,9 +963,13 @@ func checkTidalAccount(ctx context.Context, database tokenStore, payload map[str
 		subURL := "https://api.tidal.com/v1/users/" + strconv.FormatInt(session.UserID, 10) +
 			"/subscription?countryCode=" + url.QueryEscape(session.CountryCode)
 		if sub, err := httpx.Get(ctx, subURL, headers(token), timeoutMs); err == nil {
-			if text, err := httpx.ReadText(sub); err == nil {
-				premium = tidalSubscriptionIsPremium(text)
+			// Only parse 2xx responses; treat error pages as missing entitlement info and stay optimistic
+			if sub.StatusCode >= 200 && sub.StatusCode < 300 {
+				if text, err := httpx.ReadText(sub); err == nil {
+					premium = tidalSubscriptionIsPremium(text)
+				}
 			}
+			sub.Body.Close()
 		}
 	}
 	return CheckResult{OK: true, Premium: premium, Status: classify(true, premium), LatencyMs: ms, Detail: "session ok"}
@@ -975,26 +979,30 @@ func checkTidalAccount(ctx context.Context, database tokenStore, payload map[str
 // here: every free account answers "premiumAccess":false, which contains "premium". Unreadable
 // bodies stay optimistic so a format change cannot disable the whole pool. Mirrors lib/health.ts.
 func tidalSubscriptionIsPremium(body string) bool {
-	var sub struct {
-		PremiumAccess       *bool  `json:"premiumAccess"`
-		HighestSoundQuality string `json:"highestSoundQuality"`
-		Subscription        struct {
-			Type string `json:"type"`
-		} `json:"subscription"`
+	var raw map[string]interface{}
+	if err := json.Unmarshal([]byte(body), &raw); err != nil {
+		return true // JSON parse error: stay optimistic
 	}
-	if err := json.Unmarshal([]byte(body), &sub); err != nil {
-		return true
+
+	// premiumAccess as boolean wins if present
+	if v, ok := raw["premiumAccess"].(bool); ok {
+		return v
 	}
-	if sub.PremiumAccess != nil {
-		return *sub.PremiumAccess
+
+	// subscription.type must be exactly "FREE" (case-insensitive comparison)
+	if sub, ok := raw["subscription"].(map[string]interface{}); ok {
+		if v, ok := sub["type"].(string); ok && strings.EqualFold(v, "FREE") {
+			return false
+		}
 	}
-	if strings.EqualFold(sub.Subscription.Type, "FREE") {
-		return false
-	}
-	if q := strings.ToUpper(sub.HighestSoundQuality); q != "" {
+
+	// highestSoundQuality: only LOSSLESS or HI_RES* count as premium
+	if v, ok := raw["highestSoundQuality"].(string); ok && v != "" {
+		q := strings.ToUpper(v)
 		return q == "LOSSLESS" || strings.HasPrefix(q, "HI_RES")
 	}
-	return true
+
+	return true // Default to optimistic
 }
 
 func qobuzHeaders(appID, token string) map[string]string {
