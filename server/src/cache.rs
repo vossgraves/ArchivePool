@@ -53,6 +53,8 @@ impl Cache {
 pub struct RateLimit {
     buckets: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
 }
+#[cfg(test)]
+mod tests;
 impl RateLimit {
     pub async fn check(&self, key: &str, limit: usize, window: Duration) -> Option<u64> {
         let now = Instant::now();

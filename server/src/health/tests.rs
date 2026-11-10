@@ -284,3 +284,87 @@ async fn refresh_keeps_or_rotates_full_payload() {
         assert_eq!(p["countryCode"], "US");
     }
 }
+#[tokio::test]
+async fn early_renewal_then_rejected_session_has_a_dead_verdict() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let n = Arc::new(AtomicUsize::new(0));
+    let count = n.clone();
+    let mock = Mock::new(move |r| {
+        let (s, b) = if r.path == "/token" && count.fetch_add(1, Ordering::SeqCst) == 0 {
+            (200, r#"{"access_token":"fresh","refresh_token":"rotated"}"#)
+        } else if r.path == "/token" {
+            (429, r#"{"error":"abuse_detected"}"#)
+        } else {
+            (401, "{}")
+        };
+        Response::builder().status(s).body(Body::from(b)).unwrap()
+    })
+    .await;
+    let expired = format!("e30.{}.signature", URL_SAFE_NO_PAD.encode(br#"{"exp":1}"#));
+    let result = tidal_account(
+        &mock.app(),
+        &json!({"token":expired,"refreshToken":"spent"}),
+        "",
+    )
+    .await;
+    assert!(!result.skipped);
+    assert!(!result.ok);
+    assert_eq!(result.status, "dead");
+}
+#[tokio::test]
+async fn apple_checks_entitlement_and_playable_flavors() {
+    let dev = format!(
+        "eyJhbGciOiJFUzI1NiJ9.{}.signature123456",
+        URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&json!({"iss":"AMPWebPlay","exp":Utc::now().timestamp()+3600}))
+                .unwrap()
+        )
+    );
+    for (active, body, status) in [
+        (
+            true,
+            r#"{"songList":[{"assets":[{"flavor":"28:ctrp256","URL":"https://example.invalid/stream"}]}]}"#,
+            "preview",
+        ),
+        (
+            true,
+            r#"{"songList":[{"assets":[{"flavor":"28:ctrp1411","URL":"https://example.invalid/stream"}]}]}"#,
+            "alive",
+        ),
+        (
+            true,
+            r#"{"failureType":2002,"customerMessage":"session has ended"}"#,
+            "dead",
+        ),
+        (false, "{}", "preview"),
+    ] {
+        let token = dev.clone();
+        let mock = Mock::new(move |r| {
+            let body = match r.path.as_str() {
+                "/" => "<script src=\"assets/index-test.js\"></script>".to_owned(),
+                "/assets/index-test.js" => token.clone(),
+                "/v1/me/account" => format!(
+                    r#"{{"meta":{{"subscription":{{"active":{active},"storefront":"us"}}}}}}"#
+                ),
+                "/playback" => {
+                    assert_eq!(r.headers["media-user-token"], "0.local-token");
+                    let p: Value = serde_json::from_slice(&r.body).unwrap();
+                    assert!(p["salableAdamId"].is_string());
+                    body.to_owned()
+                }
+                _ => panic!("unexpected local probe"),
+            };
+            Response::builder()
+                .status(200)
+                .body(Body::from(body))
+                .unwrap()
+        })
+        .await;
+        assert_eq!(
+            apple_account(&mock.app(), &json!({"token":"0.local-token"}))
+                .await
+                .status,
+            status
+        );
+    }
+}

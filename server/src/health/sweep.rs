@@ -109,21 +109,56 @@ pub async fn run_sweep(
             json!({"checked":0,"skipped":0,"fresh":0,"starved":0,"disabled":0,"reenabled":0,"attempted":0,"remaining":0,"done":true,"cursor":null,"budgetExhausted":false,"locked":true}),
         );
     }
-    let result=async{
-        let entries=rows.into_iter().filter_map(|r|r["entry"].as_object().map(|_|r["entry"].clone())).collect::<Vec<_>>();
-        if entries.iter().any(|r|r["kind"]=="account")&&app.config.encryption_key.is_none(){return Err(db::Error);}
-        let now=Utc::now().timestamp_millis();let mut stale=entries.iter().filter(|e|{let k=cursor_key(e);force||k.0==1||k.1==0||now-k.1>18000000}).cloned().collect::<Vec<_>>();let fresh=entries.len()-stale.len();
-        stale.sort_by_key(|e|{let k=cursor_key(e);(-k.0,k.1,k.2)});
-        let parsed=cursor.and_then(|s|{let p:Vec<_>=s.split(':').collect();if p.len()!=3{return None;}let k=(p[0].parse().ok()?,p[1].parse().ok()?,p[2].parse().ok()?);if ![0,1].contains(&k.0){return None;}Some(k)});
-        if let Some(cursor)=parsed{stale.retain(|e|after_cursor(cursor_key(e),cursor));}
-        let queue_len=stale.len();let cap=limit.map(|n|(n*2).min(12)).unwrap_or(queue_len);let mut attempted=0;let mut checked=0;let mut skipped=fresh;let mut disabled=0;let mut reenabled=0;let mut next_cursor=cursor.unwrap_or("1:0:0").to_owned();
-        if let Some(limit)=limit {
-            for entry in stale.into_iter().take(cap){if checked>=limit{break;}let r=check_and_persist(app,&entry).await?;attempted+=1;let k=cursor_key(&entry);next_cursor=format!("{}:{}:{}",k.0,k.1,k.2);if r["skipped"]==true{skipped+=1;continue;}checked+=1;if !boolean(&entry,"disabled")&&r["disabled"]==true{disabled+=1;}if boolean(&entry,"disabled")&&r["disabled"]==false{reenabled+=1;}}
-        }else{
-            let results=stream::iter(stale.into_iter().map(|entry|async move{let r=check_and_persist(app,&entry).await; (entry,r)})).buffer_unordered(6).collect::<Vec<_>>().await;
-            for(entry,r)in results{let r=r?;attempted+=1;if r["skipped"]==true{skipped+=1;}else{checked+=1;if !boolean(&entry,"disabled")&&r["disabled"]==true{disabled+=1;}if boolean(&entry,"disabled")&&r["disabled"]==false{reenabled+=1;}}}
+    let result = async {
+        let entries = rows.into_iter().filter_map(|r| r["entry"].as_object().map(|_| r["entry"].clone())).collect::<Vec<_>>();
+        if entries.iter().any(|r| r["kind"] == "account") && app.config.encryption_key.is_none() {
+            return Err(db::Error);
         }
-        let remaining=queue_len-attempted;
+        let now = Utc::now().timestamp_millis();
+        let mut stale = entries.iter().filter(|e| {
+            let k = cursor_key(e);
+            force || k.0 == 1 || k.1 == 0 || now - k.1 > 18_000_000
+        }).cloned().collect::<Vec<_>>();
+        let fresh = entries.len() - stale.len();
+        stale.sort_by_key(|e| { let k = cursor_key(e); (-k.0, k.1, k.2) });
+        let parsed = cursor.and_then(|s| {
+            let p = s.split(':').collect::<Vec<_>>();
+            if p.len() != 3 || !p.iter().all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())) { return None; }
+            let k = (p[0].parse().ok()?, p[1].parse().ok()?, p[2].parse().ok()?);
+            [0, 1].contains(&k.0).then_some(k)
+        });
+        if let Some(cursor) = parsed { stale.retain(|e| after_cursor(cursor_key(e), cursor)); }
+        let queue_len = stale.len();
+        let cap = limit.map(|n| n.saturating_mul(2).min(12)).unwrap_or(queue_len);
+        let workers = if limit.is_some() { 3 } else { 6 };
+        let mut checked = 0;
+        let mut disabled = 0;
+        let mut reenabled = 0;
+        let mut attempted = 0;
+        let mut next_cursor = cursor.unwrap_or("1:0:0").to_owned();
+        let mut queue = stale.iter().cloned();
+        let mut active = futures_util::stream::FuturesUnordered::new();
+        let check = |entry: Value| async move {
+            let result = check_and_persist(app, &entry).await;
+            (entry, result)
+        };
+        loop {
+            while active.len() < workers && attempted < cap && limit.is_none_or(|n| checked + active.len() < n) {
+                let Some(entry) = queue.next() else { break; };
+                active.push(check(entry));
+                attempted += 1;
+            }
+            let Some((entry, result)) = active.next().await else { break; };
+            let result = result?;
+            if result["skipped"] != true {
+                checked += 1;
+                if !boolean(&entry, "disabled") && result["disabled"] == true { disabled += 1; }
+                if boolean(&entry, "disabled") && result["disabled"] == false { reenabled += 1; }
+            }
+        }
+        if attempted > 0 { let k = cursor_key(&stale[attempted - 1]); next_cursor = format!("{}:{}:{}", k.0, k.1, k.2); }
+        let remaining = queue_len - attempted;
+        let skipped = entries.len() - checked - remaining;
         Ok(json!({"checked":checked,"skipped":skipped,"fresh":fresh,"starved":0,"disabled":disabled,"reenabled":reenabled,"attempted":attempted,"remaining":remaining,"done":remaining==0,"cursor":limit.map(|_|next_cursor),"budgetExhausted":false}))
     }.await;
     let _=app.db.exec("with pruned as (delete from health_log where checked_at<now()-interval '30 days') delete from job_locks where name='health-sweep' and holder=$1",vec![holder.into()]).await;

@@ -48,8 +48,8 @@ impl Db {
                     .max_connections(max.clamp(1, 32))
                     .min_connections(0)
                     .acquire_timeout(Duration::from_secs(10))
-                    .idle_timeout(Duration::from_secs(10))
-                    .max_lifetime(Duration::from_secs(1800))
+                    .idle_timeout(Duration::from_secs(5))
+                    .max_lifetime(Duration::from_secs(60))
                     .test_before_acquire(false)
                     .connect_lazy_with(options),
             )

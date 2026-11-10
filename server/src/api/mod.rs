@@ -8,10 +8,18 @@ use axum::{
 };
 use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Arc, time::Duration};
+pub mod admin;
 pub mod auth;
+pub mod cron;
+#[cfg(test)]
+mod database_tests;
 pub mod feeds;
 pub mod keys;
+pub mod recovery;
+pub mod report;
 pub mod submit;
+#[cfg(test)]
+mod tests;
 
 pub struct Context {
     pub headers: HeaderMap,
@@ -115,7 +123,11 @@ pub fn with_headers(mut res: Response, headers: &[(&str, &str)]) -> Response {
             axum::http::HeaderName::from_bytes(k.as_bytes()),
             HeaderValue::from_str(v),
         ) {
-            res.headers_mut().insert(k, v);
+            if k == "set-cookie" {
+                res.headers_mut().append(k, v);
+            } else {
+                res.headers_mut().insert(k, v);
+            }
         }
     }
     res
@@ -329,6 +341,13 @@ async fn dispatch(app: &Arc<App>, ctx: &Context, route: &str) -> db::Result<Resp
         "/api/tidal/device/start" | "/api/tidal/device/poll" | "/api/qobuz/login" => {
             submit::credentials(app, ctx, route).await
         }
-        _ => Ok(empty(501)),
+        "/api/report" => report::route(app, ctx).await,
+        "/api/auth/claim-legacy" | "/api/admin/claims" | "/api/admin/claims/{id}" => {
+            recovery::route(app, ctx, route).await
+        }
+        "/api/cron/health" | "/api/cron/monochrome" | "/api/cron/purge-dead" => {
+            cron::route(app, ctx, route).await
+        }
+        _ => admin::route(app, ctx, route).await,
     }
 }

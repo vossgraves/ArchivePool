@@ -240,9 +240,18 @@ pub async fn password_route(app: &Arc<App>, ctx: &Context, route: &str) -> db::R
                 )));
             }
         }
-        let hash = tokio::task::spawn_blocking(move || crypto::hash_password(&password))
+        let slot = app
+            .password_slots
+            .clone()
+            .acquire_owned()
             .await
-            .map_err(|_| db::Error)??;
+            .map_err(|_| db::Error)?;
+        let hash = tokio::task::spawn_blocking(move || {
+            let _slot = slot;
+            crypto::hash_password(&password)
+        })
+        .await
+        .map_err(|_| db::Error)??;
         let row=app.db.one("insert into users(username,password_hash,created_ip,created_ua,last_login_ip,last_login_ua) values($1,$2,$3,$4,$3,$4) returning id,username",vec![username.into(),hash.into(),ctx.ip().into(),ctx.ua().into()]).await?.ok_or(db::Error)?;
         return set_session(
             app,
@@ -255,9 +264,18 @@ pub async fn password_route(app: &Arc<App>, ctx: &Context, route: &str) -> db::R
         return Ok(error(401, "invalid_credentials"));
     };
     let hash = string(&user, "password_hash");
-    let valid = tokio::task::spawn_blocking(move || crypto::verify_password(&password, &hash))
+    let slot = app
+        .password_slots
+        .clone()
+        .acquire_owned()
         .await
         .map_err(|_| db::Error)?;
+    let valid = tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        crypto::verify_password(&password, &hash)
+    })
+    .await
+    .map_err(|_| db::Error)?;
     if !valid {
         return Ok(error(401, "invalid_credentials"));
     }
@@ -406,7 +424,7 @@ pub async fn github_route(app: &Arc<App>, ctx: &Context, route: &str) -> db::Res
     let response = app
         .outbound
         .form(
-            "https://github.com/login/oauth/access_token",
+            &app.endpoints.github_token,
             crate::httpx::headers(&[("accept", "application/json")]),
             &[
                 ("client_id", app.config.github_client_id.clone()),
@@ -427,7 +445,7 @@ pub async fn github_route(app: &Arc<App>, ctx: &Context, route: &str) -> db::Res
     let Ok(res) = app
         .outbound
         .get(
-            "https://api.github.com/user",
+            &app.endpoints.github_user,
             crate::httpx::headers(&[
                 ("authorization", &format!("Bearer {token}")),
                 ("accept", "application/vnd.github+json"),
@@ -437,6 +455,9 @@ pub async fn github_route(app: &Arc<App>, ctx: &Context, route: &str) -> db::Res
     else {
         return Ok(fail("github_exchange"));
     };
+    if !res.ok() {
+        return Ok(fail("github_exchange"));
+    }
     let identity = res.json();
     let Some(github_id) = identity["id"].as_i64().filter(|id| *id > 0) else {
         return Ok(fail("github_exchange"));

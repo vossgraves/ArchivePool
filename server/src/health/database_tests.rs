@@ -188,6 +188,42 @@ async fn database_health_lease_and_renewal_regressions() {
             .unwrap()
             .is_some()
     );
+    let row=app.db.one("insert into account_entries(service,label,payload,fingerprint,status,premium) values('tidal','Race',$1,'verdict-race','alive',true) returning id",vec![crypto::encrypt_at_rest(&json!({"token":"old-access","refreshToken":"spent"}),app.config.encryption_key.as_ref()).unwrap().into()]).await.unwrap().unwrap();
+    let id = integer(&row, "id");
+    let db = app.db.clone();
+    let replacement = crypto::encrypt_at_rest(
+        &json!({"token":"new-access","refreshToken":"rotated"}),
+        app.config.encryption_key.as_ref(),
+    )
+    .unwrap();
+    let replaced = replacement.clone();
+    let racing = Mock::new_async(move |r| {
+        let db = db.clone();
+        let replaced = replaced.clone();
+        async move {
+            assert_eq!(r.path, "/sessions");
+            db.exec(
+                "update account_entries set payload=$1 where id=$2",
+                vec![replaced.into(), id.into()],
+            )
+            .await
+            .unwrap();
+            Response::builder()
+                .status(403)
+                .body(Body::from("{}"))
+                .unwrap()
+        }
+    })
+    .await;
+    app.endpoints = racing.app().endpoints;
+    assert_eq!(
+        sweep::check_entry(&app, id).await.unwrap().unwrap()["skipped"],
+        true
+    );
+    let row = sweep::find_entry(&app, id).await.unwrap().unwrap();
+    assert_eq!(row["payload"], replacement);
+    assert_eq!(row["status"], "alive");
+    assert_eq!(row["check_count"], 0);
     app.db
         .exec("update account_entries set removed=true", vec![])
         .await

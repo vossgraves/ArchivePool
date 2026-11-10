@@ -15,6 +15,7 @@ pub struct App {
     pub rates: cache::RateLimit,
     pub outbound: httpx::Outbound,
     pub endpoints: health::Endpoints,
+    pub password_slots: std::sync::Arc<tokio::sync::Semaphore>,
 }
 impl App {
     pub fn new(config: config::Config) -> db::Result<Self> {
@@ -26,6 +27,7 @@ impl App {
             rates: cache::RateLimit::default(),
             outbound: httpx::Outbound::new().map_err(|_| db::Error)?,
             endpoints: health::Endpoints::default(),
+            password_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
         })
     }
 }

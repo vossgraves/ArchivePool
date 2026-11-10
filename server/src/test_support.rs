@@ -52,8 +52,7 @@ impl Mock {
                         .to_vec(),
                 };
                 seen.lock().unwrap().push(r.clone());
-                let answer = f(r).await;
-                answer
+                f(r).await
             }
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -99,6 +98,8 @@ impl Mock {
             apple_api: self.url.clone(),
             apple_playback: format!("{}/playback", self.url),
             monochrome: format!("{}/instances.json", self.url),
+            github_token: format!("{}/github/token", self.url),
+            github_user: format!("{}/github/user", self.url),
         };
         app
     }
@@ -110,8 +111,22 @@ impl Mock {
             "Database tests require local Postgres"
         );
         let mut app = self.app();
-        app.db = crate::db::Db::open(&raw, 2).unwrap();
-        app.db.ensure().await.unwrap();
+        let admin = crate::db::Db::open(&raw, 1).unwrap();
+        let name = format!("ap_test_{}", crate::crypto::random_hex(6));
+        sqlx::query(&format!("create database {name}"))
+            .persistent(false)
+            .execute(admin.pool().unwrap())
+            .await
+            .unwrap();
+        admin.close().await;
+        let mut local = url;
+        local.set_path(&name);
+        app.db = crate::db::Db::open(local.as_str(), 2).unwrap();
+        let other = crate::db::Db::open(local.as_str(), 2).unwrap();
+        let (first, second) = tokio::join!(app.db.ensure(), other.ensure());
+        first.unwrap();
+        second.unwrap();
+        other.close().await;
         Some(app)
     }
 }

@@ -310,7 +310,7 @@ pub async fn credentials(app: &Arc<App>, ctx: &Context, route: &str) -> db::Resu
             }
             return Ok(json_response(200, out));
         }
-        let mut payload = json!({"token":login.token,"appId":health::QOBUZ_LOGIN_ID,"appSecret":secret,"note":"Added via Qobuz sign-in"});
+        let mut payload = json!({"token":login.token,"appId":health::QOBUZ_LOGIN_ID,"appSecret":secret,"password":password,"note":"Added via Qobuz sign-in"});
         if !login.username.is_empty() {
             payload["username"] = json!(login.username);
         }
@@ -319,7 +319,12 @@ pub async fn credentials(app: &Arc<App>, ctx: &Context, route: &str) -> db::Resu
         }
         ("qobuz", payload)
     };
-    match sweep::ingest(app, service, "account", &payload, None, None).await {
+    let contributor = auth::session(app, ctx)
+        .await
+        .ok()
+        .flatten()
+        .map(|r| string(&r, "username"));
+    match sweep::ingest(app, service, "account", &payload, contributor, None).await {
         Ok(r) => Ok(json_response(
             200,
             json!({"state":"authorized","saved":r["saved"],"ok":r["ok"],"status":r["status"],"premium":r["premium"],"detail":r["detail"]}),

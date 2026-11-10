@@ -26,6 +26,7 @@ mod tests;
 pub const TIDAL_CLIENT_SECRET: &str = "1Nn9AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg=";
 pub const QOBUZ_LOGIN_ID: &str = "712109809";
 pub const QOBUZ_LOGIN_SECRET: &str = "589be88e4538daea11f509d29e4a23b1";
+pub mod sync;
 static HIRES: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(
         r#"hi_res|hires|lossless|flac|24bit|"quality"\s*:\s*"(lossless|hi_res|hi-res)"#,
@@ -49,6 +50,8 @@ pub struct Endpoints {
     pub apple_api: String,
     pub apple_playback: String,
     pub monochrome: String,
+    pub github_token: String,
+    pub github_user: String,
 }
 impl Default for Endpoints {
     fn default() -> Self {
@@ -66,6 +69,8 @@ impl Default for Endpoints {
             apple_playback: "https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/webPlayback"
                 .into(),
             monochrome: "https://monochrome.st/instances.json".into(),
+            github_token: "https://github.com/login/oauth/access_token".into(),
+            github_user: "https://api.github.com/user".into(),
         }
     }
 }
@@ -168,8 +173,16 @@ pub fn manifest_presentation(p: &Value) -> Option<String> {
     } else {
         &p["data"]["attributes"]
     };
-    let track = string(attr, "trackPresentation").trim().to_owned();
-    let asset = string(attr, "assetPresentation").trim().to_owned();
+    let track = attr["trackPresentation"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    let asset = attr["assetPresentation"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_owned();
     if !track.is_empty() {
         Some(track)
     } else if !asset.is_empty() {
@@ -198,7 +211,7 @@ fn query_url(base: &str, path: &str, values: &[(&str, String)]) -> String {
     }
     url.into()
 }
-async fn get(app: &App, url: &str, h: HeaderMap) -> Result<(Response, i32), Check> {
+async fn get(app: &App, url: &str, h: HeaderMap) -> Result<(Response, i32), Box<Check>> {
     let start = Instant::now();
     let r = app
         .outbound
@@ -246,7 +259,7 @@ pub async fn instance_check(app: &App, service: &str, p: &Value) -> Check {
         ]);
         let (r, mut ms) = match get(app, &target, h.clone()).await {
             Ok(v) => v,
-            Err(c) => return c,
+            Err(c) => return *c,
         };
         if r.status == 429 {
             let mut c = Check::skip(format!("trackManifests HTTP 429 (rate limited, {id})"));
@@ -286,7 +299,7 @@ pub async fn instance_check(app: &App, service: &str, p: &Value) -> Check {
             Ok(v) => v,
             Err(mut c) => {
                 c.latency_ms = ms;
-                return c;
+                return *c;
             }
         };
         ms += m;
@@ -333,7 +346,7 @@ pub async fn instance_check(app: &App, service: &str, p: &Value) -> Check {
     );
     let (r, ms) = match get(app, &target, HeaderMap::new()).await {
         Ok(v) => v,
-        Err(c) => return c,
+        Err(c) => return *c,
     };
     if (special && !r.ok()) || (!special && r.status >= 500) {
         return Check::new(false, false, ms, format!("HTTP {}", r.status));
@@ -445,7 +458,7 @@ fn live(value: &Value) -> bool {
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .is_some_and(|d| d > Utc::now())
 }
-async fn gate(app: &App, fp: &str, p: &Value, global: bool) -> Result<Gate, Refresh> {
+async fn gate(app: &App, fp: &str, p: &Value, global: bool) -> Result<Gate, Box<Refresh>> {
     if fp.is_empty() {
         return Ok(Gate {
             claim: None,
@@ -468,7 +481,7 @@ async fn gate(app: &App, fp: &str, p: &Value, global: bool) -> Result<Gate, Refr
         });
     };
     if live(&row["refresh_cooldown_until"]) {
-        return Err(Refresh::failure("refresh cooling", true));
+        return Err(Refresh::failure("refresh cooling", true).into());
     }
     if global {
         let active = app
@@ -487,7 +500,7 @@ async fn gate(app: &App, fp: &str, p: &Value, global: bool) -> Result<Gate, Refr
                     || live(&r["value"]["globalUntil"])
             });
         if active {
-            return Err(Refresh::failure("shared Tidal refresh backoff", true));
+            return Err(Refresh::failure("shared Tidal refresh backoff", true).into());
         }
     }
     let row=app.db.one("update account_entries set refresh_in_flight_until=now()+interval '60 seconds' where fingerprint=$1 and (refresh_in_flight_until is null or refresh_in_flight_until<now()) and (refresh_cooldown_until is null or refresh_cooldown_until<=now()) returning refresh_in_flight_until::text as claim,payload,refresh_backoff_ms",vec![fp.into()]).await.map_err(|_|Refresh::failure("refresh unavailable",true))?;
@@ -503,7 +516,7 @@ async fn gate(app: &App, fp: &str, p: &Value, global: bool) -> Result<Gate, Refr
     for _ in 0..3 {
         tokio::time::sleep(Duration::from_millis(500)).await;
         let Some(row) = refresh_row(app, fp).await.ok().flatten() else {
-            return Err(Refresh::failure("entry removed mid-refresh", true));
+            return Err(Refresh::failure("entry removed mid-refresh", true).into());
         };
         if live(&row["refresh_in_flight_until"]) {
             continue;
@@ -526,9 +539,10 @@ async fn gate(app: &App, fp: &str, p: &Value, global: bool) -> Result<Gate, Refr
                 "refresh attempted by another instance"
             },
             true,
-        ));
+        )
+        .into());
     }
-    Err(Refresh::failure("refresh claim held elsewhere", true))
+    Err(Refresh::failure("refresh claim held elsewhere", true).into())
 }
 async fn finish(
     app: &App,
@@ -580,7 +594,7 @@ async fn record_abuse(app: &App) {
 async fn refresh_tidal(app: &App, fp: &str, p: &Value) -> Refresh {
     let g = match gate(app, fp, p, true).await {
         Ok(g) => g,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     if g.serve {
         return Refresh {
@@ -735,6 +749,7 @@ async fn tidal_account(app: &App, p: &Value, fp: &str) -> Check {
     let mut current = p.clone();
     let mut token = string(p, "token").trim().to_owned();
     let mut stored = None;
+    let mut early_refreshed = false;
     if token.is_empty() {
         return Check::dead("missing token");
     }
@@ -746,13 +761,14 @@ async fn tidal_account(app: &App, p: &Value, fp: &str) -> Check {
         token = string(&next, "token");
         current = next;
         stored = r.stored;
+        early_refreshed = true;
     }
     let (mut res, mut ms) =
         match get(app, &app.endpoints.tidal_sessions, token_headers(&token)).await {
             Ok(v) => v,
             Err(mut c) => {
                 c.stored_payload = stored;
-                return c;
+                return *c;
             }
         };
     if res.status == 401 {
@@ -760,6 +776,11 @@ async fn tidal_account(app: &App, p: &Value, fp: &str) -> Check {
         let Some(next) = r.payload else {
             let mut c = r.check();
             c.stored_payload = stored;
+            if early_refreshed {
+                c.skipped = false;
+                c.status = "dead".into();
+                c.detail = "token rejected".into();
+            }
             return c;
         };
         token = string(&next, "token");
@@ -773,7 +794,7 @@ async fn tidal_account(app: &App, p: &Value, fp: &str) -> Check {
             }
             Err(mut c) => {
                 c.stored_payload = stored;
-                return c;
+                return *c;
             }
         }
     }
@@ -869,7 +890,7 @@ pub async fn scrape_qobuz(app: &App, app_id: &str) -> String {
     let scripts = regex::Regex::new(r#"(?i)<script[^>]+src="([^"]+\.js[^"]*)"[^>]*>"#).unwrap();
     let secret =
         regex::Regex::new(r#"(?i)(?:app_secret|secret|seed)\s*[:=]\s*"([a-f0-9]{32})""#).unwrap();
-    for m in scripts.captures_iter(&res.text()).take(32) {
+    for m in scripts.captures_iter(&res.text()).take(6) {
         let url = join(origin, &m[1]);
         if let Ok((res, _)) = get(app, &url, headers(&[("user-agent", httpx::BROWSER_UA)])).await
             && res.ok()
@@ -938,7 +959,7 @@ async fn renew_qobuz(app: &App, fp: &str, p: &Value) -> Refresh {
     }
     let g = match gate(app, fp, p, false).await {
         Ok(g) => g,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     if g.serve {
         return Refresh {
@@ -1030,7 +1051,7 @@ async fn qobuz_account(app: &App, p: &Value, fp: &str) -> Check {
     };
     let (mut r, mut ms) = match get(app, &url(&token), h(&token)).await {
         Ok(v) => v,
-        Err(c) => return c,
+        Err(c) => return *c,
     };
     let mut current = p.clone();
     let mut stored = None;
@@ -1049,7 +1070,7 @@ async fn qobuz_account(app: &App, p: &Value, fp: &str) -> Check {
             }
             Err(mut c) => {
                 c.stored_payload = stored;
-                return c;
+                return *c;
             }
         }
     }
@@ -1144,7 +1165,7 @@ async fn deezer_account(app: &App, p: &Value, fp: &str) -> Check {
     .await
     {
         Ok(v) => v,
-        Err(c) => return c,
+        Err(c) => return *c,
     };
     if !r.ok() {
         return Check::new(false, false, ms, format!("HTTP {}", r.status));
@@ -1385,7 +1406,7 @@ async fn apple_account(app: &App, p: &Value) -> Check {
         Err(mut c) => {
             c.status = "pending".into();
             c.detail = format!("probe error: {}", c.detail);
-            return c;
+            return *c;
         }
     };
     if !r.ok() {

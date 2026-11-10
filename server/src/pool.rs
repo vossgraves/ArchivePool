@@ -105,3 +105,5 @@ pub fn mask_label(service: &str, kind: &str, p: &Value) -> String {
 }
 pub mod leases;
 pub mod status;
+#[cfg(test)]
+mod tests;

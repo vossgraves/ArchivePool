@@ -34,7 +34,11 @@ impl Config {
             client_key: crate::crypto::load_key(&get("POOL_CLIENT_KEY")),
             blob_token: get("BLOB_READ_WRITE_TOKEN"),
             port: get("PORT").parse().unwrap_or(8080),
-            db_max_conns: get("DB_MAX_CONNS").parse::<u32>().unwrap_or(4).clamp(1, 32),
+            db_max_conns: get("POOL_DB_MAX_CONNECTIONS")
+                .parse::<u32>()
+                .ok()
+                .filter(|n| (2..=20).contains(n))
+                .unwrap_or(3),
             github_client_id: get("GITHUB_CLIENT_ID"),
             github_client_secret: get("GITHUB_CLIENT_SECRET"),
             github_redirect_uri: get("GITHUB_REDIRECT_URI"),

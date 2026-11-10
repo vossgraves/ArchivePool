@@ -165,6 +165,10 @@ impl Outbound {
             .host_str()
             .ok_or(Error::Blocked)?
             .trim_matches(['[', ']']);
+        #[cfg(test)]
+        if !self.policy.public && host.parse::<IpAddr>().is_err() && host != "localhost" {
+            return Err(Error::Blocked);
+        }
         if host
             .parse::<IpAddr>()
             .is_ok_and(|ip| !self.policy.permits(ip))
@@ -201,29 +205,29 @@ impl Outbound {
                         }
                     })?;
                 let status = response.status().as_u16();
-                if [301, 302, 303, 307, 308].contains(&status) {
-                    if let Some(location) = response.headers().get("location") {
-                        if hop == 10 {
-                            return Err(Error::Redirect);
-                        }
-                        let next = url
-                            .join(location.to_str().map_err(|_| Error::Redirect)?)
-                            .map_err(|_| Error::Redirect)?;
-                        self.check_url(&next)?;
-                        if next.origin() != url.origin() {
-                            strip_credentials(&mut headers);
-                            body.clear();
-                        }
-                        if status == 303 && method != Method::HEAD
-                            || [301, 302].contains(&status) && method == Method::POST
-                        {
-                            method = Method::GET;
-                            body.clear();
-                            headers.remove("content-type");
-                        }
-                        url = next;
-                        continue;
+                if [301, 302, 303, 307, 308].contains(&status)
+                    && let Some(location) = response.headers().get("location")
+                {
+                    if hop == 10 {
+                        return Err(Error::Redirect);
                     }
+                    let next = url
+                        .join(location.to_str().map_err(|_| Error::Redirect)?)
+                        .map_err(|_| Error::Redirect)?;
+                    self.check_url(&next)?;
+                    if next.origin() != url.origin() {
+                        strip_credentials(&mut headers);
+                        body.clear();
+                    }
+                    if status == 303 && method != Method::HEAD
+                        || [301, 302].contains(&status) && method == Method::POST
+                    {
+                        method = Method::GET;
+                        body.clear();
+                        headers.remove("content-type");
+                    }
+                    url = next;
+                    continue;
                 }
                 let headers = response.headers().clone();
                 if response
@@ -352,5 +356,76 @@ mod tests {
         strip_credentials(&mut h);
         assert_eq!(h.len(), 1);
         assert!(h.contains_key("accept"));
+    }
+    #[tokio::test]
+    async fn redirect_hops_block_private_destinations_and_strip_credentials() {
+        use crate::test_support::Mock;
+        use axum::{body::Body, response::Response};
+        let sink = Mock::fixed(200, "ok").await;
+        let target = sink.url.clone();
+        let source = Mock::new(move |_| {
+            Response::builder()
+                .status(307)
+                .header("location", &target)
+                .body(Body::empty())
+                .unwrap()
+        })
+        .await;
+        let client = Outbound::local();
+        let r = client
+            .send(
+                Method::POST,
+                &source.url,
+                headers(&[
+                    ("authorization", "secret"),
+                    ("cookie", "secret"),
+                    ("x-user-auth-token", "secret"),
+                    ("media-user-token", "secret"),
+                    ("accept", "application/json"),
+                ]),
+                b"credential=secret".to_vec(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status, 200);
+        {
+            let requests = sink.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].body.is_empty());
+            for key in [
+                "authorization",
+                "cookie",
+                "x-user-auth-token",
+                "media-user-token",
+            ] {
+                assert!(!requests[0].headers.contains_key(key));
+            }
+        }
+
+        for destination in [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.1.2.3/",
+            "http://[fd00::1]/",
+            "http://[fe80::1]/",
+            "http://localhost:1/",
+        ] {
+            let source = Mock::new(move |_| {
+                Response::builder()
+                    .status(302)
+                    .header("location", destination)
+                    .body(Body::empty())
+                    .unwrap()
+            })
+            .await;
+            assert!(client.get(&source.url, HeaderMap::new()).await.is_err());
+        }
+    }
+    #[tokio::test]
+    async fn oversize_response_fails_without_partial_success() {
+        let mock = crate::test_support::Mock::fixed(200, "x".repeat(MAX_RESPONSE_BYTES + 1)).await;
+        assert!(matches!(
+            Outbound::local().get(&mock.url, HeaderMap::new()).await,
+            Err(Error::TooLarge)
+        ));
     }
 }
