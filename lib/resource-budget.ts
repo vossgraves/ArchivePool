@@ -8,6 +8,8 @@ type Ticket = { amount: number; day: number; expiresAt: number }
 interface Lease {
   reserve(kind: Resource, cron: boolean): Promise<Ticket | null>
   claimSchema(version: string): Promise<boolean>
+  databaseUnavailable(): Promise<boolean>
+  reportDatabaseUnavailable(): Promise<void>
 }
 interface BudgetScope {
   namespace?: { idFromName(name: string): unknown; get(id: unknown): { open(): Promise<Lease> } }
@@ -22,12 +24,16 @@ export class ResourceUnavailable extends Error {
 }
 
 function scope(): BudgetScope | null {
-  if (!cfBindings()) return null
   const storage = (globalThis as Record<symbol, unknown>)[Symbol.for("archivepool.resourceBudget")] as
     AsyncLocalStorage<BudgetScope> | undefined
   const state = storage?.getStore()
-  if (!state?.namespace) throw new ResourceUnavailable()
-  return state
+  // The wrapper scope also covers work before OpenNext installs its binding context.
+  if (state) {
+    if (!state.namespace) throw new ResourceUnavailable()
+    return state
+  }
+  if (cfBindings()) throw new ResourceUnavailable()
+  return null
 }
 
 function lease(state: BudgetScope): Promise<Lease> {
@@ -65,4 +71,18 @@ async function allocate(kind: Resource, spend: boolean): Promise<void> {
 export async function claimSchemaMigration(version: string): Promise<boolean> {
   const state = scope()
   return state ? (await lease(state)).claimSchema(version) : true
+}
+
+export async function databaseUnavailable(): Promise<boolean> {
+  try {
+    const state = scope()
+    return state ? await (await lease(state)).databaseUnavailable() : false
+  } catch { return true }
+}
+
+export async function reportDatabaseUnavailable(): Promise<void> {
+  try {
+    const state = scope()
+    if (state) await (await lease(state)).reportDatabaseUnavailable()
+  } catch { /* reporting cannot replace the original database error */ }
 }

@@ -25,7 +25,7 @@ test('route, action, and page fixtures stay within their measured resource ceili
     const expected = measured.find(row=>row.name===spec.name)
     assert.ok(expected, spec.name)
     const result = await runCase(spec)
-    for (const resource of ['sql','reads','writes','matches','puts','fetch']) {
+    for (const resource of ['sql','reads','writes','matches','puts','fetch','rpc']) {
       assert.ok(result.cost[resource] <= expected[resource], `${spec.name}: ${resource} ${result.cost[resource]} exceeds ${expected[resource]}`)
     }
     if (result.value instanceof Response) {
@@ -53,4 +53,16 @@ test('schema bootstrap is measured once and an outage cannot publish a usable ma
   const failed = new Harness(); failed.kv.delete('schema:applied'); failed.failDb=true
   await assert.rejects(failed.run(()=>failed.load('lib/db/ensure.ts').ensureSchema()), /budget unavailable/)
   assert.equal(failed.kv.get('schema:applied'),undefined)
+})
+
+test('a warm isolate recovers after the operator publishes its missing schema marker', async () => {
+  const h = new Harness(); h.kv.delete('schema:applied')
+  const r = await h.run(async()=>{
+    const schema = h.load('lib/db/ensure.ts')
+    await assert.rejects(schema.ensureSchema(), /budget unavailable/)
+    h.kv.set('schema:applied',schema.SCHEMA_VERSION)
+    await schema.ensureSchema()
+  })
+  assert.equal(r.cost.sql,0); assert.equal(r.cost.connections,0)
+  assert.equal(r.cost.reads,2)
 })

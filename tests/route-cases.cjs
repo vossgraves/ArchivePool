@@ -39,6 +39,7 @@ for (const path of ['/api/accounts', '/api/sources']) route(path, 'GET', [
 for (const path of ['/api/discovery/tidal', '/api/discovery/qobuz', '/api/instances/[service]']) route(path, 'GET', [
   { label: 'cold colo', options: { auth: KEY, params: { service: 'tidal' } } },
   { label: 'warm colo', options: { auth: KEY, params: { service: 'tidal' } }, config: { warm: true } },
+  { label: 'aged key manifest, healthy SQL', options: { auth: KEY, params: { service: 'tidal' } }, config: { agedKeys:true } },
   { label: 'unknown key', options: { auth: 'atp_' + 'c'.repeat(48), params: { service: 'tidal' } } },
 ])
 route('/api/status', 'GET', [ { label: 'cold colo', options: {} }, { label: 'warm colo', options: {}, config: { warm: true } } ])
@@ -49,6 +50,7 @@ route('/api/report', 'POST', [
   { label: 'unknown entry', options: { ...keyed, body: { id: 9999, report: 'dead' } } },
 ])
 route('/api/cron/health', 'GET', [
+  { label: 'expired Tidal credentials', options: { ...cron, query: '?batch=8' }, config: { seed: { accounts: 6, instances: 0, stale: true, tidalExpired: true }, check: false } },
   { label: 'eight checks', options: { ...cron, query: '?batch=8' }, config: { seed: { accounts: 0, instances: 25, stale: true } } },
   { label: 'finishing four checks', options: { ...cron, query: '?batch=8' }, config: { seed: { accounts: 0, instances: 1, stale: true } } },
   { label: 'no batch parameter', options: cron, config: { seed: { accounts: 0, instances: 25, stale: true } } },
@@ -93,6 +95,8 @@ route('/api/tidal/device/start','POST')
 route('/api/tidal/device/poll','POST',[{options:{body:{deviceCode:'fixture'}}}])
 route('/api/qobuz/login','POST',[{options:{body:{username:'fixture',password:'fixture'}}}])
 cases.push({ name: 'submit action — attributed instance', action: true, session: true })
+cases.push({ name: 'submit action — unverified Amazon artifact (64 KiB)', action:true, check:false, seed:{accounts:0,instances:0},
+  form:{service:'amazon-music',kind:'account',session:'fixture-'+ 'a'.repeat(64*1024),premium:'on'} })
 for (const page of ['/', '/docs','/login','/signup','/admin','/submit','/dashboard']) cases.push({ name:`page ${page}`, page, session:page==='/submit'||page==='/dashboard' })
 
 async function runCase(spec, { baseline = false } = {}) {
@@ -101,6 +105,10 @@ async function runCase(spec, { baseline = false } = {}) {
   const h = new Harness({ baseline, check: spec.check !== false })
   h.fetch = upstreamFixture
   await snapshots(h)
+  if (spec.agedKeys) {
+    const keys = JSON.parse(h.kv.get('pool/discovery-keys.json')); keys.savedAt = Date.now()-6*3600000
+    h.kv.set('pool/discovery-keys.json',JSON.stringify(keys))
+  }
   if (spec.session) h.cookie = h.load('lib/sessions.ts').createSessionToken(1).value
   if (spec.leased) await h.route('/api/accounts','GET',keyed)
   let options = structuredClone(spec.options ?? {})
@@ -113,7 +121,7 @@ async function runCase(spec, { baseline = false } = {}) {
   if (spec.action) {
     const action = h.load('app/actions/submit.ts').submitSource
     const form = new FormData()
-    for (const [key,value] of Object.entries({ service:'tidal',kind:'api',baseUrl:'https://new-fixture.invalid',credit:'on' })) form.set(key,value)
+    for (const [key,value] of Object.entries(spec.form ?? { service:'tidal',kind:'api',baseUrl:'https://new-fixture.invalid',credit:'on' })) form.set(key,value)
     call = () => h.run(() => action({ok:false,message:''},form))
   } else if (spec.page) {
     const file = spec.page==='/' ? 'app/page.tsx' : `app${spec.page}/page.tsx`

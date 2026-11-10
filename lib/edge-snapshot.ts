@@ -71,7 +71,7 @@ function isDiscovery(value: unknown): value is Discovery {
 export async function writeInstanceSnapshot(): Promise<void> {
   const store = snapshotStore()
   // Blob only enters when there is no KV binding, so a Workers deploy never needs the token.
-  const useBlob = !store && Boolean(process.env.BLOB_READ_WRITE_TOKEN)
+  const useBlob = !cfBindings() && !store && Boolean(process.env.BLOB_READ_WRITE_TOKEN)
   if (!store && !useBlob) return
   try {
     // One query for every service. The previous per-service Promise.all ran five statements
@@ -79,8 +79,7 @@ export async function writeInstanceSnapshot(): Promise<void> {
     const snapshot = await getAllDiscovery()
     const body = JSON.stringify({ savedAt: Date.now(), data: snapshot } satisfies StoredSnapshot)
     if (store) {
-      // Belt-and-braces expiry next to the readers' own savedAt check: a dead store
-      // can never serve a stale feed past the TTL.
+      // Keep the last good value during outages; readers mark its age instead of deleting it.
       await kvPutText(SNAPSHOT_PATHNAME, body)
     } else {
       // Lazy import: keeps @vercel/blob out of the Workers bundle entirely on builds
@@ -118,6 +117,7 @@ export async function readInstanceSnapshot(service: Service): Promise<Discovery 
     }
   }
 
+  if (cfBindings()) return null
   if (!process.env.BLOB_READ_WRITE_TOKEN) return null
   try {
     const { get } = await import("@vercel/blob")

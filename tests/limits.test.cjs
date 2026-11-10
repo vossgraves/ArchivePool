@@ -48,7 +48,7 @@ test('unknown and missing keys, invalid paths, and rate-limited reports reject e
   assert.ok(result.value.headers.get('retry-after'))
 })
 test('snapshots survive SQL outages and staleness; cache keys ignore URL/header variants', async () => {
-  const h = new Harness(); await snapshots(h,{stale:true}); h.failDb=true
+  const h = new Harness(); await snapshots(h,{stale:true}); h.failDb=true; h.outage=true
   const status=await h.route('/api/status','GET',{query:'?nonce=1'})
   assert.equal((await ceiling(status,0).json()).stale,true)
   const feed=await h.route('/api/instances/[service]','GET',{auth:KEY,params:{service:'tidal'},query:'?nonce=1'})
@@ -116,6 +116,19 @@ test('shared ledger persists bounds across colos, restarts and UTC rollover', as
   ledger=new BudgetLedger(storage,()=>now)
   assert.ok(ledger.claimSchema('test-version'),'schema claims must reset even before the first allocation of a new UTC day')
 })
+
+test('database outage signals survive actor restarts with bounded storage writes', async () => {
+  const {BudgetLedger}=await import('../cloudflare/budget.mjs')
+  let now=Date.UTC(2026,10,10), value, writes=0
+  const storage={get:()=>value,put:v=>{writes++;value=structuredClone(v)}}
+  let ledger=new BudgetLedger(storage,()=>now)
+  ledger.reportDatabaseUnavailable(); assert.equal(writes,1)
+  ledger.reportDatabaseUnavailable(); assert.equal(writes,1)
+  ledger=new BudgetLedger(storage,()=>now)
+  assert.equal(ledger.databaseUnavailable(),true)
+  now+=16*60000
+  assert.equal(ledger.databaseUnavailable(),false)
+})
 test('SQL/KV guard fails closed when the shared coordinator denies admission', async () => {
   const h=new Harness();h.denyBudget=true
   const r=await h.run(async()=>{
@@ -128,6 +141,28 @@ test('SQL/KV guard fails closed when the shared coordinator denies admission', a
   assert.equal(status.cost.sql,0);assert.equal(status.cost.reads,0)
 })
 
+test('the Worker wrapper scope enforces SQL limits even without an OpenNext binding context', async () => {
+  const h = new Harness({workers:false}); h.denyBudget=true
+  const storage = globalThis[Symbol.for('archivepool.resourceBudget')]
+  const r = await h.run(()=>storage.run({namespace:h.namespace,lease:null,tickets:{}}, async()=>{
+    try { await h.load('lib/db/index.ts').db.execute(require('drizzle-orm').sql`select 1`) } catch(error) { return error }
+  }))
+  assert.match((r.value.cause??r.value).message,/budget unavailable/)
+  assert.equal(r.cost.sql,0); assert.equal(r.cost.connections,0)
+})
+
+test('the wrapper provides one request context for fetch limits before OpenNext context exists', async () => {
+  const h = new Harness({workers:false})
+  const storage = globalThis[Symbol.for('archivepool.resourceBudget')]
+  await h.run(()=>storage.run({namespace:h.namespace,lease:null,tickets:{},env:{},context:{}},async()=>{
+    const cf = h.load('lib/cf-env.ts')
+    assert.ok(cf.cfBindings())
+    assert.ok(cf.cfExecutionContext())
+    for(let i=0;i<40;i++) cf.chargeFetch()
+    assert.throws(()=>cf.chargeFetch(),/outbound fetch budget/)
+  }))
+})
+
 test('credential leases never fall back to snapshots during a database outage', async () => {
   const h = new Harness(); await snapshots(h); h.failDb = true
   for (const route of ['/api/accounts', '/api/sources']) {
@@ -135,8 +170,10 @@ test('credential leases never fall back to snapshots during a database outage', 
   }
   const status = await h.route('/api/status')
   assert.equal(status.value.status, 200); assert.equal(status.cost.sql, 0)
+  assert.equal((await status.value.json()).stale,true,'a fresh snapshot is marked stale after a recorded SQL outage')
   const discovery = await h.route('/api/discovery/tidal', 'GET', { auth: KEY })
   assert.equal(discovery.value.status, 200); assert.equal(discovery.cost.sql, 0)
+  assert.equal((await discovery.value.json()).stale,true)
 })
 
 test('a failed snapshot publication retains the last good durable copy', async () => {
@@ -230,6 +267,86 @@ test('KV schema-marker outages cannot trigger SQL migrations', async () => {
   })
   assert.match(r.value.message,/KV quota fixture/)
   assert.equal(r.cost.sql,0); assert.equal(r.cost.connections,0)
+})
+
+test('a missing discovery snapshot is not cached as a successful empty feed', async () => {
+  const h = new Harness(); await snapshots(h); h.kv.delete('pool/instances.json')
+  const r = await h.route('/api/discovery/tidal','GET',{auth:KEY})
+  assert.deepEqual(await r.value.json(),{streaming:[],api:[],stale:true})
+  assert.equal(r.cost.sql,0); assert.equal(r.cost.puts,2,'only the key identity and its backup are cached')
+  assert.equal(r.value.headers.get('cache-control'),'private, no-store')
+})
+
+test('expired edge entries can use last-good backups during a KV outage', async () => {
+  const first = new Harness(); await snapshots(first)
+  await first.route('/api/status')
+  await first.route('/api/discovery/tidal','GET',{auth:KEY})
+  for (const key of first.edge.keys()) if (!key.endsWith('last-good')) first.edge.delete(key)
+  const h = new Harness(); h.edge=first.edge; h.failKv=true; h.outage=true
+  const status = await h.route('/api/status')
+  assert.equal(status.value.status,200); assert.equal((await status.value.json()).stale,true)
+  assert.equal(status.cost.sql,0)
+  const discovery = await h.route('/api/discovery/tidal','GET',{auth:KEY})
+  const body = await discovery.value.json()
+  assert.equal(discovery.value.status,200); assert.equal(body.stale,true)
+  assert.ok(body.streaming.length>0); assert.equal(discovery.cost.sql,0)
+})
+
+test('a Worker without KV never falls through to unmetered Vercel Blob access', async () => {
+  let calls=0
+  const h=new Harness({mocks:{'@vercel/blob':{get:async()=>{calls++;return null},put:async()=>{calls++}}}})
+  const storage=globalThis[Symbol.for('archivepool.resourceBudget')]
+  const previous=process.env.BLOB_READ_WRITE_TOKEN
+  process.env.BLOB_READ_WRITE_TOKEN='fixture'
+  try {
+    const r=await h.run(()=>storage.run({namespace:h.namespace,lease:null,tickets:{},env:{},context:{}},async()=>{
+      const snapshots=h.load('lib/edge-snapshot.ts')
+      assert.equal(await snapshots.readInstanceSnapshot('tidal'),null)
+      await snapshots.writeInstanceSnapshot()
+    }))
+    assert.equal(calls,0); assert.equal(r.cost.sql,0)
+  } finally {
+    if(previous===undefined) delete process.env.BLOB_READ_WRITE_TOKEN
+    else process.env.BLOB_READ_WRITE_TOKEN=previous
+  }
+})
+
+test('an aged discovery-key manifest cannot bypass revocation while SQL is healthy', async () => {
+  await seed()
+  const h = new Harness(); await snapshots(h,{stale:true})
+  const p = new Pool({connectionString:localDatabase()})
+  try { await p.query('UPDATE api_keys SET revoked=true WHERE id=1') } finally { await p.end() }
+  const r = await h.route('/api/discovery/tidal','GET',{auth:KEY})
+  assert.equal(r.value.status,401)
+  assert.equal(r.cost.sql,1)
+})
+
+test('persisted check diagnostics have a byte bound for Unicode as well as ASCII', () => {
+  const h = new Harness()
+  const {retainedDetail} = h.load('lib/retention.ts')
+  for (const value of ['a'.repeat(3000),'🙂'.repeat(3000)]) {
+    const result = retainedDetail(value)
+    assert.ok(Buffer.byteLength(result)<=1024)
+    assert.ok(result.endsWith('…'))
+  }
+  assert.equal(retainedDetail('short'),'short')
+})
+
+test('a verified resubmission updates declared expiry and clears the previous removal clock', async () => {
+  await seed({accounts:0,instances:0})
+  const h = new Harness({check:true})
+  const payload = {token:jwt(),refreshToken:'fixture'}
+  const firstExpiry = new Date(Date.now()+86400000)
+  await h.run(()=>h.load('lib/ingest.ts').ingestSource('tidal','account',payload,{expiresAt:firstExpiry}))
+  const p = new Pool({connectionString:localDatabase()})
+  try {
+    await p.query("UPDATE account_entries SET removed=true,removed_at=now()-interval '40 days',expires_at=now()-interval '8 days'")
+    const expiry = new Date(Date.now()+2*86400000)
+    await h.run(()=>h.load('lib/ingest.ts').ingestSource('tidal','account',payload,{expiresAt:expiry}))
+    const row = (await p.query('SELECT removed,removed_at,expires_at FROM account_entries')).rows[0]
+    assert.equal(row.removed,false); assert.equal(row.removed_at,null)
+    assert.equal(row.expires_at.getTime(),expiry.getTime())
+  } finally { await p.end() }
 })
 
 test('retention caps health and audit row counts as well as their ages', async () => {

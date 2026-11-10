@@ -3,6 +3,7 @@ import "server-only"
 import { and, eq, inArray, sql } from "drizzle-orm"
 import { encryptAtRest } from "@/lib/crypto"
 import { db } from "@/lib/db"
+import { retainedDetail } from "@/lib/retention"
 import { instanceEntries } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
 import { runCheck } from "@/lib/health"
@@ -172,7 +173,7 @@ export async function syncInstanceUrls(
         status: check.status,
         ok: check.ok,
         premium: check.premium,
-        detail: check.detail,
+        detail: retainedDetail(check.detail),
       })
     }
     // A probe that reached no verdict (the host's own rate limiter answered, or a refresh did not
@@ -191,7 +192,7 @@ export async function syncInstanceUrls(
           .set({
             status: check.status,
             premium: check.premium,
-            detail: check.detail,
+            detail: retainedDetail(check.detail),
             latencyMs: check.latencyMs,
             consecutiveFailures: sql`${instanceEntries.consecutiveFailures} + 1`,
             checkCount: sql`${instanceEntries.checkCount} + 1`,
@@ -211,7 +212,7 @@ export async function syncInstanceUrls(
           .set({
             status: check.status,
             premium: false,
-            detail: `reachable but not premium (${check.detail})`,
+            detail: retainedDetail(`reachable but not premium (${check.detail})`),
             latencyMs: check.latencyMs,
             disabled: true,
             checkCount: sql`${instanceEntries.checkCount} + 1`,
@@ -236,7 +237,7 @@ export async function syncInstanceUrls(
         fingerprint: fp,
         status: check.status,
         premium: check.premium,
-        detail: check.detail,
+        detail: retainedDetail(check.detail),
         latencyMs: check.latencyMs,
         checkCount: 1,
         okCount: 1,
@@ -252,7 +253,7 @@ export async function syncInstanceUrls(
         set: {
           status: check.status,
           premium: check.premium,
-          detail: check.detail,
+          detail: retainedDetail(check.detail),
           latencyMs: check.latencyMs,
           consecutiveFailures: 0,
           disabled: false,

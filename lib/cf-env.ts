@@ -22,6 +22,10 @@ import { chargeResource } from "@/lib/resource-budget"
 type Bindings = Record<string, unknown>
 
 function context(): { env: Bindings; ctx: unknown } | null {
+  const storage = (globalThis as Record<symbol, unknown>)[Symbol.for("archivepool.resourceBudget")] as
+    AsyncLocalStorage<{ env?: Bindings; context?: object }> | undefined
+  const wrapper = storage?.getStore()
+  if (wrapper?.env) return { env: wrapper.env, ctx: wrapper.context }
   try {
     const full = getCloudflareContext({ async: false }) as unknown as {
       env?: Bindings
@@ -292,10 +296,8 @@ function boundedResponse(res: Response): Response {
 
 export function cfWaitUntil(work: Promise<unknown>): void {
   try {
-    const full = getCloudflareContext({ async: false }) as unknown as {
-      ctx?: { waitUntil(p: Promise<unknown>): void }
-    }
-    full?.ctx?.waitUntil(work)
+    const ctx = cfExecutionContext() as { waitUntil?(p: Promise<unknown>): void } | null
+    ctx?.waitUntil?.(work)
   } catch {
     // Not on Workers — the floating promise completes on the warm instance, as before.
   }

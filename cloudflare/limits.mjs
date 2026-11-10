@@ -9,6 +9,8 @@ class ResourceLease extends RpcTarget {
   }
   reserve(kind, cron) { return this.ledger.reserve(kind, cron) }
   claimSchema(version) { return this.ledger.claimSchema(version) }
+  databaseUnavailable() { return this.ledger.databaseUnavailable() }
+  reportDatabaseUnavailable() { return this.ledger.reportDatabaseUnavailable() }
 }
 
 export class FreeTierBudget extends DurableObject {

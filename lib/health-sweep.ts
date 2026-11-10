@@ -2,6 +2,7 @@
 import { and, eq, sql } from "drizzle-orm"
 import { atRestEncryptionEnabled, decryptAtRest, encryptAtRest, hasPlaintextSecret } from "@/lib/crypto"
 import { db } from "@/lib/db"
+import { retainedDetail } from "@/lib/retention"
 import { accountEntries, healthLog, instanceEntries } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
 import {
@@ -298,7 +299,7 @@ export async function runHealthSweep(
       .set({
         status: result.status,
         premium: result.premium,
-        detail: result.detail,
+        detail: retainedDetail(result.detail),
         latencyMs: result.latencyMs,
         consecutiveFailures: result.ok ? 0 : sql`${table.consecutiveFailures} + 1`,
         disabled: result.ok
@@ -316,7 +317,7 @@ export async function runHealthSweep(
       ok: result.ok,
       premium: result.premium,
       latencyMs: result.latencyMs,
-      detail: result.detail,
+      detail: retainedDetail(result.detail),
     })
     })
 
@@ -477,7 +478,7 @@ export async function checkEntryById(id: number, deadline?: AbortSignal) {
       .set({
         status: result.status,
         premium: result.premium,
-        detail: result.detail,
+        detail: retainedDetail(result.detail),
         latencyMs: result.latencyMs,
         consecutiveFailures: result.ok ? 0 : sql`${table.consecutiveFailures} + 1`,
         disabled: result.ok
@@ -496,7 +497,7 @@ export async function checkEntryById(id: number, deadline?: AbortSignal) {
       ok: result.ok,
       premium: result.premium,
       latencyMs: result.latencyMs,
-      detail: result.detail,
+      detail: retainedDetail(result.detail),
     })
     return rows
   })

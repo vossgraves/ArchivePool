@@ -11,6 +11,7 @@ import { getDiscovery } from "@/lib/queries"
 import { clientIp, rateLimit } from "@/lib/rate-limit"
 import { DISCOVERY_TTL_MS, cached } from "@/lib/ttl-cache"
 import type { Service } from "@/lib/sources"
+import { databaseUnavailable } from "@/lib/resource-budget"
 
 /**
  * One implementation behind `/api/instances/[service]` and the legacy `/api/discovery/*`
@@ -60,13 +61,21 @@ export async function serveDiscovery(service: Service, req: NextRequest): Promis
   if (body == null) {
     const data = await loadDiscovery(service)
     if (data == null) {
+      const archived = await edgeGet(`${cacheKey}:last-good`)
+      if (archived) {
+        body = JSON.stringify({ ...JSON.parse(archived), stale: true })
+        await edgePut(cacheKey, body, 60)
+        return feedResponse(body, req, true)
+      }
       // Degraded (database/snapshot unavailable): answer the existing graceful shape, but do
       // not cache it.
-      return feedResponse(JSON.stringify(EMPTY), req, false)
+      return feedResponse(JSON.stringify(cfBindings() ? { ...EMPTY, stale: true } : EMPTY), req, false)
     }
     body = JSON.stringify(data)
     await edgePut(cacheKey, body, EDGE_TTL_SEC)
+    await edgePut(`${cacheKey}:last-good`, body, 7 * 86400)
   }
+  if (identity.stale || await databaseUnavailable()) body = JSON.stringify({ ...JSON.parse(body), stale: true })
   return feedResponse(body, req, true)
 }
 
@@ -77,7 +86,7 @@ async function loadDiscovery(service: Service): Promise<DiscoveryFeed | null> {
       readInstanceSnapshot(service),
     )
     if (snapshot) return snapshot
-    if (cfBindings()) return { ...EMPTY, stale: true }
+    if (cfBindings()) return null
     // No snapshot (KV unconfigured, copy missing or stale): the cached database read.
     return await cached(`discovery:${service}`, DISCOVERY_TTL_MS, () => getDiscovery(service))
   } catch {

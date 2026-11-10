@@ -283,7 +283,12 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
 export async function leaseInstances(clientKey?: Buffer | null, scope?: KeyScope) {
   await ensureSchema()
   const rows = await db
-    .select()
+    .select({
+      id: instanceEntries.id, service: instanceEntries.service, premium: instanceEntries.premium,
+      status: instanceEntries.status, latencyMs: instanceEntries.latencyMs,
+      lastCheckedAt: instanceEntries.lastCheckedAt, lastLeasedAt: instanceEntries.lastLeasedAt,
+      payload: instanceEntries.payload,
+    })
     .from(instanceEntries)
     .where(and(instanceServableWhere, scope == null ? undefined : eq(instanceEntries.service, scope), sql`${instanceEntries.id} in (
       select id from (

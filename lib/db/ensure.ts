@@ -2,22 +2,10 @@
 import { sql } from "drizzle-orm"
 import { db } from "./index"
 import { kvGetText, kvPutText } from "@/lib/pool-cache"
-import { ResourceUnavailable } from "@/lib/resource-budget"
+import { reportDatabaseUnavailable, ResourceUnavailable } from "@/lib/resource-budget"
 import { cfBindings } from "@/lib/cf-env"
 
-/**
- * Bump whenever a statement is added below. The version is stored in KV after a clean run so
- * the 57 idempotent statements do not run on every cold isolate.
- *
- * Why this is not just an optimisation: Hyperdrive Free meters **every database statement**
- * against 100,000/day (a `CREATE INDEX IF NOT EXISTS` counts even when it is a no-op), and a
- * Workers isolate is short-lived. Running this list on each new isolate burned 57 of those
- * statements per cold start — easily six figures a day across a global worker — which is how
- * the deployment hit Hyperdrive's daily limit and every SQL query started failing.
- *
- * The gate is a KV read (one per isolate), not a query. When KV is absent or unreadable the
- * old run-every-process behaviour returns, so a non-Workers host is unchanged.
- */
+/** Bump with any schema change; Workers accept only this externally published KV marker. */
 export const SCHEMA_VERSION = "2026-11-10.2"
 const SCHEMA_MARKER_KEY = "schema:applied"
 
@@ -257,7 +245,10 @@ export function ensureSchema(): Promise<void> {
     if (await schemaAlreadyApplied()) return
     // Even a once-only DDL pass exceeds Free's CPU allowance. Apply migrations outside
     // Workers and publish the marker after rollout; reads never bootstrap a database.
-    if (cfBindings()) throw new ResourceUnavailable()
+    if (cfBindings()) {
+      await reportDatabaseUnavailable()
+      throw new ResourceUnavailable()
+    }
 
     let failed = 0
     for (const statement of STATEMENTS) {
@@ -294,6 +285,9 @@ export function ensureSchema(): Promise<void> {
         )
       }
     }
-  })()
+  })().catch((error) => {
+    delete globalForMigrations.__poolSchemaEnsured
+    throw error
+  })
   return globalForMigrations.__poolSchemaEnsured
 }

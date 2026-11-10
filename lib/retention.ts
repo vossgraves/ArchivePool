@@ -2,6 +2,11 @@
 import { sql } from "drizzle-orm"
 import { db } from "@/lib/db"
 
+export function retainedDetail(detail: string): string {
+  if (Buffer.byteLength(detail) <= 1024) return detail
+  return new TextDecoder().decode(Buffer.from(detail).subarray(0, 1021), { stream: true }) + "…"
+}
+
 export async function purgeRetainedData(): Promise<void> {
   for (const statement of [
     "delete from health_log where checked_at < now() - interval '30 days' or id in (select id from health_log order by checked_at desc, id desc offset 200000)",

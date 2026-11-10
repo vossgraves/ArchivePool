@@ -40,10 +40,21 @@ export class BudgetLedger {
     return true
   }
 
+  databaseUnavailable() { return (this.state.databaseUnavailableUntil ?? 0) > this.now() }
+
+  reportDatabaseUnavailable() {
+    const now = this.now()
+    if (this.state.databaseFailureAt !== undefined && now - this.state.databaseFailureAt < 60_000) return
+    const next = { ...this.state, databaseFailureAt: now, databaseUnavailableUntil: now + 15 * 60_000 }
+    this.storage.put(next)
+    this.state = next
+  }
+
   resetDay(now) {
     const day = Math.floor(now / 86_400_000)
     if (this.state.day !== day) {
-      this.state = { day, sql: 0, reads: 0, writes: 0, probes: 0, awake: 0, wakeUntil: 0, schema: {}, ordinary: {} }
+      this.state = { day, sql: 0, reads: 0, writes: 0, probes: 0, awake: 0, wakeUntil: 0, schema: {}, ordinary: {},
+        databaseFailureAt: this.state.databaseFailureAt, databaseUnavailableUntil: this.state.databaseUnavailableUntil }
     }
     return day
   }

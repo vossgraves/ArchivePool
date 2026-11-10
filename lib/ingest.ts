@@ -2,6 +2,7 @@
 import { sql } from "drizzle-orm"
 import { atRestEncryptionEnabled, encryptAtRest } from "@/lib/crypto"
 import { databaseConfigured, db } from "@/lib/db"
+import { retainedDetail } from "@/lib/retention"
 import { accountEntries, instanceEntries } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
 import { runCheck, type CheckResult } from "@/lib/health"
@@ -107,7 +108,7 @@ export async function ingestSource(
       fingerprint: fp,
       status: result.status,
       premium: result.premium,
-      detail: result.detail,
+      detail: retainedDetail(result.detail),
       latencyMs: result.latencyMs,
       checkCount: 1,
       okCount: result.ok ? 1 : 0,
@@ -127,7 +128,7 @@ export async function ingestSource(
         label,
         status: result.status,
         premium: result.premium,
-        detail: result.detail,
+        detail: retainedDetail(result.detail),
         latencyMs: result.latencyMs,
         checkCount: sql`${table.checkCount} + 1`,
         okCount: sql`${table.okCount} + ${result.ok ? 1 : 0}`,
@@ -139,6 +140,7 @@ export async function ingestSource(
         lastCheckedAt: new Date(),
         removed: false,
         removedAt: null,
+        expiresAt: options.expiresAt === undefined ? sql`${table.expiresAt}` : expiresAt,
         // Credit sticks to whoever contributed the entry first. A re-submission that revives a
         // dead credential must not steal the byline, and an anonymous re-submit must not erase
         // an existing credit — so keep the stored value when there is one.

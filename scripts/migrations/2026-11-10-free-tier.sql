@@ -1,4 +1,5 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
+CREATE TABLE IF NOT EXISTS pool_state (key text PRIMARY KEY, value jsonb NOT NULL DEFAULT '{}', updated_at timestamptz NOT NULL DEFAULT now());
 ALTER TABLE account_entries ADD COLUMN IF NOT EXISTS removed_at timestamptz;
 ALTER TABLE instance_entries ADD COLUMN IF NOT EXISTS removed_at timestamptz;
 CREATE INDEX IF NOT EXISTS idx_health_log_retention ON health_log (checked_at DESC, id DESC);

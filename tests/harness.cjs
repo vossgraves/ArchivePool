@@ -70,10 +70,12 @@ class Harness {
     this.failDb = false
     this.fetch = async (url) => { throw new Error(`Missing fetch fixture: ${url}`) }
     this.kv.set('schema:applied', baseline ? '2026-11-06.1' : '2026-11-10.2')
-    this.namespace = { idFromName: () => 'global', get: () => ({ open: async () => ({
+    this.namespace = { idFromName: () => 'global', get: () => ({ open: async () => { requestScope.getStore().cost.rpc++; return ({
       reserve: async (kind) => this.denyBudget ? null : ({ amount: kind === 'sql' ? 8 : kind === 'reads' ? 2 : 1, day: Math.floor(Date.now()/86400000), expiresAt: Date.now() + 20000 }),
       claimSchema: async () => true,
-    }) }) }
+      databaseUnavailable: async () => this.outage === true,
+      reportDatabaseUnavailable: async () => { this.outage = true },
+    }) } }) }
   }
   load(file) {
     file = path.resolve(root, file)
@@ -135,7 +137,7 @@ class Harness {
     return m.exports
   }
   async run(callback, { headers = {} } = {}) {
-  const state = { h: this, headers: new Headers(headers), cost: { sql: 0, reads: 0, writes: 0, matches: 0, puts: 0, fetch: 0, connections: 0, dbBytes: 0 }, sql: [], driverCpuUs: 0, background: [], ctx: {} }
+  const state = { h: this, headers: new Headers(headers), cost: { sql: 0, reads: 0, writes: 0, matches: 0, puts: 0, fetch: 0, connections: 0, dbBytes: 0, rpc: 0 }, sql: [], driverCpuUs: 0, background: [], ctx: {} }
     state.ctx.waitUntil = (work) => state.background.push(work)
     globalThis.caches = { default: {
       match: async (req) => { state.cost.matches++; const body = this.edge.get(req.url); return body ? new Response(body) : undefined },
@@ -147,7 +149,7 @@ class Harness {
     delete globalThis.__poolRateBuckets
     const start = process.cpuUsage()
     const wall = performance.now()
-    const value = await requestScope.run(state, () => sqlScope.run(state, () => resourceScope.run({ namespace: this.namespace, lease: null, tickets: {} }, callback)))
+    const value = await requestScope.run(state, () => sqlScope.run(state, () => resourceScope.run(this.workers ? { namespace: this.namespace, lease: null, tickets: {} } : undefined, callback)))
     await Promise.allSettled(state.background)
     state.cpuMs = (process.cpuUsage(start).user + process.cpuUsage(start).system) / 1000
     state.wallMs = performance.now() - wall

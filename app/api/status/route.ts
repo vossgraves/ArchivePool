@@ -5,6 +5,7 @@ import { HISTORY_DAYS, getPoolHistory, getStatus } from "@/lib/queries"
 import { readStatusSnapshot, type StatusSnapshot } from "@/lib/status-snapshot"
 import { STATUS_TTL_MS, cached } from "@/lib/ttl-cache"
 import { cfBindings } from "@/lib/cf-env"
+import { databaseUnavailable } from "@/lib/resource-budget"
 
 export const dynamic = "force-dynamic"
 
@@ -28,8 +29,9 @@ const EDGE_TTL_SEC = 300
 const SNAPSHOT_MEMO_MS = 5 * 60_000
 
 export async function GET(req: NextRequest) {
+  const unavailable = await databaseUnavailable()
   const edgeBody = await edgeGet(EDGE_KEY)
-  if (edgeBody) return respond(edgeBody, req)
+  if (edgeBody) return respond(unavailable ? JSON.stringify({ ...JSON.parse(edgeBody), stale: true }) : edgeBody, req)
 
   // Five minutes of in-process memo on top: a burst on one isolate should not read KV per
   // request, and the freshness matches the edge TTL.
@@ -39,9 +41,17 @@ export async function GET(req: NextRequest) {
       generatedAt: new Date(snapshot.savedAt).toISOString(),
       categories: snapshot.categories,
       history: snapshot.history,
-      ...(snapshot.stale ? { stale: true } : {}),
+      ...(snapshot.stale || unavailable ? { stale: true } : {}),
     })
     await edgePut(EDGE_KEY, body, EDGE_TTL_SEC)
+    await edgePut(`${EDGE_KEY}:last-good`, body, 7 * 86400)
+    return respond(body, req)
+  }
+
+  const archived = await edgeGet(`${EDGE_KEY}:last-good`)
+  if (archived) {
+    const body = JSON.stringify({ ...JSON.parse(archived), stale: true })
+    await edgePut(EDGE_KEY, body, 60)
     return respond(body, req)
   }
 

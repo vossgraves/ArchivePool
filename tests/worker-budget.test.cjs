@@ -14,7 +14,11 @@ test('SQLite Durable Object RPC shares a persistent ledger and disposes its sess
     durableObjects: { BUDGET: { className: 'FreeTierBudget', useSQLite: true } },
     script: `${budget}\n${limits}\nexport default { async fetch(request, env) {
       const lease = await env.BUDGET.get(env.BUDGET.idFromName('global')).open();
-      try { return Response.json({ sql: await lease.reserve('sql', true), claim: await lease.claimSchema('fixture') }); }
+      try {
+        const outage = await lease.databaseUnavailable();
+        await lease.reportDatabaseUnavailable();
+        return Response.json({ sql: await lease.reserve('sql', true), claim: await lease.claimSchema('fixture'), outage });
+      }
       finally { lease[Symbol.dispose](); }
     } }`,
   }
@@ -25,5 +29,6 @@ test('SQLite Durable Object RPC shares a persistent ledger and disposes its sess
     assert.equal(first.sql.amount, 8)
     assert.equal(second.sql.amount, 8)
     assert.equal(first.claim, true); assert.equal(second.claim, false)
+    assert.equal(first.outage,false); assert.equal(second.outage,true)
   } finally { await mf.dispose() }
 })

@@ -2,7 +2,7 @@
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres"
 import { Pool, type PoolConfig } from "pg"
 import { cfBindings, cfExecutionContext } from "@/lib/cf-env"
-import { chargeResource, prepareResource } from "@/lib/resource-budget"
+import { chargeResource, prepareResource, reportDatabaseUnavailable } from "@/lib/resource-budget"
 import * as schema from "./schema"
 
 /**
@@ -64,7 +64,10 @@ function createBundle(): DbBundle {
   const created = new Pool({ connectionString: resolveConnectionString(), ...poolOptions() })
   const connect = created.connect.bind(created)
   created.connect = ((callback?: (err: unknown, client?: unknown, release?: unknown) => void) => {
-    const run = async () => { await prepareResource("sql"); return connect() }
+    const run = async () => {
+      try { await prepareResource("sql"); return await connect() }
+      catch (error) { await reportDatabaseUnavailable(); throw error }
+    }
     if (callback) { void run().then((client) => callback(null, client, client.release.bind(client)), callback); return }
     return run()
   }) as typeof created.connect
@@ -76,8 +79,10 @@ function createBundle(): DbBundle {
     client.query = ((...args: unknown[]) => {
       const callback = typeof args[args.length - 1] === "function" ? args.pop() as (err: unknown, result?: unknown) => void : null
       const run = async () => {
-        await chargeResource("sql")
-        return (query as (...params: unknown[]) => Promise<unknown>)(...args)
+        try {
+          await chargeResource("sql")
+          return await (query as (...params: unknown[]) => Promise<unknown>)(...args)
+        } catch (error) { await reportDatabaseUnavailable(); throw error }
       }
       if (callback) { void run().then((result) => callback(null, result), callback); return }
       return run()

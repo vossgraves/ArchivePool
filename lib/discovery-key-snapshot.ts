@@ -22,7 +22,7 @@ export async function snapshotDiscoveryIdentity(hash: string): Promise<ReadKeyId
   })
   const row = snapshot?.keys[hash]
   if (!row || !Number.isSafeInteger(row.id)) return null
-  return { ok: true, keyId: row.id, scope: isService(row.scope) ? row.scope : null }
+  return { ok: true, keyId: row.id, scope: isService(row.scope) ? row.scope : null, expiresAt: Math.min(Date.now() + 300_000, snapshot!.savedAt + 300_000) }
 }
 
 export async function writeDiscoveryKeySnapshot(): Promise<void> {
