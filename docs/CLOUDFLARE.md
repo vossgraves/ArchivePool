@@ -22,15 +22,15 @@ Neon revision: [`64774e5`](https://github.com/neondatabase/website/blob/64774e52
 | Resource | Current Free limit | Enforcement and application guard |
 |---|---|---|
 | Workers requests | 100,000/day, account-wide; midnight UTC reset | Incoming requests, including rejected requests, count. Over quota returns 1027. Application code cannot prevent this. Static assets served by the assets binding are exempt. |
-| Workers CPU/memory | 10 ms/request; 128 MB/isolate | I/O wait is excluded. Password/scrypt login stays disabled. Health and sync calls are sliced; upstream response consumption is capped at 256 KiB/request. This is a work bound, not proof that OpenNext fits 10 ms. |
+| Workers CPU/memory | 10 ms/request; 128 MB/isolate | I/O wait is excluded. Password/scrypt login stays disabled. Request bodies are capped at 64 KiB before parsing; upstream response consumption at 256 KiB/request. Health and sync calls are sliced. These are work bounds, not proof that OpenNext fits 10 ms. |
 | Workers subrequests | 50 external subrequests/request; Cache API calls share this allowance; internal services have a separate 1,000 allowance | All upstream HTTP and redirect hops use `budgetedFetch`, capped at 40. Cache paths use at most six match/put calls in the healthy fixtures; outage fallbacks remain below ten. SQL statements and KV operations are counted separately below. |
 | Workers Logs | 200,000 events/day; three-day retention | Head sampling is 10%; routine invocation/error pairs are about 13,000 events/day in the pessimistic model. Dashboard request/CPU metrics remain available. Watch account-wide log use. |
 | Worker upload | 3 MiB compressed | Previous build was about 2 MiB; this change was not fully built on the shared machine. Check the release artifact before deployment. |
 | Hyperdrive | 100,000 statements/day, cached queries included; approximately 20 origin connections/configuration | Every query, mutation, BEGIN/COMMIT/ROLLBACK and DDL statement counts. The shared ledger grants at most 80,000 statement units/day. Ordinary requests can reserve only 72,000, leaving 8,000 for authenticated crons. Client pools have at most three connections by default. |
 | Workers KV | 100,000 reads/day; 1,000 writes, deletes and list operations/day; 1 GB storage; 25 MiB/value; one write/second/key | Ledger limits: 80,000 reads/day, of which 8,000 are reserved for crons, and 32 writes/day. No KV delete/list operations. Four stable keys; no per-client/key KV writes. Scheduled publication uses at most 16 writes/day, plus one operator schema-marker write on rollout. |
-| SQLite Durable Objects | 100,000 RPC sessions/day; 13,000 GB-s/day; 5 million row reads/day; 100,000 row writes/day; 5 GB storage | One global object, one INTEGER-primary-key row. Public reads check its outage signal, including cache hits. An RPC session is opened only when a request needs a resource; calls on its returned RpcTarget are part of that session. At most 51,032 successful ticket reservations/day, plus at most 1,440 database-outage signal writes; denied reservations do not write. A continuously active 128 MB object is below 11,060 GB-s/day. |
+| SQLite Durable Objects | 100,000 RPC sessions/day; 13,000 GB-s/day; 5 million row reads/day; 100,000 row writes/day; 5 GB storage | One global object, one INTEGER-primary-key row. Public reads check its outage signal, including cache hits. An RPC session is opened only when a request needs a resource; calls on its returned RpcTarget are part of that session. At most 51,064 successful ticket reservations/day, including 32 anonymous admissions, plus at most 1,440 database-outage signal writes; denied reservations do not write. A continuously active 128 MB object is below 11,060 GB-s/day. |
 | Neon compute | 100 CU-hours/project/month; Free can autoscale to 2 CU; scale-to-zero after five minutes | A conservative union of SQL wake windows is limited to 10 hours/day, with the last hour reserved for crons. **This fits only if the owner fixes the endpoint at 0.25 CU**: 31 × 10 × .25 = 77.5 CU-hours. At 0.5 or 2 CU it does not fit. External SQL consumers and Hyperdrive/origin behavior must be monitored. |
-| Neon Postgres storage | **1 GB/project**, 20 GB across Free projects | Daily retention bounds historical tables. Active users, keys, pool entries and database bloat still require owner monitoring/admission policy. Do not rely on the older 0.5 GB figure. |
+| Neon Postgres storage | **1 GB/project**, 20 GB across Free projects | Daily retention bounds historical tables. Source payloads are limited to 16 KiB after encryption and anonymous admissions to 32/day. Active users, keys, attributed pool entries and database bloat still require monitoring/admission policy. Do not rely on the older 0.5 GB figure. |
 | Neon public network transfer | 5 GB/project/month | Metadata-only queries and bounded lease selections reduce transport. The measured workload below fits; the application does not enforce a provider-wide byte counter. Large payloads or other project consumers can still exhaust transfer. |
 
 Official pages: [Workers limits](https://developers.cloudflare.com/workers/platform/limits/),
@@ -68,48 +68,48 @@ one KV read per cold isolate, zero SQL; that read is included wherever it occurs
 
 | Method/path | SQL before | SQL after | KV R/W | Cache M/P | HTTP fetches | DO sessions | Local CPU max ms |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| GET /api/accounts | 0–29 | 0–28 | 0–1/0 | 0/0 | 0–6 | 0–1 | 22.41 |
-| GET /api/sources | 0–31 | 0–30 | 0–1/0 | 0/0 | 0–6 | 0–1 | 25.11 |
-| GET /api/discovery/tidal | 0–1 | 0–1 | 0–3/0 | 1–2/0–4 | 0 | 1 | 3.86 |
-| GET /api/discovery/qobuz | 0–1 | 0–1 | 0–3/0 | 1–2/0–4 | 0 | 1 | 6.01 |
-| GET /api/instances/[service] | 0–1 | 0–1 | 0–3/0 | 1–2/0–4 | 0 | 1 | 3.09 |
-| GET /api/status | 0 | 0 | 0–1/0 | 1/0–2 | 0 | 1 | 0.83 |
-| POST /api/report | 5–14 | 4–13 | 1/0 | 0/0 | 0–1 | 1 | 9.46 |
-| GET /api/cron/health | 16–39 | 13–37 | 1/0–3 | 0/0 | 4–18 | 1 | 18.24 |
-| GET /api/cron/monochrome | 1–32 | 1–25 | 1/0–1 | 0/0 | 0–22 | 1 | 24.41 |
-| GET /api/cron/purge-dead | 3–4 | 13–16 | 1/0–2 | 0/0 | 0 | 1 | 7.3 |
-| GET /api/admin/audit | 1 | 1 | 1/0 | 0/0 | 0 | 1 | 15.22 |
-| GET /api/admin/claims | 1 | 1 | 1/0 | 0/0 | 0 | 1 | 2.83 |
-| GET /api/admin/keys | 1 | 1 | 0/0 | 0/0 | 0 | 1 | 2.98 |
-| GET /api/admin/remove | 2 | 2 | 1/0 | 0/0 | 0 | 1 | 7.85 |
-| GET /api/admin/requests | 1 | 1 | 1/0 | 0/0 | 0 | 1 | 3.11 |
-| GET /api/admin/users | 1 | 1 | 1/0 | 0/0 | 0 | 1 | 2.49 |
-| POST /api/admin/check-entry | 5 | 5 | 1/0 | 0/0 | 1 | 1 | 3.61 |
-| POST /api/admin/force-check | 23 | 27 | 1/0 | 0/0 | 17 | 1 | 15.02 |
-| POST /api/admin/keys | 2 | 2 | 1/0 | 0/0 | 0 | 1 | 2.86 |
-| PATCH /api/admin/keys | 2 | 2 | 1/0 | 0/0 | 0 | 1 | 6.37 |
-| POST /api/admin/keys/custom | 2 | 2 | 1/0 | 0/0 | 0 | 1 | 3.52 |
-| DELETE /api/admin/keys/[id] | 2 | 2 | 1/0 | 0/0 | 0 | 1 | 3.1 |
-| POST /api/admin/remove | 3 | 3 | 1/0 | 0/0 | 0 | 1 | 3.33 |
-| POST /api/admin/purge-dead | 5 | 5 | 1/0 | 0/0 | 0 | 1 | 4.33 |
-| POST /api/admin/purge-entry | 3 | 3 | 1/0 | 0/0 | 0 | 1 | 6.8 |
-| POST /api/admin/requests/[id] | 3 | 3 | 1/0 | 0/0 | 0 | 1 | 4.72 |
-| POST /api/admin/claims/[id] | 2–13 | 2–13 | 1/0 | 0/0 | 0 | 1 | 6.93 |
-| PATCH /api/admin/users | 2 | 2 | 1/0 | 0/0 | 0 | 1 | 3.04 |
-| POST /api/auth/claim-legacy | 7–16 | 7–16 | 1/0 | 0/0 | 0 | 1 | 9.29 |
-| GET /api/auth/github/start | 0 | 0 | 0/0 | 0/0 | 0 | 0 | 0.91 |
-| GET /api/auth/github/callback | 1–4 | 1–4 | 1/0 | 0/0 | 2 | 1 | 3.97 |
-| POST /api/auth/login | 0 | 0 | 0/0 | 0/0 | 0 | 0 | 0.44 |
-| POST /api/auth/signup | 0 | 0 | 0/0 | 0/0 | 0 | 0 | 0.43 |
-| POST /api/auth/logout | 0 | 0 | 0/0 | 0/0 | 0 | 0 | 0.27 |
-| GET /api/auth/me | 0–2 | 0–2 | 0–1/0 | 0/0 | 0 | 0–1 | 3.39 |
-| GET /api/keys | 3 | 3 | 1/0 | 0/0 | 0 | 1 | 5.04 |
-| POST /api/keys | 4 | 4 | 1/0 | 0/0 | 0 | 1 | 8.09 |
-| DELETE /api/keys/[id] | 2 | 2 | 1/0 | 0/0 | 0 | 1 | 3.47 |
-| POST /api/requests/[id]/claim | 8 | 8 | 1/0 | 0/0 | 0 | 1 | 5.48 |
+| GET /api/accounts | 0–29 | 0–28 | 0–1/0 | 0/0 | 0–6 | 0–1 | 23.11 |
+| GET /api/sources | 0–31 | 0–30 | 0–1/0 | 0/0 | 0–6 | 0–1 | 17.49 |
+| GET /api/discovery/tidal | 0–1 | 0–1 | 0–3/0 | 1–2/0–4 | 0 | 1 | 93.85 |
+| GET /api/discovery/qobuz | 0–1 | 0–1 | 0–3/0 | 1–2/0–4 | 0 | 1 | 6.74 |
+| GET /api/instances/[service] | 0–1 | 0–1 | 0–3/0 | 1–2/0–4 | 0 | 1 | 3.44 |
+| GET /api/status | 0 | 0 | 0–1/0 | 1/0–2 | 0 | 1 | 0.82 |
+| POST /api/report | 5–14 | 4–13 | 1/0 | 0/0 | 0–1 | 1 | 12.45 |
+| GET /api/cron/health | 16–39 | 13–37 | 1/0–3 | 0/0 | 4–18 | 1 | 17.92 |
+| GET /api/cron/monochrome | 1–32 | 1–25 | 1/0–1 | 0/0 | 0–22 | 1 | 30.75 |
+| GET /api/cron/purge-dead | 3–4 | 13–16 | 1/0–2 | 0/0 | 0 | 1 | 7.59 |
+| GET /api/admin/audit | 1 | 1 | 1/0 | 0/0 | 0 | 1 | 15.89 |
+| GET /api/admin/claims | 1 | 1 | 1/0 | 0/0 | 0 | 1 | 2.95 |
+| GET /api/admin/keys | 1 | 1 | 0/0 | 0/0 | 0 | 1 | 2.73 |
+| GET /api/admin/remove | 2 | 2 | 1/0 | 0/0 | 0 | 1 | 3.44 |
+| GET /api/admin/requests | 1 | 1 | 1/0 | 0/0 | 0 | 1 | 2.63 |
+| GET /api/admin/users | 1 | 1 | 1/0 | 0/0 | 0 | 1 | 2.47 |
+| POST /api/admin/check-entry | 5 | 5 | 1/0 | 0/0 | 1 | 1 | 3.58 |
+| POST /api/admin/force-check | 23 | 27 | 1/0 | 0/0 | 17 | 1 | 14.85 |
+| POST /api/admin/keys | 2 | 2 | 1/0 | 0/0 | 0 | 1 | 2.87 |
+| PATCH /api/admin/keys | 2 | 2 | 1/0 | 0/0 | 0 | 1 | 5.9 |
+| POST /api/admin/keys/custom | 2 | 2 | 1/0 | 0/0 | 0 | 1 | 4 |
+| DELETE /api/admin/keys/[id] | 2 | 2 | 1/0 | 0/0 | 0 | 1 | 2.71 |
+| POST /api/admin/remove | 3 | 3 | 1/0 | 0/0 | 0 | 1 | 3.36 |
+| POST /api/admin/purge-dead | 5 | 5 | 1/0 | 0/0 | 0 | 1 | 8.87 |
+| POST /api/admin/purge-entry | 3 | 3 | 1/0 | 0/0 | 0 | 1 | 3.08 |
+| POST /api/admin/requests/[id] | 3 | 3 | 1/0 | 0/0 | 0 | 1 | 7.28 |
+| POST /api/admin/claims/[id] | 2–13 | 2–13 | 1/0 | 0/0 | 0 | 1 | 4.59 |
+| PATCH /api/admin/users | 2 | 2 | 1/0 | 0/0 | 0 | 1 | 2.7 |
+| POST /api/auth/claim-legacy | 7–16 | 7–16 | 1/0 | 0/0 | 0 | 1 | 5.63 |
+| GET /api/auth/github/start | 0 | 0 | 0/0 | 0/0 | 0 | 0 | 0.85 |
+| GET /api/auth/github/callback | 1–4 | 1–4 | 1/0 | 0/0 | 2 | 1 | 7.72 |
+| POST /api/auth/login | 0 | 0 | 0/0 | 0/0 | 0 | 0 | 0.42 |
+| POST /api/auth/signup | 0 | 0 | 0/0 | 0/0 | 0 | 0 | 0.44 |
+| POST /api/auth/logout | 0 | 0 | 0/0 | 0/0 | 0 | 0 | 0.31 |
+| GET /api/auth/me | 0–2 | 0–2 | 0–1/0 | 0/0 | 0 | 0–1 | 4.12 |
+| GET /api/keys | 3 | 3 | 1/0 | 0/0 | 0 | 1 | 5.18 |
+| POST /api/keys | 4 | 4 | 1/0 | 0/0 | 0 | 1 | 9.73 |
+| DELETE /api/keys/[id] | 2 | 2 | 1/0 | 0/0 | 0 | 1 | 5 |
+| POST /api/requests/[id]/claim | 8 | 8 | 1/0 | 0/0 | 0 | 1 | 7.98 |
 | POST /api/tidal/device/start | 0 | 0 | 0/0 | 0/0 | 1 | 1 | 0.76 |
-| POST /api/tidal/device/poll | 1 | 1 | 1/0 | 0/0 | 2 | 1 | 7.66 |
-| POST /api/qobuz/login | 1 | 1 | 1/0 | 0/0 | 5 | 1 | 4.21 |
+| POST /api/tidal/device/poll | 1 | 1 | 1/0 | 0/0 | 2 | 1 | 3.85 |
+| POST /api/qobuz/login | 1 | 1 | 1/0 | 0/0 | 5 | 1 | 4.09 |
 | submit action | 1–3 | 1–3 | 1/0 | 0/0 | 0–1 | 1 | 25.44 |
 | page / | 0 | 0 | 0/0 | 0/0 | 0 | 0 | 0.49 |
 | page /docs | 0 | 0 | 0/0 | 0/0 | 0 | 0 | 0.32 |
@@ -194,7 +194,7 @@ statement for every discovery request once the manifest ages past five minutes.
 | SQL wake time/day | can approach 24 hours | reservation cap 10 hours | can approach 24 hours | ≤10 credited hours; ordinary stops at nine, crons retain an hour |
 | Neon CU-hours/31 days at .25 CU | up to 186 | ≤77.5 credited | up to 186 | ≤77.5 credited, subject to the endpoint/external-consumer assumptions |
 | Neon transfer/31 days | about 1.2 GB | about 1.1 GB | about 6 GB: exceeds 5 GB | **≤4.4 GB in these fixtures**, including a conservative handshake/miscellaneous allowance |
-| SQLite DO successful row writes/day | absent | under 52,472 | absent | under 52,472; one row, no secondary index |
+| SQLite DO successful row writes/day | absent | at most 52,504 | absent | at most 52,504; one row, no secondary index |
 
 Cron SQL arithmetic: before `4 × (2×128 + 3×16 + 5) + 2×(48+6+1) + 4 = 1,350`;
 after `4 × (2×128 + 16 + 4) + 2×(48+6+1) + 16 = 1,230`.
@@ -230,28 +230,29 @@ storage guarantee: incoming rows between purges, audit detail, active account/ke
 counts, TOAST, dead tuples and restore history must be measured. A purge cannot
 repair a provider storage cap once even DELETE needs additional space.
 
-### Hostile payload case requiring an owner contract decision
+### Conservative input caps: needs owner decision
 
-The key-guessing model is not the worst possible body. The anonymous submit action
-currently accepts an Amazon session artifact by shape (length ≥16, premium=true),
-without an upstream probe. Its measured 64 KiB fixture costs one SQL statement,
-zero HTTP fetches and **saves the row**. The global probe budget therefore cannot
-contain this path. Distributed callers can spend the ordinary 9,000 SQL admissions
-on distinct large artifacts; a 900 KiB session grows after at-rest encoding.
+The anonymous submit action accepts an Amazon session artifact by shape
+(length ≥16, premium=true), without an upstream probe. Before the caps, its measured
+64 KiB fixture cost one SQL statement, zero HTTP fetches and **saved the row**.
+The same fixture now rejects before database or upstream work. The global probe
+budget cannot contain shape-only admission: distributed callers could otherwise
+spend 9,000 ordinary SQL reservations on distinct large artifacts; a 900 KiB
+session grows after at-rest encoding, allowing more than 10 GiB/day of payloads.
 
-| Hostile path | Before | After the compatible changes | Owner action required |
-|---|---|---|---|
-| Large anonymous Amazon submissions | Enough for >10 GiB/day before provider failure | Still enough for >10 GiB/day, against 1 GB Postgres storage | Approve bounded stored payloads and admission limits, or restrict/unpublish shape-only account ingestion |
-| Large API JSON/form body | Can exceed 10 ms/128 MB before a database/upstream budget runs | Remains possible; scrypt is disabled, but parsing happens before the resource wrapper can price data | Approve route/body ceilings and enforce them before parsing; Paid CPU alone does not increase the 128 MB memory limit |
-| Large valid credential/management responses | Can exceed 5 GB transfer/month and CPU | Bounded row selection/metadata projection helps, but bytes are not capped | Approve payload and full-list/pagination limits; provision Neon transfer headroom |
+| Input | Enforced default | Reason and owner review |
+|---|---|---|
+| Request body | `MAX_REQUEST_BODY_BYTES = 64 * 1024` | The Worker rejects declared, streamed and multipart oversize with 413 before OpenNext parses or accesses resources. Next server actions use the same limit. Review legitimate forms and account artifacts; rejected requests still count as invocations. |
+| Stored source payload | `MAX_STORED_SOURCE_PAYLOAD_BYTES = 16 * 1024` | UTF-8 JSON is checked before and after at-rest encryption, before initial DB/upstream work and again after verification. A 13 KiB session exceeds the encrypted cap; a 10 KiB fixture fits. Review real Amazon artifact sizes without weakening the encrypted bound. Existing oversized rows are not truncated. |
+| Anonymous admissions | `ANONYMOUS_ADMISSIONS_PER_DAY = 32` | One persisted UTC counter across Workers isolates; an atomic DB bucket off Workers. Accepted candidates reserve before upsert, including resubmissions; failed saves remain spent and unavailable budgets fail closed. At most 512 KiB/day or 15.5 MiB/31 days of serialized anonymous payloads, before row/index/bloat overhead. Attributed submissions are exempt. Review expected contribution volume and the 320-verdict cron driver. |
 
-**This PR does not provide an unconditional Free-tier guarantee for those paths.**
-They require changing accepted input or full-list contracts, which is prohibited
-without the owner's decision. Suggested review targets: 64 KiB request bodies,
-16 KiB stored source payloads, and a pool admission ceiling consistent with the
-320-verdict cron driver. Check real Amazon artifact requirements before selecting
-those values. Do not describe the fixture budget as a universal production bound
-or continue an unrestricted Free rollout without this policy decision.
+The constants live in `cloudflare/input-limits.mjs`. These conservative defaults
+change accepted inputs and are listed under **Needs owner decision** in the PR so
+the owner can tune them. Attribution requires a signed-in contributor on the submit
+action; this cap does not prevent abuse through registered accounts. Active valid
+rows can accumulate indefinitely, and management/credential responses are not
+provider-wide byte-limited. The fixture budget remains conditional on small ordinary
+payloads, modest user/key counts and the owner's monitoring/admission policy.
 
 ## Defects addressed and behavior during outages
 
@@ -316,7 +317,7 @@ eligible rows; statement counts alone do not bound database CPU or bloat.
 
 ## Regression guards and CI
 
-`.github/workflows/typescript.yml` runs `tsc --noEmit`, the local Postgres resource,
+`.github/workflows/typescript.yml` runs `tsc --noEmit`, ESLint, the local Postgres resource,
 cron, retention, outage and route-coverage tests, and mutation checks on every PR
 and push to main. Every API method, the submit action and data-reading pages has a
 fixture ceiling; adding a new route without one fails CI. Separate guards cover
@@ -374,10 +375,10 @@ upgrade; Workers Paid does not buy Neon compute, storage or transfer. Raise/remo
 ledger ceilings deliberately as part of that rollout, with dashboard evidence.
 Password login can be enabled on Paid with CF_WEB_LOGIN_ENABLED=true.
 
-Owner decisions that require contract changes: bounded request/form and stored
-payload sizes; pagination or limits for full management/contribution/key lists;
-active-user/key/pool admission ceilings; shorter retention of meaningful audit/
-request history; and structured credential 503 envelopes. They are listed instead
+Owner decisions: tune the enforced request/form, stored-payload and anonymous
+admission caps; pagination or limits for full management/contribution/key lists;
+active-user/key/attributed-pool admission ceilings; shorter retention of meaningful
+audit/request history; and structured credential 503 envelopes. Remaining changes are listed instead
 of silently truncating clients' lists or changing existing status/envelope formats.
 Discovery manifests are refreshed by health sweeps, but normal cached authorization
 expires after five minutes without extending through memo/edge reloads. During a

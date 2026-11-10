@@ -14,7 +14,7 @@
       "connections": 2,
       "dbBytes": 5083,
       "rpc": 0,
-      "cpuMs": 20.38,
+      "cpuMs": 38.36,
       "status": 200
     },
     {
@@ -27,9 +27,9 @@
       "puts": 0,
       "fetch": 0,
       "connections": 1,
-      "dbBytes": 5043,
+      "dbBytes": 5049,
       "rpc": 0,
-      "cpuMs": 5.05,
+      "cpuMs": 5.53,
       "status": 200
     },
     {
@@ -42,9 +42,9 @@
       "puts": 0,
       "fetch": 6,
       "connections": 3,
-      "dbBytes": 15288,
+      "dbBytes": 15298,
       "rpc": 0,
-      "cpuMs": 39.77,
+      "cpuMs": 31.11,
       "status": 200
     },
     {
@@ -59,7 +59,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.82,
+      "cpuMs": 0.7,
       "status": 401
     },
     {
@@ -74,7 +74,7 @@
       "connections": 1,
       "dbBytes": 137,
       "rpc": 0,
-      "cpuMs": 12.02,
+      "cpuMs": 7.76,
       "status": 401
     },
     {
@@ -87,9 +87,9 @@
       "puts": 0,
       "fetch": 0,
       "connections": 3,
-      "dbBytes": 15307,
+      "dbBytes": 15303,
       "rpc": 0,
-      "cpuMs": 21.1,
+      "cpuMs": 24.63,
       "status": 200
     },
     {
@@ -104,7 +104,7 @@
       "connections": 2,
       "dbBytes": 16311,
       "rpc": 0,
-      "cpuMs": 11.14,
+      "cpuMs": 12.79,
       "status": 200
     },
     {
@@ -117,9 +117,9 @@
       "puts": 0,
       "fetch": 6,
       "connections": 3,
-      "dbBytes": 25513,
+      "dbBytes": 25524,
       "rpc": 0,
-      "cpuMs": 36.58,
+      "cpuMs": 32,
       "status": 200
     },
     {
@@ -149,7 +149,7 @@
       "connections": 1,
       "dbBytes": 137,
       "rpc": 0,
-      "cpuMs": 3.35,
+      "cpuMs": 4.09,
       "status": 401
     },
     {
@@ -164,7 +164,7 @@
       "connections": 1,
       "dbBytes": 226,
       "rpc": 0,
-      "cpuMs": 5.9,
+      "cpuMs": 11.89,
       "status": 200
     },
     {
@@ -179,7 +179,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.27,
+      "cpuMs": 0.32,
       "status": 200
     },
     {
@@ -194,7 +194,7 @@
       "connections": 1,
       "dbBytes": 226,
       "rpc": 0,
-      "cpuMs": 3.28,
+      "cpuMs": 8.41,
       "status": 200
     },
     {
@@ -209,7 +209,7 @@
       "connections": 1,
       "dbBytes": 137,
       "rpc": 0,
-      "cpuMs": 8.96,
+      "cpuMs": 3.49,
       "status": 401
     },
     {
@@ -224,7 +224,7 @@
       "connections": 1,
       "dbBytes": 226,
       "rpc": 0,
-      "cpuMs": 3.78,
+      "cpuMs": 8.28,
       "status": 200
     },
     {
@@ -239,7 +239,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.28,
+      "cpuMs": 0.35,
       "status": 200
     },
     {
@@ -254,7 +254,7 @@
       "connections": 1,
       "dbBytes": 226,
       "rpc": 0,
-      "cpuMs": 3.58,
+      "cpuMs": 3.42,
       "status": 200
     },
     {
@@ -269,7 +269,7 @@
       "connections": 1,
       "dbBytes": 137,
       "rpc": 0,
-      "cpuMs": 4.72,
+      "cpuMs": 4.38,
       "status": 401
     },
     {
@@ -284,7 +284,7 @@
       "connections": 1,
       "dbBytes": 226,
       "rpc": 0,
-      "cpuMs": 3.91,
+      "cpuMs": 3.65,
       "status": 200
     },
     {
@@ -299,7 +299,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.28,
+      "cpuMs": 0.18,
       "status": 200
     },
     {
@@ -314,7 +314,7 @@
       "connections": 1,
       "dbBytes": 226,
       "rpc": 0,
-      "cpuMs": 3.5,
+      "cpuMs": 4.64,
       "status": 200
     },
     {
@@ -329,7 +329,7 @@
       "connections": 1,
       "dbBytes": 137,
       "rpc": 0,
-      "cpuMs": 3.14,
+      "cpuMs": 3.35,
       "status": 401
     },
     {
@@ -344,7 +344,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.99,
+      "cpuMs": 0.77,
       "status": 200
     },
     {
@@ -359,7 +359,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.14,
+      "cpuMs": 0.13,
       "status": 200
     },
     {
@@ -374,7 +374,7 @@
       "connections": 1,
       "dbBytes": 1317,
       "rpc": 0,
-      "cpuMs": 28.18,
+      "cpuMs": 15.31,
       "status": 200
     },
     {
@@ -389,7 +389,7 @@
       "connections": 2,
       "dbBytes": 687,
       "rpc": 0,
-      "cpuMs": 6.72,
+      "cpuMs": 5.75,
       "status": 200
     },
     {
@@ -404,7 +404,7 @@
       "connections": 2,
       "dbBytes": 3039,
       "rpc": 0,
-      "cpuMs": 16.5,
+      "cpuMs": 10.08,
       "status": 200
     },
     {
@@ -419,7 +419,7 @@
       "connections": 2,
       "dbBytes": 800,
       "rpc": 0,
-      "cpuMs": 10.88,
+      "cpuMs": 16.25,
       "status": 404
     },
     {
@@ -432,9 +432,9 @@
       "puts": 0,
       "fetch": 18,
       "connections": 1,
-      "dbBytes": 19939,
+      "dbBytes": 19941,
       "rpc": 0,
-      "cpuMs": 26.54,
+      "cpuMs": 37.78,
       "status": 200
     },
     {
@@ -447,9 +447,9 @@
       "puts": 0,
       "fetch": 8,
       "connections": 1,
-      "dbBytes": 26013,
+      "dbBytes": 26012,
       "rpc": 0,
-      "cpuMs": 21.29,
+      "cpuMs": 20.07,
       "status": 200
     },
     {
@@ -462,9 +462,9 @@
       "puts": 0,
       "fetch": 4,
       "connections": 2,
-      "dbBytes": 4269,
+      "dbBytes": 4270,
       "rpc": 0,
-      "cpuMs": 13.49,
+      "cpuMs": 12.94,
       "status": 200
     },
     {
@@ -477,9 +477,9 @@
       "puts": 0,
       "fetch": 17,
       "connections": 1,
-      "dbBytes": 26653,
+      "dbBytes": 26646,
       "rpc": 0,
-      "cpuMs": 34.9,
+      "cpuMs": 35.68,
       "status": 200
     },
     {
@@ -492,9 +492,9 @@
       "puts": 0,
       "fetch": 9,
       "connections": 3,
-      "dbBytes": 1235,
+      "dbBytes": 1236,
       "rpc": 0,
-      "cpuMs": 11.54,
+      "cpuMs": 18.88,
       "status": 200
     },
     {
@@ -507,9 +507,9 @@
       "puts": 0,
       "fetch": 8,
       "connections": 3,
-      "dbBytes": 1235,
+      "dbBytes": 1233,
       "rpc": 0,
-      "cpuMs": 19.25,
+      "cpuMs": 14.01,
       "status": 200
     },
     {
@@ -524,7 +524,7 @@
       "connections": 3,
       "dbBytes": 1125,
       "rpc": 0,
-      "cpuMs": 10.07,
+      "cpuMs": 10.8,
       "status": 200
     },
     {
@@ -539,7 +539,7 @@
       "connections": 1,
       "dbBytes": 2890,
       "rpc": 0,
-      "cpuMs": 4.24,
+      "cpuMs": 6.54,
       "status": 200
     },
     {
@@ -552,9 +552,9 @@
       "puts": 0,
       "fetch": 29,
       "connections": 3,
-      "dbBytes": 12130,
+      "dbBytes": 12133,
       "rpc": 0,
-      "cpuMs": 46.72,
+      "cpuMs": 47.2,
       "status": 200
     },
     {
@@ -569,7 +569,7 @@
       "connections": 1,
       "dbBytes": 153,
       "rpc": 0,
-      "cpuMs": 11.96,
+      "cpuMs": 4.56,
       "status": 200
     },
     {
@@ -584,7 +584,7 @@
       "connections": 1,
       "dbBytes": 959,
       "rpc": 0,
-      "cpuMs": 5.28,
+      "cpuMs": 10.61,
       "status": 200
     },
     {
@@ -599,7 +599,7 @@
       "connections": 1,
       "dbBytes": 248,
       "rpc": 0,
-      "cpuMs": 9.5,
+      "cpuMs": 6.51,
       "status": 200
     },
     {
@@ -614,7 +614,7 @@
       "connections": 1,
       "dbBytes": 384,
       "rpc": 0,
-      "cpuMs": 17.94,
+      "cpuMs": 23.47,
       "status": 200
     },
     {
@@ -627,9 +627,9 @@
       "puts": 0,
       "fetch": 0,
       "connections": 1,
-      "dbBytes": 490,
+      "dbBytes": 489,
       "rpc": 0,
-      "cpuMs": 3.98,
+      "cpuMs": 3.31,
       "status": 200
     },
     {
@@ -642,9 +642,9 @@
       "puts": 0,
       "fetch": 0,
       "connections": 1,
-      "dbBytes": 17114,
+      "dbBytes": 17113,
       "rpc": 0,
-      "cpuMs": 12.98,
+      "cpuMs": 4.29,
       "status": 200
     },
     {
@@ -659,7 +659,7 @@
       "connections": 1,
       "dbBytes": 682,
       "rpc": 0,
-      "cpuMs": 4.09,
+      "cpuMs": 8.94,
       "status": 200
     },
     {
@@ -674,7 +674,7 @@
       "connections": 1,
       "dbBytes": 332,
       "rpc": 0,
-      "cpuMs": 5.58,
+      "cpuMs": 3.02,
       "status": 200
     },
     {
@@ -689,7 +689,7 @@
       "connections": 1,
       "dbBytes": 1399,
       "rpc": 0,
-      "cpuMs": 5.6,
+      "cpuMs": 11.27,
       "status": 200
     },
     {
@@ -702,9 +702,9 @@
       "puts": 0,
       "fetch": 17,
       "connections": 3,
-      "dbBytes": 20429,
+      "dbBytes": 20418,
       "rpc": 0,
-      "cpuMs": 23.66,
+      "cpuMs": 16.17,
       "status": 200
     },
     {
@@ -719,7 +719,7 @@
       "connections": 1,
       "dbBytes": 111,
       "rpc": 0,
-      "cpuMs": 4.52,
+      "cpuMs": 4.11,
       "status": 200
     },
     {
@@ -734,7 +734,7 @@
       "connections": 1,
       "dbBytes": 72,
       "rpc": 0,
-      "cpuMs": 8.98,
+      "cpuMs": 4.83,
       "status": 200
     },
     {
@@ -749,7 +749,7 @@
       "connections": 1,
       "dbBytes": 171,
       "rpc": 0,
-      "cpuMs": 4.43,
+      "cpuMs": 9.36,
       "status": 200
     },
     {
@@ -764,7 +764,7 @@
       "connections": 1,
       "dbBytes": 107,
       "rpc": 0,
-      "cpuMs": 4.62,
+      "cpuMs": 4.79,
       "status": 200
     },
     {
@@ -779,7 +779,7 @@
       "connections": 1,
       "dbBytes": 107,
       "rpc": 0,
-      "cpuMs": 4.22,
+      "cpuMs": 4.36,
       "status": 200
     },
     {
@@ -794,7 +794,7 @@
       "connections": 1,
       "dbBytes": 942,
       "rpc": 0,
-      "cpuMs": 10.95,
+      "cpuMs": 11.13,
       "status": 200
     },
     {
@@ -809,7 +809,7 @@
       "connections": 1,
       "dbBytes": 1279,
       "rpc": 0,
-      "cpuMs": 4.31,
+      "cpuMs": 10.06,
       "status": 200
     },
     {
@@ -824,7 +824,7 @@
       "connections": 1,
       "dbBytes": 700,
       "rpc": 0,
-      "cpuMs": 4.63,
+      "cpuMs": 5.25,
       "status": 200
     },
     {
@@ -839,7 +839,7 @@
       "connections": 1,
       "dbBytes": 700,
       "rpc": 0,
-      "cpuMs": 6.22,
+      "cpuMs": 10.33,
       "status": 200
     },
     {
@@ -854,7 +854,7 @@
       "connections": 1,
       "dbBytes": 1092,
       "rpc": 0,
-      "cpuMs": 5.88,
+      "cpuMs": 6.66,
       "status": 200
     },
     {
@@ -869,7 +869,7 @@
       "connections": 1,
       "dbBytes": 107,
       "rpc": 0,
-      "cpuMs": 4.52,
+      "cpuMs": 10.44,
       "status": 200
     },
     {
@@ -884,7 +884,7 @@
       "connections": 1,
       "dbBytes": 176,
       "rpc": 0,
-      "cpuMs": 5.07,
+      "cpuMs": 5.76,
       "status": 200
     },
     {
@@ -899,7 +899,7 @@
       "connections": 1,
       "dbBytes": 912,
       "rpc": 0,
-      "cpuMs": 6.05,
+      "cpuMs": 10.55,
       "status": 200
     },
     {
@@ -914,7 +914,7 @@
       "connections": 1,
       "dbBytes": 1559,
       "rpc": 0,
-      "cpuMs": 9.32,
+      "cpuMs": 6.51,
       "status": 200
     },
     {
@@ -929,7 +929,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 2,
+      "cpuMs": 6.23,
       "status": 307
     },
     {
@@ -944,7 +944,7 @@
       "connections": 1,
       "dbBytes": 524,
       "rpc": 0,
-      "cpuMs": 8.98,
+      "cpuMs": 4.57,
       "status": 307
     },
     {
@@ -959,7 +959,7 @@
       "connections": 1,
       "dbBytes": 666,
       "rpc": 0,
-      "cpuMs": 4.98,
+      "cpuMs": 9.3,
       "status": 307
     },
     {
@@ -974,7 +974,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.65,
+      "cpuMs": 0.6,
       "status": 503
     },
     {
@@ -989,7 +989,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.65,
+      "cpuMs": 0.54,
       "status": 503
     },
     {
@@ -1004,7 +1004,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.43,
+      "cpuMs": 0.42,
       "status": 200
     },
     {
@@ -1019,7 +1019,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.46,
+      "cpuMs": 0.45,
       "status": 401
     },
     {
@@ -1034,7 +1034,7 @@
       "connections": 1,
       "dbBytes": 191,
       "rpc": 0,
-      "cpuMs": 9.37,
+      "cpuMs": 12.02,
       "status": 200
     },
     {
@@ -1049,7 +1049,7 @@
       "connections": 2,
       "dbBytes": 966,
       "rpc": 0,
-      "cpuMs": 14.63,
+      "cpuMs": 10.19,
       "status": 200
     },
     {
@@ -1064,7 +1064,7 @@
       "connections": 1,
       "dbBytes": 570,
       "rpc": 0,
-      "cpuMs": 9.04,
+      "cpuMs": 14.03,
       "status": 200
     },
     {
@@ -1079,7 +1079,7 @@
       "connections": 1,
       "dbBytes": 179,
       "rpc": 0,
-      "cpuMs": 8.21,
+      "cpuMs": 8.77,
       "status": 200
     },
     {
@@ -1094,7 +1094,7 @@
       "connections": 1,
       "dbBytes": 1026,
       "rpc": 0,
-      "cpuMs": 8.74,
+      "cpuMs": 13.97,
       "status": 200
     },
     {
@@ -1109,7 +1109,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.71,
+      "cpuMs": 0.74,
       "status": 200
     },
     {
@@ -1124,7 +1124,7 @@
       "connections": 1,
       "dbBytes": 37,
       "rpc": 0,
-      "cpuMs": 3.89,
+      "cpuMs": 10.32,
       "status": 200
     },
     {
@@ -1139,7 +1139,7 @@
       "connections": 1,
       "dbBytes": 37,
       "rpc": 0,
-      "cpuMs": 4.25,
+      "cpuMs": 5.12,
       "status": 200
     },
     {
@@ -1154,7 +1154,7 @@
       "connections": 1,
       "dbBytes": 260,
       "rpc": 0,
-      "cpuMs": 5.3,
+      "cpuMs": 4.4,
       "status": "data"
     },
     {
@@ -1169,7 +1169,7 @@
       "connections": 1,
       "dbBytes": 37,
       "rpc": 0,
-      "cpuMs": 6.11,
+      "cpuMs": 6.66,
       "status": "data"
     },
     {
@@ -1184,7 +1184,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 4.25,
+      "cpuMs": 4.67,
       "status": "data"
     },
     {
@@ -1199,7 +1199,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 4.59,
+      "cpuMs": 0.51,
       "status": "data"
     },
     {
@@ -1214,7 +1214,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.28,
+      "cpuMs": 0.39,
       "status": "data"
     },
     {
@@ -1229,7 +1229,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.4,
+      "cpuMs": 0.33,
       "status": "data"
     },
     {
@@ -1244,7 +1244,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 2.13,
+      "cpuMs": 0.27,
       "status": "data"
     },
     {
@@ -1259,7 +1259,7 @@
       "connections": 1,
       "dbBytes": 191,
       "rpc": 0,
-      "cpuMs": 14.52,
+      "cpuMs": 15.54,
       "status": "data"
     },
     {
@@ -1272,9 +1272,9 @@
       "puts": 0,
       "fetch": 0,
       "connections": 3,
-      "dbBytes": 8717,
+      "dbBytes": 8715,
       "rpc": 0,
-      "cpuMs": 26.46,
+      "cpuMs": 16.52,
       "status": "data"
     },
     {
@@ -1289,7 +1289,7 @@
       "connections": 1,
       "dbBytes": 5227,
       "rpc": 1,
-      "cpuMs": 10.45,
+      "cpuMs": 8.33,
       "status": 200
     },
     {
@@ -1302,9 +1302,9 @@
       "puts": 0,
       "fetch": 0,
       "connections": 1,
-      "dbBytes": 5934,
+      "dbBytes": 5933,
       "rpc": 1,
-      "cpuMs": 8.97,
+      "cpuMs": 6.56,
       "status": 200
     },
     {
@@ -1317,9 +1317,9 @@
       "puts": 0,
       "fetch": 6,
       "connections": 3,
-      "dbBytes": 11991,
+      "dbBytes": 11988,
       "rpc": 1,
-      "cpuMs": 22.41,
+      "cpuMs": 23.11,
       "status": 200
     },
     {
@@ -1334,7 +1334,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.36,
+      "cpuMs": 0.38,
       "status": 401
     },
     {
@@ -1349,7 +1349,7 @@
       "connections": 1,
       "dbBytes": 137,
       "rpc": 1,
-      "cpuMs": 3.31,
+      "cpuMs": 2.46,
       "status": 401
     },
     {
@@ -1362,9 +1362,9 @@
       "puts": 0,
       "fetch": 0,
       "connections": 2,
-      "dbBytes": 10639,
+      "dbBytes": 10637,
       "rpc": 1,
-      "cpuMs": 10.71,
+      "cpuMs": 12.31,
       "status": 200
     },
     {
@@ -1377,9 +1377,9 @@
       "puts": 0,
       "fetch": 0,
       "connections": 2,
-      "dbBytes": 12340,
+      "dbBytes": 12321,
       "rpc": 1,
-      "cpuMs": 9.1,
+      "cpuMs": 7.15,
       "status": 200
     },
     {
@@ -1392,9 +1392,9 @@
       "puts": 0,
       "fetch": 6,
       "connections": 3,
-      "dbBytes": 17398,
+      "dbBytes": 17404,
       "rpc": 1,
-      "cpuMs": 25.11,
+      "cpuMs": 17.49,
       "status": 200
     },
     {
@@ -1409,7 +1409,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.37,
+      "cpuMs": 0.33,
       "status": 401
     },
     {
@@ -1424,7 +1424,7 @@
       "connections": 1,
       "dbBytes": 137,
       "rpc": 1,
-      "cpuMs": 7.62,
+      "cpuMs": 3.89,
       "status": 401
     },
     {
@@ -1439,7 +1439,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 1,
-      "cpuMs": 1.4,
+      "cpuMs": 1.5,
       "status": 200
     },
     {
@@ -1469,7 +1469,7 @@
       "connections": 1,
       "dbBytes": 226,
       "rpc": 1,
-      "cpuMs": 3.86,
+      "cpuMs": 93.85,
       "status": 200
     },
     {
@@ -1484,7 +1484,7 @@
       "connections": 1,
       "dbBytes": 137,
       "rpc": 1,
-      "cpuMs": 2.84,
+      "cpuMs": 14.58,
       "status": 401
     },
     {
@@ -1499,7 +1499,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 1,
-      "cpuMs": 3.17,
+      "cpuMs": 0.85,
       "status": 200
     },
     {
@@ -1514,7 +1514,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 1,
-      "cpuMs": 0.17,
+      "cpuMs": 0.16,
       "status": 200
     },
     {
@@ -1529,7 +1529,7 @@
       "connections": 1,
       "dbBytes": 226,
       "rpc": 1,
-      "cpuMs": 6.01,
+      "cpuMs": 5.7,
       "status": 200
     },
     {
@@ -1544,7 +1544,7 @@
       "connections": 1,
       "dbBytes": 137,
       "rpc": 1,
-      "cpuMs": 5.22,
+      "cpuMs": 6.74,
       "status": 401
     },
     {
@@ -1559,7 +1559,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 1,
-      "cpuMs": 0.67,
+      "cpuMs": 0.77,
       "status": 200
     },
     {
@@ -1574,7 +1574,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 1,
-      "cpuMs": 0.15,
+      "cpuMs": 0.16,
       "status": 200
     },
     {
@@ -1589,7 +1589,7 @@
       "connections": 1,
       "dbBytes": 226,
       "rpc": 1,
-      "cpuMs": 2.92,
+      "cpuMs": 3.01,
       "status": 200
     },
     {
@@ -1604,7 +1604,7 @@
       "connections": 1,
       "dbBytes": 137,
       "rpc": 1,
-      "cpuMs": 3.09,
+      "cpuMs": 3.44,
       "status": 401
     },
     {
@@ -1619,7 +1619,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 1,
-      "cpuMs": 0.83,
+      "cpuMs": 0.82,
       "status": 200
     },
     {
@@ -1634,7 +1634,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 1,
-      "cpuMs": 0.21,
+      "cpuMs": 0.11,
       "status": 200
     },
     {
@@ -1647,9 +1647,9 @@
       "puts": 0,
       "fetch": 0,
       "connections": 1,
-      "dbBytes": 1358,
+      "dbBytes": 1357,
       "rpc": 1,
-      "cpuMs": 9.46,
+      "cpuMs": 12.45,
       "status": 200
     },
     {
@@ -1664,7 +1664,7 @@
       "connections": 1,
       "dbBytes": 652,
       "rpc": 1,
-      "cpuMs": 3.25,
+      "cpuMs": 3.4,
       "status": 200
     },
     {
@@ -1679,7 +1679,7 @@
       "connections": 1,
       "dbBytes": 3066,
       "rpc": 1,
-      "cpuMs": 6.64,
+      "cpuMs": 7.19,
       "status": 200
     },
     {
@@ -1694,7 +1694,7 @@
       "connections": 1,
       "dbBytes": 765,
       "rpc": 1,
-      "cpuMs": 6.37,
+      "cpuMs": 6.39,
       "status": 404
     },
     {
@@ -1707,9 +1707,9 @@
       "puts": 0,
       "fetch": 18,
       "connections": 1,
-      "dbBytes": 15034,
+      "dbBytes": 15033,
       "rpc": 1,
-      "cpuMs": 18.24,
+      "cpuMs": 17.92,
       "status": 200
     },
     {
@@ -1722,9 +1722,9 @@
       "puts": 0,
       "fetch": 8,
       "connections": 1,
-      "dbBytes": 6521,
+      "dbBytes": 6520,
       "rpc": 1,
-      "cpuMs": 9.43,
+      "cpuMs": 9.55,
       "status": 200
     },
     {
@@ -1737,9 +1737,9 @@
       "puts": 0,
       "fetch": 4,
       "connections": 2,
-      "dbBytes": 3896,
+      "dbBytes": 3902,
       "rpc": 1,
-      "cpuMs": 8.61,
+      "cpuMs": 9.47,
       "status": 200
     },
     {
@@ -1752,9 +1752,9 @@
       "puts": 0,
       "fetch": 8,
       "connections": 1,
-      "dbBytes": 6520,
+      "dbBytes": 6519,
       "rpc": 1,
-      "cpuMs": 9.25,
+      "cpuMs": 11.03,
       "status": 200
     },
     {
@@ -1769,7 +1769,7 @@
       "connections": 3,
       "dbBytes": 475,
       "rpc": 1,
-      "cpuMs": 24.41,
+      "cpuMs": 30.75,
       "status": 200
     },
     {
@@ -1784,7 +1784,7 @@
       "connections": 3,
       "dbBytes": 475,
       "rpc": 1,
-      "cpuMs": 12.46,
+      "cpuMs": 14.27,
       "status": 200
     },
     {
@@ -1799,7 +1799,7 @@
       "connections": 3,
       "dbBytes": 364,
       "rpc": 1,
-      "cpuMs": 10.08,
+      "cpuMs": 10.59,
       "status": 200
     },
     {
@@ -1814,7 +1814,7 @@
       "connections": 1,
       "dbBytes": 2890,
       "rpc": 1,
-      "cpuMs": 3.84,
+      "cpuMs": 3.74,
       "status": 200
     },
     {
@@ -1829,7 +1829,7 @@
       "connections": 3,
       "dbBytes": 6945,
       "rpc": 1,
-      "cpuMs": 21.16,
+      "cpuMs": 18.99,
       "status": 200
     },
     {
@@ -1844,7 +1844,7 @@
       "connections": 1,
       "dbBytes": 353,
       "rpc": 1,
-      "cpuMs": 7.3,
+      "cpuMs": 7.59,
       "status": 200
     },
     {
@@ -1859,7 +1859,7 @@
       "connections": 2,
       "dbBytes": 1602,
       "rpc": 1,
-      "cpuMs": 7.28,
+      "cpuMs": 7.58,
       "status": 200
     },
     {
@@ -1874,7 +1874,7 @@
       "connections": 1,
       "dbBytes": 248,
       "rpc": 1,
-      "cpuMs": 15.22,
+      "cpuMs": 15.89,
       "status": 200
     },
     {
@@ -1887,9 +1887,9 @@
       "puts": 0,
       "fetch": 0,
       "connections": 1,
-      "dbBytes": 383,
+      "dbBytes": 384,
       "rpc": 1,
-      "cpuMs": 2.83,
+      "cpuMs": 2.95,
       "status": 200
     },
     {
@@ -1902,9 +1902,9 @@
       "puts": 0,
       "fetch": 0,
       "connections": 1,
-      "dbBytes": 489,
+      "dbBytes": 490,
       "rpc": 1,
-      "cpuMs": 2.98,
+      "cpuMs": 2.73,
       "status": 200
     },
     {
@@ -1917,9 +1917,9 @@
       "puts": 0,
       "fetch": 0,
       "connections": 1,
-      "dbBytes": 9208,
+      "dbBytes": 9204,
       "rpc": 1,
-      "cpuMs": 7.85,
+      "cpuMs": 3.44,
       "status": 200
     },
     {
@@ -1932,9 +1932,9 @@
       "puts": 0,
       "fetch": 0,
       "connections": 1,
-      "dbBytes": 682,
+      "dbBytes": 680,
       "rpc": 1,
-      "cpuMs": 3.11,
+      "cpuMs": 2.63,
       "status": 200
     },
     {
@@ -1949,7 +1949,7 @@
       "connections": 1,
       "dbBytes": 332,
       "rpc": 1,
-      "cpuMs": 2.49,
+      "cpuMs": 2.47,
       "status": 200
     },
     {
@@ -1964,7 +1964,7 @@
       "connections": 1,
       "dbBytes": 1432,
       "rpc": 1,
-      "cpuMs": 3.61,
+      "cpuMs": 3.58,
       "status": 200
     },
     {
@@ -1977,9 +1977,9 @@
       "puts": 0,
       "fetch": 17,
       "connections": 3,
-      "dbBytes": 7607,
+      "dbBytes": 7604,
       "rpc": 1,
-      "cpuMs": 15.02,
+      "cpuMs": 14.85,
       "status": 200
     },
     {
@@ -1994,7 +1994,7 @@
       "connections": 1,
       "dbBytes": 111,
       "rpc": 1,
-      "cpuMs": 2.86,
+      "cpuMs": 2.87,
       "status": 200
     },
     {
@@ -2009,7 +2009,7 @@
       "connections": 1,
       "dbBytes": 72,
       "rpc": 1,
-      "cpuMs": 6.37,
+      "cpuMs": 5.9,
       "status": 200
     },
     {
@@ -2024,7 +2024,7 @@
       "connections": 1,
       "dbBytes": 171,
       "rpc": 1,
-      "cpuMs": 3.52,
+      "cpuMs": 4,
       "status": 200
     },
     {
@@ -2039,7 +2039,7 @@
       "connections": 1,
       "dbBytes": 107,
       "rpc": 1,
-      "cpuMs": 3.1,
+      "cpuMs": 2.71,
       "status": 200
     },
     {
@@ -2054,7 +2054,7 @@
       "connections": 1,
       "dbBytes": 107,
       "rpc": 1,
-      "cpuMs": 3.33,
+      "cpuMs": 3.36,
       "status": 200
     },
     {
@@ -2069,7 +2069,7 @@
       "connections": 1,
       "dbBytes": 942,
       "rpc": 1,
-      "cpuMs": 4.33,
+      "cpuMs": 8.87,
       "status": 200
     },
     {
@@ -2084,7 +2084,7 @@
       "connections": 1,
       "dbBytes": 1312,
       "rpc": 1,
-      "cpuMs": 6.8,
+      "cpuMs": 3.08,
       "status": 200
     },
     {
@@ -2099,7 +2099,7 @@
       "connections": 1,
       "dbBytes": 700,
       "rpc": 1,
-      "cpuMs": 4.72,
+      "cpuMs": 4.41,
       "status": 200
     },
     {
@@ -2114,7 +2114,7 @@
       "connections": 1,
       "dbBytes": 700,
       "rpc": 1,
-      "cpuMs": 3.49,
+      "cpuMs": 7.28,
       "status": 200
     },
     {
@@ -2129,7 +2129,7 @@
       "connections": 1,
       "dbBytes": 1092,
       "rpc": 1,
-      "cpuMs": 3.95,
+      "cpuMs": 4.59,
       "status": 200
     },
     {
@@ -2144,7 +2144,7 @@
       "connections": 1,
       "dbBytes": 107,
       "rpc": 1,
-      "cpuMs": 6.93,
+      "cpuMs": 3.86,
       "status": 200
     },
     {
@@ -2159,7 +2159,7 @@
       "connections": 1,
       "dbBytes": 176,
       "rpc": 1,
-      "cpuMs": 3.04,
+      "cpuMs": 2.7,
       "status": 200
     },
     {
@@ -2174,7 +2174,7 @@
       "connections": 1,
       "dbBytes": 913,
       "rpc": 1,
-      "cpuMs": 3.84,
+      "cpuMs": 3.75,
       "status": 200
     },
     {
@@ -2189,7 +2189,7 @@
       "connections": 1,
       "dbBytes": 1559,
       "rpc": 1,
-      "cpuMs": 9.29,
+      "cpuMs": 5.63,
       "status": 200
     },
     {
@@ -2204,7 +2204,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.91,
+      "cpuMs": 0.85,
       "status": 307
     },
     {
@@ -2219,7 +2219,7 @@
       "connections": 1,
       "dbBytes": 524,
       "rpc": 1,
-      "cpuMs": 2.94,
+      "cpuMs": 7.72,
       "status": 307
     },
     {
@@ -2234,7 +2234,7 @@
       "connections": 1,
       "dbBytes": 666,
       "rpc": 1,
-      "cpuMs": 3.97,
+      "cpuMs": 4.76,
       "status": 307
     },
     {
@@ -2249,7 +2249,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.44,
+      "cpuMs": 0.42,
       "status": 503
     },
     {
@@ -2264,7 +2264,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.43,
+      "cpuMs": 0.44,
       "status": 503
     },
     {
@@ -2279,7 +2279,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.27,
+      "cpuMs": 0.31,
       "status": 200
     },
     {
@@ -2294,7 +2294,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.26,
+      "cpuMs": 0.3,
       "status": 401
     },
     {
@@ -2309,7 +2309,7 @@
       "connections": 1,
       "dbBytes": 191,
       "rpc": 1,
-      "cpuMs": 3.39,
+      "cpuMs": 4.12,
       "status": 200
     },
     {
@@ -2322,9 +2322,9 @@
       "puts": 0,
       "fetch": 0,
       "connections": 2,
-      "dbBytes": 964,
+      "dbBytes": 966,
       "rpc": 1,
-      "cpuMs": 5.04,
+      "cpuMs": 5.18,
       "status": 200
     },
     {
@@ -2337,9 +2337,9 @@
       "puts": 0,
       "fetch": 0,
       "connections": 1,
-      "dbBytes": 569,
+      "dbBytes": 570,
       "rpc": 1,
-      "cpuMs": 8.09,
+      "cpuMs": 9.73,
       "status": 200
     },
     {
@@ -2354,7 +2354,7 @@
       "connections": 1,
       "dbBytes": 179,
       "rpc": 1,
-      "cpuMs": 3.47,
+      "cpuMs": 5,
       "status": 200
     },
     {
@@ -2369,7 +2369,7 @@
       "connections": 1,
       "dbBytes": 1026,
       "rpc": 1,
-      "cpuMs": 5.48,
+      "cpuMs": 7.98,
       "status": 200
     },
     {
@@ -2399,7 +2399,7 @@
       "connections": 1,
       "dbBytes": 37,
       "rpc": 1,
-      "cpuMs": 7.66,
+      "cpuMs": 3.85,
       "status": 200
     },
     {
@@ -2414,7 +2414,7 @@
       "connections": 1,
       "dbBytes": 37,
       "rpc": 1,
-      "cpuMs": 4.21,
+      "cpuMs": 4.09,
       "status": 200
     },
     {
@@ -2429,22 +2429,22 @@
       "connections": 1,
       "dbBytes": 260,
       "rpc": 1,
-      "cpuMs": 25.44,
+      "cpuMs": 13.92,
       "status": "data"
     },
     {
       "name": "submit action — unverified Amazon artifact (64 KiB)",
       "baseline": false,
-      "sql": 1,
-      "reads": 1,
+      "sql": 0,
+      "reads": 0,
       "writes": 0,
       "matches": 0,
       "puts": 0,
       "fetch": 0,
-      "connections": 1,
-      "dbBytes": 37,
-      "rpc": 1,
-      "cpuMs": 3.38,
+      "connections": 0,
+      "dbBytes": 0,
+      "rpc": 0,
+      "cpuMs": 0.87,
       "status": "data"
     },
     {
@@ -2459,7 +2459,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.49,
+      "cpuMs": 0.46,
       "status": "data"
     },
     {
@@ -2474,7 +2474,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.32,
+      "cpuMs": 0.29,
       "status": "data"
     },
     {
@@ -2489,7 +2489,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.18,
+      "cpuMs": 0.16,
       "status": "data"
     },
     {
@@ -2504,7 +2504,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 1.18,
+      "cpuMs": 1.16,
       "status": "data"
     },
     {
@@ -2519,7 +2519,7 @@
       "connections": 0,
       "dbBytes": 0,
       "rpc": 0,
-      "cpuMs": 0.21,
+      "cpuMs": 0.19,
       "status": "data"
     },
     {
@@ -2534,7 +2534,7 @@
       "connections": 1,
       "dbBytes": 191,
       "rpc": 1,
-      "cpuMs": 3.47,
+      "cpuMs": 3.78,
       "status": "data"
     },
     {
@@ -2547,9 +2547,9 @@
       "puts": 0,
       "fetch": 0,
       "connections": 3,
-      "dbBytes": 5655,
+      "dbBytes": 5653,
       "rpc": 1,
-      "cpuMs": 17.73,
+      "cpuMs": 12.14,
       "status": "data"
     }
   ]
