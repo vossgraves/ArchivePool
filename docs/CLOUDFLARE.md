@@ -246,6 +246,17 @@ session grows after at-rest encoding, allowing more than 10 GiB/day of payloads.
 | Stored source payload | `MAX_STORED_SOURCE_PAYLOAD_BYTES = 16 * 1024` | UTF-8 JSON is checked before and after at-rest encryption, before initial DB/upstream work and again after verification. A 13 KiB session exceeds the encrypted cap; a 10 KiB fixture fits. Review real Amazon artifact sizes without weakening the encrypted bound. Existing oversized rows are not truncated. |
 | Anonymous admissions | `ANONYMOUS_ADMISSIONS_PER_DAY = 32` | One persisted UTC counter across Workers isolates; an atomic DB bucket off Workers. Accepted candidates reserve before upsert, including resubmissions; failed saves remain spent and unavailable budgets fail closed. At most 512 KiB/day or 15.5 MiB/31 days of serialized anonymous payloads, before row/index/bloat overhead. Attributed submissions are exempt. Review expected contribution volume and the 320-verdict cron driver. |
 
+Anonymous admission is reserved **after the live health check**, before upsert.
+Rejected anonymous floods therefore still spend probe budget for checks that run;
+per-IP probe limits still apply. This keeps failed checks from spending the 32 daily
+admission slots, at the cost of probes even when admission capacity is exhausted.
+The timing is unchanged; the owner should review this trade-off.
+
+Retention now hard-deletes removed `account_entries` and `instance_entries` once
+30 days have elapsed since removal, and `audit_log` rows after 90 days. The owner
+should confirm these recovery and audit windows. A verified re-submission still
+revives a removed entry before it is purged; this existing behavior is unchanged.
+
 The constants live in `cloudflare/input-limits.mjs`. These conservative defaults
 change accepted inputs and are listed under **Needs owner decision** in the PR so
 the owner can tune them. Attribution requires a signed-in contributor on the submit
