@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-import path from "node:path"
+import { MAX_REQUEST_BODY_BYTES } from "./cloudflare/input-limits.mjs"
 
 /** @type {import('next').NextConfig} */
 
@@ -44,6 +44,9 @@ const securityHeaders = [
 ]
 
 const nextConfig = {
+  experimental: {
+    serverActions: { bodySizeLimit: MAX_REQUEST_BODY_BYTES },
+  },
   images: {
     unoptimized: true,
   },

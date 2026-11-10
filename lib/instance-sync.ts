@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import "server-only"
-import { eq, sql } from "drizzle-orm"
+import { and, eq, inArray, sql } from "drizzle-orm"
 import { encryptAtRest } from "@/lib/crypto"
 import { db } from "@/lib/db"
+import { retainedDetail } from "@/lib/retention"
 import { instanceEntries } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
 import { runCheck } from "@/lib/health"
-import { FetchBudgetExhausted, fetchBudgetExceeded } from "@/lib/cf-env"
+import { cfBindings, FetchBudgetExhausted, fetchBudgetExceeded } from "@/lib/cf-env"
 import { fingerprint, isBlockedInstanceUrl, maskLabel, normalizeUrl, type Service } from "@/lib/sources"
 
 export interface InstanceSyncResult {
@@ -83,6 +84,7 @@ export async function syncInstanceUrls(
     detailLimit?: number
   } = {},
 ): Promise<InstanceSyncResult> {
+  if (cfBindings()) opts = { ...opts, limit: Math.min(opts.limit ?? 8, 10), concurrency: Math.min(opts.concurrency ?? 3, 3) }
   await ensureSchema()
 
   const recheckWindowMs = opts.recheckWindowMs ?? DEFAULT_RECHECK_WINDOW_MS
@@ -137,7 +139,9 @@ export async function syncInstanceUrls(
       removed: instanceEntries.removed,
     })
     .from(instanceEntries)
-    .where(eq(instanceEntries.service, service))
+    .where(and(eq(instanceEntries.service, service), inArray(instanceEntries.fingerprint,
+      work.map((baseUrl) => fingerprint(service, "api", { baseUrl })),
+    )))
 
   const fingerprintMap = new Map(existingRows.map((r) => [r.fingerprint, r]))
 
@@ -169,7 +173,7 @@ export async function syncInstanceUrls(
         status: check.status,
         ok: check.ok,
         premium: check.premium,
-        detail: check.detail,
+        detail: retainedDetail(check.detail),
       })
     }
     // A probe that reached no verdict (the host's own rate limiter answered, or a refresh did not
@@ -188,7 +192,7 @@ export async function syncInstanceUrls(
           .set({
             status: check.status,
             premium: check.premium,
-            detail: check.detail,
+            detail: retainedDetail(check.detail),
             latencyMs: check.latencyMs,
             consecutiveFailures: sql`${instanceEntries.consecutiveFailures} + 1`,
             checkCount: sql`${instanceEntries.checkCount} + 1`,
@@ -208,7 +212,7 @@ export async function syncInstanceUrls(
           .set({
             status: check.status,
             premium: false,
-            detail: `reachable but not premium (${check.detail})`,
+            detail: retainedDetail(`reachable but not premium (${check.detail})`),
             latencyMs: check.latencyMs,
             disabled: true,
             checkCount: sql`${instanceEntries.checkCount} + 1`,
@@ -233,7 +237,7 @@ export async function syncInstanceUrls(
         fingerprint: fp,
         status: check.status,
         premium: check.premium,
-        detail: check.detail,
+        detail: retainedDetail(check.detail),
         latencyMs: check.latencyMs,
         checkCount: 1,
         okCount: 1,
@@ -242,17 +246,19 @@ export async function syncInstanceUrls(
         ...(check.ok ? { lastOkAt: sql`now()` } : {}),
         disabled: false,
         removed: false,
+        removedAt: null,
       })
       .onConflictDoUpdate({
         target: instanceEntries.fingerprint,
         set: {
           status: check.status,
           premium: check.premium,
-          detail: check.detail,
+          detail: retainedDetail(check.detail),
           latencyMs: check.latencyMs,
           consecutiveFailures: 0,
           disabled: false,
           removed: false,
+          removedAt: null,
           checkCount: sql`${instanceEntries.checkCount} + 1`,
           okCount: sql`${instanceEntries.okCount} + 1`,
           ...(check.ok ? { lastOkAt: sql`now()` } : {}),

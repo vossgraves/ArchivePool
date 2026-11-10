@@ -2,6 +2,7 @@
 import "server-only"
 
 import { cfBindings } from "@/lib/cf-env"
+import { kvGetText, kvPutText } from "@/lib/pool-cache"
 import { getAllDiscovery } from "@/lib/queries"
 import { type Service } from "@/lib/sources"
 
@@ -32,7 +33,7 @@ const SNAPSHOT_PATHNAME = "pool/instances.json"
  */
 const SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000
 
-type Discovery = { streaming: string[]; api: string[] }
+type Discovery = { streaming: string[]; api: string[]; stale?: boolean }
 type Snapshot = Record<Service, Discovery>
 
 // The TTL travels inside the value: KV keeps no uploaded timestamp, so readers check
@@ -70,7 +71,7 @@ function isDiscovery(value: unknown): value is Discovery {
 export async function writeInstanceSnapshot(): Promise<void> {
   const store = snapshotStore()
   // Blob only enters when there is no KV binding, so a Workers deploy never needs the token.
-  const useBlob = !store && Boolean(process.env.BLOB_READ_WRITE_TOKEN)
+  const useBlob = !cfBindings() && !store && Boolean(process.env.BLOB_READ_WRITE_TOKEN)
   if (!store && !useBlob) return
   try {
     // One query for every service. The previous per-service Promise.all ran five statements
@@ -78,11 +79,8 @@ export async function writeInstanceSnapshot(): Promise<void> {
     const snapshot = await getAllDiscovery()
     const body = JSON.stringify({ savedAt: Date.now(), data: snapshot } satisfies StoredSnapshot)
     if (store) {
-      // Belt-and-braces expiry next to the readers' own savedAt check: a dead store
-      // can never serve a stale feed past the TTL.
-      await store.put(SNAPSHOT_PATHNAME, body, {
-        expirationTtl: Math.ceil(SNAPSHOT_TTL_MS / 1000) + 3600,
-      })
+      // Keep the last good value during outages; readers mark its age instead of deleting it.
+      await kvPutText(SNAPSHOT_PATHNAME, body)
     } else {
       // Lazy import: keeps @vercel/blob out of the Workers bundle entirely on builds
       // where this branch can never execute.
@@ -108,18 +106,18 @@ export async function readInstanceSnapshot(service: Service): Promise<Discovery 
   const store = snapshotStore()
   if (store) {
     try {
-      const raw = await store.get(SNAPSHOT_PATHNAME)
+      const raw = await kvGetText(SNAPSHOT_PATHNAME)
       if (!raw) return null
       const parsed = JSON.parse(raw) as Partial<StoredSnapshot> | null
       if (!parsed || typeof parsed.savedAt !== "number") return null
-      if (Date.now() - parsed.savedAt > SNAPSHOT_TTL_MS) return null
       const entry = parsed.data?.[service]
-      return isDiscovery(entry) ? entry : null
+      return isDiscovery(entry) ? { ...entry, ...(Date.now() - parsed.savedAt > SNAPSHOT_TTL_MS ? { stale: true } : {}) } : null
     } catch {
       return null
     }
   }
 
+  if (cfBindings()) return null
   if (!process.env.BLOB_READ_WRITE_TOKEN) return null
   try {
     const { get } = await import("@vercel/blob")

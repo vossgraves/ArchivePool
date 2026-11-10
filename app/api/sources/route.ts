@@ -48,7 +48,7 @@ export async function GET(req: NextRequest) {
   if (!v2 && !clientEncryptionEnabled()) {
     return NextResponse.json(
       { error: "security_not_configured", detail: "Credential delivery is unavailable." },
-      { status: 503, headers: { "cache-control": "private, no-store" } },
+      { status: 503, headers: { "cache-control": "private, no-store", "retry-after": "60" } },
     )
   }
 

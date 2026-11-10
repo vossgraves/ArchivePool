@@ -2,6 +2,7 @@
 import "server-only"
 import { AsyncLocalStorage } from "node:async_hooks"
 import { getCloudflareContext } from "@opennextjs/cloudflare"
+import { chargeResource } from "@/lib/resource-budget"
 
 /**
  * Access to Cloudflare Workers bindings (Hyperdrive, R2, …) when the app runs on
@@ -21,6 +22,10 @@ import { getCloudflareContext } from "@opennextjs/cloudflare"
 type Bindings = Record<string, unknown>
 
 function context(): { env: Bindings; ctx: unknown } | null {
+  const storage = (globalThis as Record<symbol, unknown>)[Symbol.for("archivepool.resourceBudget")] as
+    AsyncLocalStorage<{ env?: Bindings; context?: object }> | undefined
+  const wrapper = storage?.getStore()
+  if (wrapper?.env) return { env: wrapper.env, ctx: wrapper.context }
   try {
     const full = getCloudflareContext({ async: false }) as unknown as {
       env?: Bindings
@@ -88,7 +93,10 @@ export class FetchBudgetExhausted extends Error {
 // uses, so every request gets its own budget. Workers free tier allows 50 subrequests
 // per request; 40 leaves headroom for the route's own fetches (feed pulls, R2, retries).
 const FETCH_BUDGET = 40
+const RESPONSE_BYTES = 256 * 1024
+const responseSpend = new WeakMap<object, number>()
 const fetchSpend = new WeakMap<object, number>()
+const fetchDenied = new WeakSet<object>()
 // Outstanding per-row reservations: a row holds its whole ceiling against the budget
 // from admission until it finishes, so concurrent starts can never oversubscribe the
 // remaining head-room. Without this, N workers each see a "full" budget and split it —
@@ -176,7 +184,7 @@ export function rowFetchExhausted(): boolean {
  */
 export function fetchBudgetExceeded(): boolean {
   const ctx = cfExecutionContext()
-  return ctx != null && (fetchSpend.get(ctx) ?? 0) >= FETCH_BUDGET
+  return ctx != null && (fetchDenied.has(ctx) || (fetchSpend.get(ctx) ?? 0) >= FETCH_BUDGET)
 }
 
 const MAX_REDIRECT_HOPS = 5
@@ -230,6 +238,11 @@ export async function budgetedFetch(url: string, init?: RequestInit): Promise<Re
   const firstOrigin = new URL(url).origin
   for (let hop = 0; ; hop++) {
     chargeFetch()
+    try { await chargeResource("probes") } catch {
+      const ctx = cfExecutionContext()
+      if (ctx) fetchDenied.add(ctx)
+      throw new FetchBudgetExhausted()
+    }
     // A hop to a DIFFERENT origin than the original request drops every credential
     // header — a redirect to attacker-controlled infrastructure must not inherit the
     // caller's Authorization/Cookie/provider tokens.
@@ -238,9 +251,9 @@ export async function budgetedFetch(url: string, init?: RequestInit): Promise<Re
         ? init?.headers
         : stripCredentialHeaders(init?.headers)
     const res = await fetch(current, { ...init, method, body, headers, redirect: "manual" })
-    if (!REDIRECT_STATUSES.has(res.status) || hop >= MAX_REDIRECT_HOPS) return res
+    if (!REDIRECT_STATUSES.has(res.status) || hop >= MAX_REDIRECT_HOPS) return boundedResponse(res)
     const location = res.headers.get("location")
-    if (!location) return res
+    if (!location) return boundedResponse(res)
     try {
       await res.body?.cancel()
     } catch {
@@ -257,12 +270,34 @@ export async function budgetedFetch(url: string, init?: RequestInit): Promise<Re
   }
 }
 
+function boundedResponse(res: Response): Response {
+  const ctx = cfExecutionContext()
+  if (!ctx || !res.body) return res
+  const reader = res.body.getReader()
+  return new Response(new ReadableStream({
+    async pull(controller) {
+      const chunk = await reader.read()
+      if (chunk.done) { controller.close(); return }
+      const used = (responseSpend.get(ctx) ?? 0) + chunk.value.byteLength
+      responseSpend.set(ctx, used)
+      // Bound parsing and bundle scans as well as fetch count; slicing text after reading it
+      // still lets an instance force the entire response into memory.
+      if (used > RESPONSE_BYTES) {
+        fetchDenied.add(ctx)
+        await reader.cancel()
+        controller.error(new FetchBudgetExhausted())
+        return
+      }
+      controller.enqueue(chunk.value)
+    },
+    cancel(reason) { return reader.cancel(reason) },
+  }), { status: res.status, statusText: res.statusText, headers: res.headers })
+}
+
 export function cfWaitUntil(work: Promise<unknown>): void {
   try {
-    const full = getCloudflareContext({ async: false }) as unknown as {
-      ctx?: { waitUntil(p: Promise<unknown>): void }
-    }
-    full?.ctx?.waitUntil(work)
+    const ctx = cfExecutionContext() as { waitUntil?(p: Promise<unknown>): void } | null
+    ctx?.waitUntil?.(work)
   } catch {
     // Not on Workers — the floating promise completes on the warm instance, as before.
   }

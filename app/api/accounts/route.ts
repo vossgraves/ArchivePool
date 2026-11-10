@@ -57,7 +57,7 @@ export async function GET(req: NextRequest) {
     // was verified below), so the gate does not apply to them.
     return NextResponse.json(
       { error: "security_not_configured", detail: "Credential delivery is unavailable." },
-      { status: 503, headers: { "cache-control": "private, no-store" } },
+      { status: 503, headers: { "cache-control": "private, no-store", "retry-after": "60" } },
     )
   }
 

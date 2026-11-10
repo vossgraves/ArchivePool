@@ -8,7 +8,7 @@ import { ensureSchema } from "./db/ensure"
 import { CATEGORIES, SERVICES, type Kind, type Service } from "./sources"
 import type { KeyScope } from "./api-keys"
 import { mapLimit } from "./concurrency"
-import { ensureFreshTidalToken, isTidalAccessExpired } from "./health"
+import { ensureFreshTidalCredential, isTidalAccessExpired, isTidalRefreshToken } from "./health"
 
 export interface CategoryStatus {
   service: Service
@@ -33,95 +33,45 @@ export interface CategoryStatus {
  */
 export async function getStatus(): Promise<CategoryStatus[]> {
   await ensureSchema()
-  const accounts = await db
-    .select({
-      service: accountEntries.service,
-      status: accountEntries.status,
-      premium: accountEntries.premium,
-      disabled: accountEntries.disabled,
-      lastCheckedAt: accountEntries.lastCheckedAt,
-    })
-    .from(accountEntries)
-    .where(eq(accountEntries.removed, false))
-  const instances = await db
-    .select({
-      service: instanceEntries.service,
-      status: instanceEntries.status,
-      premium: instanceEntries.premium,
-      disabled: instanceEntries.disabled,
-      lastCheckedAt: instanceEntries.lastCheckedAt,
-    })
-    .from(instanceEntries)
-    .where(eq(instanceEntries.removed, false))
-
-  const rows = [
-    ...accounts.map((r) => ({ ...r, kind: "account" as const })),
-    ...instances.map((r) => ({ ...r, kind: "api" as const })),
-  ]
-
-  // Uptime is the 14-day pass rate of real health checks (sweeps and report-triggered verifies),
-  // read from health_log with the same scope as the history chart: synthetic 'app report:' marker
-  // rows are not checks and are excluded, and only entries still in the pool (removed = false)
-  // count. The lifetime check_count/ok_count columns cannot express any of that — they never
-  // decay, they count report verifies on the same handful of leased entries, and a dead entry
-  // keeps accruing failures every sweep until an admin removes it, so the figure slid ever
-  // downward on a healthy pool.
-  const uptimeRows = (
-    await db.execute(sql`
-      with entries as (
-        select id, service, 'account' as kind from account_entries where removed = false
-        union all
-        select id, service, 'api' as kind from instance_entries where removed = false
-      )
-      select e.service as service, e.kind as kind,
-             count(*)::int as checks,
-             count(*) filter (where h.ok)::int as ok
-      from health_log h
-      join entries e on e.id = h.entry_id
+  const result = await db.execute(sql`
+    with entries as materialized (
+      select id, service, 'account' as kind, status, premium, disabled, last_checked_at
+      from account_entries where not removed
+      union all
+      select id, service, 'api' as kind, status, premium, disabled, last_checked_at
+      from instance_entries where not removed
+    ), stats as (
+      select service, kind, count(*)::int as total,
+        count(*) filter (where not disabled and status in ('alive', 'preview'))::int as alive,
+        count(*) filter (where not disabled and status = 'alive' and premium)::int as premium,
+        count(*) filter (where status = 'dead')::int as dead,
+        count(*) filter (where status = 'pending')::int as pending,
+        max(last_checked_at) as last_checked_at
+      from entries group by service, kind
+    ), uptime as (
+      select e.service, e.kind, count(*)::int as checks,
+        count(*) filter (where h.ok)::int as ok
+      from health_log h join entries e on e.id = h.entry_id
       where h.checked_at >= now() - make_interval(days => ${HISTORY_DAYS})
         and (h.detail is null or h.detail not like 'app report%')
-      group by 1, 2
-    `)
-  ).rows as unknown as { service: string; kind: string; checks: number; ok: number }[] | undefined
-  const uptimeByCategory = new Map((uptimeRows ?? []).map((r) => [`${r.service}|${r.kind}`, r] as const))
-
+      group by e.service, e.kind
+    )
+    select stats.*, uptime.checks, uptime.ok from stats
+    left join uptime using (service, kind)
+  `)
+  const rows = result.rows as { service: string; kind: string; total: number; alive: number;
+    premium: number; dead: number; pending: number; last_checked_at: Date | null;
+    checks: number | null; ok: number | null }[]
   return CATEGORIES.map((cat) => {
-    const items = rows.filter((r) => r.service === cat.service && r.kind === cat.kind)
-    // Disabled entries are served to nobody, so they must not read as alive here.
-    const alive = items.filter((r) => !r.disabled && (r.status === "alive" || r.status === "preview")).length
-    const premium = items.filter((r) => !r.disabled && r.status === "alive" && r.premium).length
-    const dead = items.filter((r) => r.status === "dead").length
-    const pending = items.filter((r) => r.status === "pending").length
-    const uptime = uptimeByCategory.get(`${cat.service}|${cat.kind}`)
-    const uptimePct =
-      uptime && Number(uptime.checks) > 0
-        ? Math.round((Number(uptime.ok) / Number(uptime.checks)) * 1000) / 10
-        : null
-    const lastChecked = items
-      .map((r) => r.lastCheckedAt)
-      .filter(Boolean)
-      .sort()
-      .pop()
-
-    let health: CategoryStatus["health"] = "unknown"
-    if (items.length > 0) {
-      if (alive > 0 && premium > 0) health = "operational"
-      else if (alive > 0) health = "degraded"
-      else health = "down"
-    }
-
+    const row = rows.find((r) => r.service === cat.service && r.kind === cat.kind)
+    const total = row?.total ?? 0
+    const alive = row?.alive ?? 0
+    const premium = row?.premium ?? 0
     return {
-      service: cat.service,
-      kind: cat.kind,
-      label: cat.label,
-      total: items.length,
-      alive,
-      premium,
-      dead,
-      pending,
-      uptimePct,
-      lastCheckedAt: lastChecked ? new Date(lastChecked).toISOString() : null,
-      health,
+      ...cat, total, alive, premium, dead: row?.dead ?? 0, pending: row?.pending ?? 0,
+      uptimePct: row?.checks ? Math.round((Number(row.ok) / Number(row.checks)) * 1000) / 10 : null,
+      lastCheckedAt: row?.last_checked_at ? new Date(row.last_checked_at).toISOString() : null,
+      health: total === 0 ? "unknown" : alive > 0 ? premium > 0 ? "operational" : "degraded" : "down",
     }
   })
 }
@@ -230,6 +180,8 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
       lastCheckedAt: accountEntries.lastCheckedAt,
       fingerprint: accountEntries.fingerprint,
       payload: accountEntries.payload,
+      keyLeasedAt: apiKeyLeases.leasedAt,
+      lastLeasedAt: accountEntries.lastLeasedAt,
     })
     .from(accountEntries)
     .leftJoin(apiKeyLeases, heldByKey)
@@ -237,7 +189,16 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
     // stranded on it — the slot refills from the rest of the pool.
     // A scoped key's row set is narrowed in SQL too, so it cannot even load another service's
     // credentials, let alone return them.
-    .where(and(accountServableWhere, scope == null ? undefined : eq(accountEntries.service, scope)))
+    .where(and(accountServableWhere, scope == null ? undefined : eq(accountEntries.service, scope), sql`${accountEntries.id} in (
+      select id from (
+        select a.id, a.service, row_number() over (partition by a.service order by
+          (l.key_id is not null) desc, a.premium desc, a.last_leased_at asc nulls first, a.id) as rank
+        from account_entries a left join api_key_leases l on l.entry_id = a.id
+          and l.key_id = ${keyId ?? -1} and l.leased_at > now() - interval '72 hours'
+        where not a.removed and not a.disabled and a.status in ('alive', 'preview')
+          and (a.expires_at is null or a.expires_at > now())
+      ) ranked where rank <= case when service = 'tidal' then 6 else 3 end
+    )`))
     // Held entries outrank even an unheld premium one: the app has these cached, and churning
     // them costs more than the better pick gains. NULLS FIRST because Postgres defaults to
     // NULLS LAST on ASC and a never-leased entry is the least recently used. `id` makes the
@@ -267,15 +228,15 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
       tidalChecked.add(r.id)
       const plain = decryptAtRest(r.payload)
       const stored = String(plain.token ?? "").trim()
-      const fresh = await ensureFreshTidalToken(plain, r.fingerprint).catch(() => null)
-      if (fresh != null && fresh !== stored) {
-        r.payload = encryptAtRest({ ...plain, token: fresh })
+      const fresh = await ensureFreshTidalCredential(plain, r.fingerprint).catch(() => null)
+      if (fresh != null) {
+        r.payload = encryptAtRest(fresh)
         return
       }
       // A credential that NEEDED a refresh and could not get one (claim lost, cooling,
       // provider down) must not be served — the stored token is already dead and the app
       // would just 401 on it. Exclude the entry from THIS lease; the next candidate moves up.
-      if (fresh == null && stored && isTidalAccessExpired(stored)) {
+      if (fresh == null && stored && (isTidalAccessExpired(stored) || isTidalRefreshToken(stored))) {
         tidalExcluded.add(r.id)
       }
     },
@@ -294,8 +255,10 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
       )
       .slice(0, LEASE_PER_CATEGORY_ACCOUNT)
     for (const r of rowsForService) {
-      leasedIds.push(r.id)
-      picked.push({ id: r.id, service })
+      if (!r.keyLeasedAt || Date.now() - new Date(r.keyLeasedAt).getTime() >= 24 * 60 * 60_000) {
+        leasedIds.push(r.id)
+        picked.push({ id: r.id, service })
+      }
     }
     return rowsForService.map((r) => toLeased(r, clientKey))
   }
@@ -313,16 +276,27 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
 
   await stampLeases(leasedIds, accountEntries)
   await recordKeyLeases(keyId ?? null, picked)
-  return { accounts, leasedCount: leasedIds.length }
+  return { accounts, leasedCount: Object.values(accounts).reduce((sum, entries) => sum + entries.length, 0) }
 }
 
 /** Kept separate from [leaseAccounts] so a caller can never receive tokens by asking for URLs. */
 export async function leaseInstances(clientKey?: Buffer | null, scope?: KeyScope) {
   await ensureSchema()
   const rows = await db
-    .select()
+    .select({
+      id: instanceEntries.id, service: instanceEntries.service, premium: instanceEntries.premium,
+      status: instanceEntries.status, latencyMs: instanceEntries.latencyMs,
+      lastCheckedAt: instanceEntries.lastCheckedAt, lastLeasedAt: instanceEntries.lastLeasedAt,
+      payload: instanceEntries.payload,
+    })
     .from(instanceEntries)
-    .where(and(instanceServableWhere, scope == null ? undefined : eq(instanceEntries.service, scope)))
+    .where(and(instanceServableWhere, scope == null ? undefined : eq(instanceEntries.service, scope), sql`${instanceEntries.id} in (
+      select id from (
+        select id, row_number() over (partition by service order by premium desc, last_leased_at asc nulls first, id) as rank
+        from instance_entries where not removed and not disabled and status in ('alive', 'preview')
+          and (expires_at is null or expires_at > now())
+      ) ranked where rank <= 10
+    )`))
     .orderBy(
       desc(instanceEntries.premium),
       sql`${instanceEntries.lastLeasedAt} asc nulls first`,
@@ -332,7 +306,9 @@ export async function leaseInstances(clientKey?: Buffer | null, scope?: KeyScope
   const leasedIds: number[] = []
   const group = (service: Service) => {
     const picked = rows.filter((r) => r.service === service).slice(0, LEASE_PER_CATEGORY_API)
-    for (const r of picked) leasedIds.push(r.id)
+    for (const r of picked) {
+      if (!r.lastLeasedAt || Date.now() - new Date(r.lastLeasedAt).getTime() >= 60 * 60_000) leasedIds.push(r.id)
+    }
     return picked.map((r) => toLeased(r, clientKey))
   }
 
@@ -444,6 +420,7 @@ export async function leaseReplacement(
       latencyMs: accountEntries.latencyMs,
       lastCheckedAt: accountEntries.lastCheckedAt,
       payload: accountEntries.payload,
+      fingerprint: accountEntries.fingerprint,
     })
     .from(accountEntries)
     .where(
@@ -466,6 +443,11 @@ export async function leaseReplacement(
     .limit(1)
 
   if (!row) return null
+  if (service === "tidal") {
+    const fresh = await ensureFreshTidalCredential(decryptAtRest(row.payload), row.fingerprint).catch(() => null)
+    if (!fresh) return null
+    row.payload = encryptAtRest(fresh)
+  }
 
   await stampLeases([row.id], accountEntries)
   await recordKeyLeases(keyId, [{ id: row.id, service }])
@@ -495,6 +477,7 @@ export async function releaseLease(keyId: number, entryId: number): Promise<bool
 export interface DiscoveryFeed {
   streaming: string[]
   api: string[]
+  stale?: boolean
 }
 
 function discoveryUrls(rows: { payload: unknown }[]): string[] {

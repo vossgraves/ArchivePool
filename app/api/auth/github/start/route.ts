@@ -19,7 +19,7 @@ export async function GET(req: NextRequest) {
   if (!githubConfigured()) {
     return NextResponse.json(
       { error: "github_auth_unconfigured", detail: "GitHub sign-in is not configured on this deployment." },
-      { status: 503 },
+      { status: 503, headers: { "retry-after": "60" } },
     )
   }
 

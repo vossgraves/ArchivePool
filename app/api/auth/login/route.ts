@@ -25,7 +25,7 @@ export async function POST(req: NextRequest) {
         detail:
           "Password sign-in is unavailable on this deployment — use Sign in with GitHub instead (/api/auth/github/start), or bearer read keys programmatically.",
       },
-      { status: 503, headers: { "cache-control": "private, no-store" } },
+      { status: 503, headers: { "cache-control": "private, no-store", "retry-after": "60" } },
     )
   }
   let body: { username?: string; password?: string }

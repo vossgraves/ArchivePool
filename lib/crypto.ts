@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import "server-only"
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto"
+import { assertSourcePayloadSize } from "@/cloudflare/input-limits.mjs"
 
 /** Field-level AES-256-GCM encryption for credential values. See docs/CRYPTO.md. */
 
@@ -111,11 +112,14 @@ function transformDecrypt(payload: Payload, key: Buffer | null): Payload {
 
 /** Encrypt sensitive fields for storage in the database (at-rest layer). */
 export function encryptAtRest(payload: Payload): Payload {
+  assertSourcePayloadSize(payload)
   const key = loadKey("POOL_ENCRYPTION_KEY")
   if (!key && Object.entries(payload).some(([name, value]) => SENSITIVE_KEYS[name] === true && typeof value === "string" && value.length > 0)) {
     throw new Error("POOL_ENCRYPTION_KEY is required for credential storage")
   }
-  return transformEncrypt(payload, key)
+  const encrypted = transformEncrypt(payload, key)
+  assertSourcePayloadSize(encrypted)
+  return encrypted
 }
 
 /**

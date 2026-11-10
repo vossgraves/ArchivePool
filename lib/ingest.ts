@@ -2,10 +2,14 @@
 import { sql } from "drizzle-orm"
 import { atRestEncryptionEnabled, encryptAtRest } from "@/lib/crypto"
 import { databaseConfigured, db } from "@/lib/db"
+import { retainedDetail } from "@/lib/retention"
 import { accountEntries, instanceEntries } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
 import { runCheck, type CheckResult } from "@/lib/health"
 import { fingerprint, maskLabel, type Kind, type Service } from "@/lib/sources"
+import { fetchBudgetExceeded, rowFetchExhausted } from "@/lib/cf-env"
+import { reserveAnonymousAdmission } from "@/lib/resource-budget"
+import { SourceLimitError } from "@/cloudflare/input-limits.mjs"
 
 export interface IngestResult {
   ok: boolean
@@ -51,10 +55,12 @@ export async function ingestSource(
   payload: Record<string, unknown>,
   options: IngestOptions = {},
 ): Promise<IngestResult> {
-  await ensureSchema()
   if (kind === "account" && !atRestEncryptionEnabled()) {
     throw new Error("POOL_ENCRYPTION_KEY is required before account credentials can be accepted")
   }
+  // Fail fast on an invalid encryption key or oversized plaintext/encrypted payload before touching the database.
+  encryptAtRest(payload)
+  await ensureSchema()
   const contributor = options.contributor?.trim().slice(0, 64) || null
   const expiresAt = options.expiresAt ?? null
   // Fingerprint, label and the live health check all run on the PLAINTEXT payload; only the value
@@ -66,7 +72,7 @@ export async function ingestSource(
   // A check that reached no verdict (a Tidal refresh cooling down, or the instance's own rate
   // limiter answering 429) is not a rejection: nothing was learned about the source, so telling the
   // contributor it failed would be wrong. Nothing is persisted and they can retry.
-  if (result.skipped) {
+  if (result.skipped || fetchBudgetExceeded() || rowFetchExhausted()) {
     return {
       ok: false,
       saved: false,
@@ -95,6 +101,7 @@ export async function ingestSource(
   }
 
   const storedPayload = encryptAtRest(payload)
+  if (!contributor) await reserveAnonymousAdmission()
   const table = kind === "account" ? accountEntries : instanceEntries
 
   await db
@@ -106,7 +113,7 @@ export async function ingestSource(
       fingerprint: fp,
       status: result.status,
       premium: result.premium,
-      detail: result.detail,
+      detail: retainedDetail(result.detail),
       latencyMs: result.latencyMs,
       checkCount: 1,
       okCount: result.ok ? 1 : 0,
@@ -114,6 +121,7 @@ export async function ingestSource(
       lastCheckedAt: new Date(),
       ...(result.ok ? { lastOkAt: sql`now()` } : {}),
       removed: false,
+      removedAt: null,
       disabled: false,
       contributor,
       expiresAt,
@@ -125,7 +133,7 @@ export async function ingestSource(
         label,
         status: result.status,
         premium: result.premium,
-        detail: result.detail,
+        detail: retainedDetail(result.detail),
         latencyMs: result.latencyMs,
         checkCount: sql`${table.checkCount} + 1`,
         okCount: sql`${table.okCount} + ${result.ok ? 1 : 0}`,
@@ -136,6 +144,8 @@ export async function ingestSource(
         ...(result.ok ? { lastOkAt: sql`now()` } : {}),
         lastCheckedAt: new Date(),
         removed: false,
+        removedAt: null,
+        expiresAt: options.expiresAt === undefined ? sql`${table.expiresAt}` : expiresAt,
         // Credit sticks to whoever contributed the entry first. A re-submission that revives a
         // dead credential must not steal the byline, and an anonymous re-submit must not erase
         // an existing credit — so keep the stored value when there is one.
@@ -158,6 +168,7 @@ export async function ingestSource(
  * detect those explicitly instead of returning a generic message.
  */
 export function describeSaveError(e: unknown): string {
+  if (e instanceof SourceLimitError) return e.message
   const msg = (e instanceof Error ? e.message : String(e ?? "")).toLowerCase()
   if (!databaseConfigured()) {
     return "The server has no database configured. Add DATABASE_URL (or the Hyperdrive binding, on Workers) in the host's environment."

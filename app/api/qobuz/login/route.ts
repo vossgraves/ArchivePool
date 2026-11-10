@@ -11,6 +11,7 @@ import {
 } from "@/lib/qobuz-oauth"
 import { getSessionUserId } from "@/lib/sessions"
 import { findUsernameById } from "@/lib/users"
+import { probeRateLimit } from "@/lib/probe-rate-limit"
 
 export const dynamic = "force-dynamic"
 
@@ -22,6 +23,8 @@ export const dynamic = "force-dynamic"
  * validates both, then ingests the account into the pool — exactly like the Tidal device flow.
  */
 export async function POST(req: NextRequest) {
+  const limited = probeRateLimit(req.headers, "qobuz-login")
+  if (limited) return limited
   let username = ""
   let password = ""
   try {

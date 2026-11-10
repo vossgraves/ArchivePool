@@ -5,6 +5,8 @@ import { runHealthSweep } from "@/lib/health-sweep"
 import { writeInstanceSnapshot } from "@/lib/edge-snapshot"
 import { writeStatusSnapshot } from "@/lib/status-snapshot"
 import { invalidate } from "@/lib/ttl-cache"
+import { cfBindings } from "@/lib/cf-env"
+import { writeDiscoveryKeySnapshot } from "@/lib/discovery-key-snapshot"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 60
@@ -43,9 +45,9 @@ export async function GET(req: NextRequest) {
 
   const batch = req.nextUrl.searchParams.get("batch")
   const summary = await runHealthSweep(
-    batch == null
+    batch == null && !cfBindings()
       ? {}
-      : { limit: batchLimit(batch), cursor: req.nextUrl.searchParams.get("cursor") ?? undefined },
+      : { limit: batchLimit(batch ?? String(BATCH_DEFAULT)), cursor: req.nextUrl.searchParams.get("cursor") ?? undefined },
   )
 
   // The board's figures just changed; drop the cached copy so the next reader sees this sweep
@@ -63,6 +65,7 @@ export async function GET(req: NextRequest) {
     // so this is the cheapest moment to compute figures that otherwise cost four statements on
     // every status poll (Hyperdrive meters each one against 100k/day).
     await writeStatusSnapshot()
+    await writeDiscoveryKeySnapshot()
     invalidate("snapshot:")
   }
   return NextResponse.json({ ok: true, ...summary, ranAt: new Date().toISOString() })

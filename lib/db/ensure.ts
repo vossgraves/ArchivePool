@@ -2,21 +2,11 @@
 import { sql } from "drizzle-orm"
 import { db } from "./index"
 import { kvGetText, kvPutText } from "@/lib/pool-cache"
+import { reportDatabaseUnavailable, ResourceUnavailable } from "@/lib/resource-budget"
+import { cfBindings } from "@/lib/cf-env"
 
-/**
- * Bump whenever a statement is added below. The version is stored in KV after a clean run so
- * the 57 idempotent statements do not run on every cold isolate.
- *
- * Why this is not just an optimisation: Hyperdrive Free meters **every database statement**
- * against 100,000/day (a `CREATE INDEX IF NOT EXISTS` counts even when it is a no-op), and a
- * Workers isolate is short-lived. Running this list on each new isolate burned 57 of those
- * statements per cold start — easily six figures a day across a global worker — which is how
- * the deployment hit Hyperdrive's daily limit and every SQL query started failing.
- *
- * The gate is a KV read (one per isolate), not a query. When KV is absent or unreadable the
- * old run-every-process behaviour returns, so a non-Workers host is unchanged.
- */
-export const SCHEMA_VERSION = "2026-11-06.1"
+/** Bump with any schema change; Workers accept only this externally published KV marker. */
+export const SCHEMA_VERSION = "2026-11-10.2"
 const SCHEMA_MARKER_KEY = "schema:applied"
 
 /** Idempotent schema migration, run once per deploy (Workers) / process (elsewhere). See docs/SCHEMA.md. */
@@ -222,6 +212,22 @@ const STATEMENTS: string[] = [
     value       jsonb NOT NULL DEFAULT '{}',
     updated_at  timestamptz NOT NULL DEFAULT now()
   )`,
+  `ALTER TABLE account_entries ADD COLUMN IF NOT EXISTS removed_at timestamptz`,
+  `ALTER TABLE instance_entries ADD COLUMN IF NOT EXISTS removed_at timestamptz`,
+  `CREATE INDEX IF NOT EXISTS idx_health_log_retention ON health_log (checked_at DESC, id DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_health_log_success ON health_log (entry_id, checked_at DESC) WHERE ok AND premium AND (detail IS NULL OR detail NOT LIKE 'app report%')`,
+  `CREATE INDEX IF NOT EXISTS idx_api_key_leases_retention ON api_key_leases (leased_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_rate_limit_retention ON rate_limit_buckets (window_start)`,
+  `CREATE INDEX IF NOT EXISTS idx_key_requests_retention ON api_key_requests (created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_github_claims_retention ON github_claims (created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_account_entries_removed ON account_entries (removed_at) WHERE removed`,
+  `CREATE INDEX IF NOT EXISTS idx_instance_entries_removed ON instance_entries (removed_at) WHERE removed`,
+  `CREATE INDEX IF NOT EXISTS idx_audit_log_retention ON audit_log (created_at DESC, id DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_account_entries_contributor ON account_entries (contributor)`,
+  `CREATE INDEX IF NOT EXISTS idx_instance_entries_contributor ON instance_entries (contributor)`,
+  `CREATE INDEX IF NOT EXISTS idx_instance_entries_expires ON instance_entries (expires_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_key_requests_recent ON api_key_requests (ip_address, user_agent, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_users_recent ON users (created_ip, created_ua, created_at)`,
 ]
 
 const globalForMigrations = globalThis as unknown as { __poolSchemaEnsured?: Promise<void> }
@@ -231,12 +237,18 @@ const globalForMigrations = globalThis as unknown as { __poolSchemaEnsured?: Pro
  * database: the whole point is to spend zero statements on a warm schema.
  */
 async function schemaAlreadyApplied(): Promise<boolean> {
-  return (await kvGetText(SCHEMA_MARKER_KEY)) === SCHEMA_VERSION
+  return (await kvGetText(SCHEMA_MARKER_KEY, true)) === SCHEMA_VERSION
 }
 
 export function ensureSchema(): Promise<void> {
   globalForMigrations.__poolSchemaEnsured ??= (async () => {
     if (await schemaAlreadyApplied()) return
+    // Even a once-only DDL pass exceeds Free's CPU allowance. Apply migrations outside
+    // Workers and publish the marker after rollout; reads never bootstrap a database.
+    if (cfBindings()) {
+      await reportDatabaseUnavailable()
+      throw new ResourceUnavailable()
+    }
 
     let failed = 0
     for (const statement of STATEMENTS) {
@@ -273,6 +285,9 @@ export function ensureSchema(): Promise<void> {
         )
       }
     }
-  })()
+  })().catch((error) => {
+    delete globalForMigrations.__poolSchemaEnsured
+    throw error
+  })
   return globalForMigrations.__poolSchemaEnsured
 }

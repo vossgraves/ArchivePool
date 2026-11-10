@@ -27,8 +27,8 @@ export async function POST(req: NextRequest) {
   const removed = body.action !== "restore"
 
   await ensureSchema()
-  await db.update(accountEntries).set({ removed }).where(eq(accountEntries.id, body.id))
-  await db.update(instanceEntries).set({ removed }).where(eq(instanceEntries.id, body.id))
+  await db.update(accountEntries).set({ removed, removedAt: removed ? new Date() : null }).where(eq(accountEntries.id, body.id))
+  await db.update(instanceEntries).set({ removed, removedAt: removed ? new Date() : null }).where(eq(instanceEntries.id, body.id))
   await recordAudit(req, actor, "entry.remove", `entry:${body.id}`, { removed })
   return NextResponse.json({ ok: true, id: body.id, removed })
 }
@@ -39,8 +39,15 @@ export async function GET(req: NextRequest) {
   if (!actor) return NextResponse.json({ error: "unauthorized" }, { status: 401 })
 
   await ensureSchema()
-  const accounts = await db.select().from(accountEntries)
-  const instances = await db.select().from(instanceEntries)
+  const columns = (t: typeof accountEntries | typeof instanceEntries) => ({
+    id: t.id, service: t.service, label: t.label, status: t.status, premium: t.premium,
+    disabled: t.disabled, removed: t.removed, contributor: t.contributor,
+    consecutiveFailures: t.consecutiveFailures, lastCheckedAt: t.lastCheckedAt,
+    detail: t.detail, latencyMs: t.latencyMs, checkCount: t.checkCount, okCount: t.okCount,
+    createdAt: t.createdAt,
+  })
+  const accounts = await db.select(columns(accountEntries)).from(accountEntries)
+  const instances = await db.select(columns(instanceEntries)).from(instanceEntries)
   const rows = [
     ...accounts.map((r) => ({ ...r, kind: "account" as const })),
     ...instances.map((r) => ({ ...r, kind: "api" as const })),

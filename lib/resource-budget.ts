@@ -1,0 +1,100 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import "server-only"
+import type { AsyncLocalStorage } from "node:async_hooks"
+import { cfBindings } from "@/lib/cf-env"
+import { ANONYMOUS_ADMISSIONS_PER_DAY, SourceLimitError } from "@/cloudflare/input-limits.mjs"
+
+type Resource = "sql" | "reads" | "writes" | "probes" | "admissions"
+type Ticket = { amount: number; day: number; expiresAt: number }
+interface Lease {
+  reserve(kind: Resource, cron: boolean): Promise<Ticket | null>
+  claimSchema(version: string): Promise<boolean>
+  databaseUnavailable(): Promise<boolean>
+  reportDatabaseUnavailable(): Promise<void>
+}
+interface BudgetScope {
+  namespace?: { idFromName(name: string): unknown; get(id: unknown): { open(): Promise<Lease> } }
+  lease: Promise<Lease> | null
+  tickets: Partial<Record<Resource, Ticket>>
+  pending?: Promise<void>
+  cron?: boolean
+}
+
+export class ResourceUnavailable extends Error {
+  constructor() { super("Free-tier resource budget unavailable; retry later") }
+}
+
+function scope(): BudgetScope | null {
+  const storage = (globalThis as Record<symbol, unknown>)[Symbol.for("archivepool.resourceBudget")] as
+    AsyncLocalStorage<BudgetScope> | undefined
+  const state = storage?.getStore()
+  // The wrapper scope also covers work before OpenNext installs its binding context.
+  if (state) {
+    if (!state.namespace) throw new ResourceUnavailable()
+    return state
+  }
+  if (cfBindings()) throw new ResourceUnavailable()
+  return null
+}
+
+function lease(state: BudgetScope): Promise<Lease> {
+  state.lease ??= Promise.resolve(state.namespace!.get(state.namespace!.idFromName("global-v1")).open())
+  return state.lease
+}
+
+export async function chargeResource(kind: Resource): Promise<void> {
+  return allocate(kind, true)
+}
+
+export async function prepareResource(kind: Resource): Promise<void> {
+  return allocate(kind, false)
+}
+
+export async function reserveAnonymousAdmission(): Promise<void> {
+  try {
+    if (scope()) return await chargeResource("admissions")
+    const { dbRateLimit } = await import("@/lib/rate-limit")
+    const day = Math.floor(Date.now() / 86_400_000)
+    const verdict = await dbRateLimit(`anonymous-ingest:${day}`, ANONYMOUS_ADMISSIONS_PER_DAY, 86_400_000)
+    if (verdict.ok) return
+  } catch { /* uncertain reservations remain spent and admission fails closed */ }
+  throw new SourceLimitError("The daily anonymous submission limit has been reached. Retry tomorrow.")
+}
+
+async function allocate(kind: Resource, spend: boolean): Promise<void> {
+  const state = scope()
+  if (!state) return
+  // Serialize allocation within one request; parallel Drizzle queries share its tickets.
+  const previous = state.pending ?? Promise.resolve()
+  const operation = previous.catch(() => {}).then(async () => {
+    const now = Date.now()
+    let ticket = state.tickets[kind]
+    if (!ticket || ticket.amount === 0 || ticket.day !== Math.floor(now / 86_400_000) || ticket.expiresAt <= now) {
+      ticket = (await (await lease(state)).reserve(kind, state.cron === true)) ?? undefined
+      if (!ticket) throw new ResourceUnavailable()
+      state.tickets[kind] = ticket
+    }
+    if (spend) ticket.amount--
+  })
+  state.pending = operation
+  try { await operation } catch { throw new ResourceUnavailable() }
+}
+
+export async function claimSchemaMigration(version: string): Promise<boolean> {
+  const state = scope()
+  return state ? (await lease(state)).claimSchema(version) : true
+}
+
+export async function databaseUnavailable(): Promise<boolean> {
+  try {
+    const state = scope()
+    return state ? await (await lease(state)).databaseUnavailable() : false
+  } catch { return true }
+}
+
+export async function reportDatabaseUnavailable(): Promise<void> {
+  try {
+    const state = scope()
+    if (state) await (await lease(state)).reportDatabaseUnavailable()
+  } catch { /* reporting cannot replace the original database error */ }
+}

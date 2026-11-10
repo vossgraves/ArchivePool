@@ -2,7 +2,8 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 import { and, desc, eq, gt, ne, sql } from "drizzle-orm"
 import type { NextRequest } from "next/server"
-import { cfWaitUntil } from "@/lib/cf-env"
+import { snapshotDiscoveryIdentity } from "@/lib/discovery-key-snapshot"
+import { databaseUnavailable } from "@/lib/resource-budget"
 import { db } from "@/lib/db"
 import { ensureSchema } from "@/lib/db/ensure"
 import { apiKeys, apiKeyRequests, users } from "@/lib/db/schema"
@@ -42,6 +43,8 @@ export function readKeyFromRequest(req: NextRequest): string | null {
 /** Outcome of read-key authentication. `keyId` is the api_keys row id when one was resolved. */
 export interface ReadKeyIdentity {
   ok: boolean
+  expiresAt?: number
+  stale?: boolean
   /**
    * null when gating is off and no valid key was presented. Callers that key durable state on
    * the requester (per-key leases) must treat null as "anonymous" and skip that state rather
@@ -88,30 +91,6 @@ async function findKeyRow(keyHash: string): Promise<KeyRow | null> {
   return { id: row.id, scope: row && isService(row.service) ? row.service : null, revoked: row.revoked }
 }
 
-// `use_count` drives the dashboard and lets an operator retire a legacy baked-in key. It does
-// not need per-request precision, and on Workers each bump is a Hyperdrive statement — so it
-// is sampled at most once a minute per key per isolate. A cold isolate may add one bump.
-const USAGE_BUMP_INTERVAL_MS = 60_000
-const usageBumpedAt = new Map<number, number>()
-
-function bumpKeyUsage(id: number): void {
-  const now = Date.now()
-  const last = usageBumpedAt.get(id)
-  if (last != null && now - last < USAGE_BUMP_INTERVAL_MS) return
-  if (usageBumpedAt.size > 5_000) usageBumpedAt.clear()
-  usageBumpedAt.set(id, now)
-  // Best-effort; never block the request on it. On Workers the write rides
-  // ctx.waitUntil — a response-scoped promise there is dropped at return.
-  cfWaitUntil(
-    db
-      .update(apiKeys)
-      .set({ useCount: sql`${apiKeys.useCount} + 1`, lastUsedAt: new Date() })
-      .where(eq(apiKeys.id, id))
-      .then(() => {})
-      .catch(() => {}),
-  )
-}
-
 /**
  * Validates the key and resolves its row id in one lookup, so per-key leasing needs no second
  * query. [alwaysEnforce] is for credential-bearing feeds; discovery feeds carry only URLs and
@@ -127,7 +106,7 @@ export async function identifyReadKey(req: NextRequest, alwaysEnforce = false): 
 
   // Gating off: allow, and skip the query entirely when nothing was presented.
   if (!enforced && !candidate) return { ok: true, keyId: null, scope: null }
-  if (!candidate) return { ok: false, keyId: null, scope: null }
+  if (!candidate || candidate.length > 512) return { ok: false, keyId: null, scope: null }
 
   const keyHash = hashKey(candidate)
   await ensureSchema()
@@ -141,7 +120,6 @@ export async function identifyReadKey(req: NextRequest, alwaysEnforce = false): 
   }
 
   if (!row || row.revoked) return { ok: false, keyId: null, scope: null }
-  bumpKeyUsage(row.id)
   return { ok: true, keyId: row.id, scope: row.scope }
 }
 
@@ -170,22 +148,35 @@ interface CachedKeyIdentity {
   id?: number | null
   scope?: string | null
   revoked?: boolean
+  expiresAt?: number
+  stale?: boolean
+}
+
+async function archivedDiscoveryIdentity(cacheKey: string, now: number): Promise<ReadKeyIdentity | null> {
+  const raw = await edgeGet(`${cacheKey}:last-good`)
+  if (!raw) return null
+  try {
+    const row = JSON.parse(raw) as CachedKeyIdentity
+    return row.revoked === false && typeof row.id === "number"
+      ? { ok: true, keyId: row.id, scope: isService(row.scope) ? row.scope : null, expiresAt: now + 60_000, stale: true }
+      : null
+  } catch { return null }
 }
 
 export async function identifyDiscoveryKey(req: NextRequest): Promise<ReadKeyIdentity> {
   const enforced = process.env.READ_KEYS_ENFORCED === "true"
   const candidate = extractKey(req)
   if (!enforced && !candidate) return { ok: true, keyId: null, scope: null }
-  if (!candidate) return { ok: false, keyId: null, scope: null }
+  if (!candidate || candidate.length > 512) return { ok: false, keyId: null, scope: null }
 
   const keyHash = hashKey(candidate)
   const now = Date.now()
   const memo = discoveryKeyMemo.get(keyHash)
-  if (memo && now - memo.at < (memo.identity.ok ? DISCOVERY_KEY_MEMO_MS : DISCOVERY_KEY_NEGATIVE_MEMO_MS)) {
+  if (memo && (memo.identity.expiresAt ?? 0) > now && now - memo.at < (memo.identity.ok ? DISCOVERY_KEY_MEMO_MS : DISCOVERY_KEY_NEGATIVE_MEMO_MS)) {
     return memo.identity
   }
 
-  const cacheKey = `key-id:${keyHash}`
+  const cacheKey = `key-id:v2:${keyHash}`
   let identity: ReadKeyIdentity | null = null
 
   // 1) Per-colo Cache API. A miss and a cache outage look the same and fall through.
@@ -193,14 +184,16 @@ export async function identifyDiscoveryKey(req: NextRequest): Promise<ReadKeyIde
   if (raw) {
     try {
       const cached = JSON.parse(raw) as CachedKeyIdentity
-      if (typeof cached.revoked === "boolean") {
+      if (typeof cached.revoked === "boolean" && typeof cached.expiresAt === "number" && cached.expiresAt > now) {
         identity =
           cached.revoked && enforced
-            ? { ok: false, keyId: null, scope: null }
+            ? { ok: false, keyId: null, scope: null, expiresAt: cached.expiresAt }
             : {
                 ok: true,
                 keyId: typeof cached.id === "number" ? cached.id : null,
                 scope: cached.scope && isService(cached.scope) ? cached.scope : null,
+                expiresAt: cached.expiresAt,
+                stale: cached.stale,
               }
       }
     } catch {
@@ -211,6 +204,22 @@ export async function identifyDiscoveryKey(req: NextRequest): Promise<ReadKeyIde
   // 2) Database fallback: first poll for this key in this colo, or after the cache TTL.
   if (identity == null) {
     try {
+      const snapshot = await snapshotDiscoveryIdentity(keyHash)
+      const unavailable = await databaseUnavailable()
+      if (snapshot && ((snapshot.expiresAt ?? 0) > now || unavailable)) {
+        identity = unavailable
+          ? { ...snapshot, expiresAt: now + 60_000, stale: true }
+          : snapshot
+        const ttl = Math.min(DISCOVERY_KEY_CACHE_SEC, Math.max(1, Math.floor((identity.expiresAt! - now) / 1000)))
+        await edgePut(cacheKey, JSON.stringify({ id: identity.keyId, scope: identity.scope, revoked: false, expiresAt: identity.expiresAt, stale: identity.stale }), ttl)
+        await edgePut(`${cacheKey}:last-good`, JSON.stringify({ id: identity.keyId, scope: identity.scope, revoked: false }), 7 * 86400)
+      } else if (unavailable) {
+        identity = await archivedDiscoveryIdentity(cacheKey, now)
+      }
+    } catch { /* SQL remains authoritative for keys not in the scheduled public snapshot. */ }
+  }
+  if (identity == null) {
+    try {
       await ensureSchema()
       const row = await findKeyRow(keyHash)
       identity =
@@ -219,21 +228,34 @@ export async function identifyDiscoveryKey(req: NextRequest): Promise<ReadKeyIde
             ? { ok: false, keyId: null, scope: null }
             : { ok: true, keyId: null, scope: null }
           : { ok: true, keyId: row.id, scope: row.scope }
+      identity.expiresAt = now + DISCOVERY_KEY_CACHE_SEC * 1000
       // Cache rejections too, briefly: a revoked key retried on every app launch would
       // otherwise keep paying for a SQL round trip in every colo.
       await edgePut(
         cacheKey,
-        JSON.stringify({ id: identity.keyId, scope: identity.scope, revoked: !identity.ok }),
+        JSON.stringify({ id: identity.keyId, scope: identity.scope, revoked: !identity.ok, expiresAt: identity.expiresAt }),
         DISCOVERY_KEY_CACHE_SEC,
       )
+      if (identity.ok && identity.keyId != null) await edgePut(`${cacheKey}:last-good`, JSON.stringify({ id: identity.keyId, scope: identity.scope, revoked: false }), 7 * 86400)
     } catch (err) {
       console.error("[auth] discovery key lookup failed:", err instanceof Error ? err.message : err)
-      return { ok: false, keyId: null, scope: null }
+      const snapshot = await snapshotDiscoveryIdentity(keyHash)
+      const fallback = snapshot ?? await archivedDiscoveryIdentity(cacheKey, now)
+      if (fallback) {
+        const stale = { ...fallback, expiresAt: now + 60_000, stale: true }
+        await edgePut(cacheKey, JSON.stringify({ id: stale.keyId, scope: stale.scope, revoked: false, expiresAt: stale.expiresAt, stale: true }), 60)
+        if (discoveryKeyMemo.size >= 5_000) discoveryKeyMemo.clear()
+        discoveryKeyMemo.set(keyHash, { at: now, identity: stale })
+        return stale
+      }
+      const denied = { ok: false, keyId: null, scope: null }
+      await edgePut(cacheKey, JSON.stringify({ revoked: true, expiresAt: now + 60_000 }), 60)
+      return denied
     }
   }
 
   if (identity == null) return { ok: false, keyId: null, scope: null }
-  if (discoveryKeyMemo.size > 5_000) discoveryKeyMemo.clear()
+  if (discoveryKeyMemo.size >= 5_000) discoveryKeyMemo.clear()
   discoveryKeyMemo.set(keyHash, { at: now, identity })
   return identity
 }

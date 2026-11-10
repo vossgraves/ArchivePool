@@ -8,6 +8,8 @@ import { accountEntries, instanceEntries } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
 import { writeInstanceSnapshot } from "@/lib/edge-snapshot"
 import { invalidate } from "@/lib/ttl-cache"
+import { purgeRetainedData } from "@/lib/retention"
+import { writeStatusSnapshot } from "@/lib/status-snapshot"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 60
@@ -24,7 +26,7 @@ const GRACE_DAYS = 7
 const eligible = (table: typeof accountEntries | typeof instanceEntries) =>
   and(
     eq(table.removed, false),
-    or(eq(table.status, "dead"), eq(table.disabled, true)),
+    or(eq(table.status, "dead"), eq(table.disabled, true), sql`${table.expiresAt} < now() - interval '7 days'`),
     sql`${table.createdAt} < now() - make_interval(days => ${GRACE_DAYS})`,
     sql`not exists (
           select 1 from health_log hl
@@ -49,12 +51,12 @@ export async function GET(req: NextRequest) {
   await ensureSchema()
   const accounts = await db
     .update(accountEntries)
-    .set({ removed: true })
+    .set({ removed: true, removedAt: new Date() })
     .where(eligible(accountEntries))
     .returning({ id: accountEntries.id })
   const instances = await db
     .update(instanceEntries)
-    .set({ removed: true })
+    .set({ removed: true, removedAt: new Date() })
     .where(eligible(instanceEntries))
     .returning({ id: instanceEntries.id })
 
@@ -64,6 +66,7 @@ export async function GET(req: NextRequest) {
     invalidate("status")
     invalidate("discovery:")
     if (instances.length > 0) await writeInstanceSnapshot()
+    await writeStatusSnapshot()
     invalidate("snapshot:")
   }
 
@@ -74,6 +77,7 @@ export async function GET(req: NextRequest) {
     accountIds: accounts.map((r) => r.id),
     instanceIds: instances.map((r) => r.id),
   })
+  await purgeRetainedData()
 
   return NextResponse.json({
     ok: true,

@@ -33,6 +33,7 @@ const entryColumns = {
   okCount: integer("ok_count").notNull().default(0),
   disabled: boolean("disabled").notNull().default(false),
   removed: boolean("removed").notNull().default(false),
+  removedAt: timestamp("removed_at", { withTimezone: true }),
   // Opt-in credit. Never derived from the payload, never sent to an app in any feed.
   contributor: text("contributor"),
   // Contributor-declared end of the subscription. Past this the entry stops being servable
@@ -119,6 +120,7 @@ export const sourceEntries = pgTable(
     okCount: integer("ok_count").notNull().default(0),
     disabled: boolean("disabled").notNull().default(false),
     removed: boolean("removed").notNull().default(false),
+    removedAt: timestamp("removed_at", { withTimezone: true }),
     lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
     lastLeasedAt: timestamp("last_leased_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
