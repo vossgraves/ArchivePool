@@ -18,6 +18,7 @@ pub struct Config {
     pub github_redirect_uri: String,
     pub public_url: String,
     pub web_login_disabled: bool,
+    pub key_fleet_limit: usize,
 }
 impl Config {
     pub fn load() -> Self {
@@ -39,6 +40,7 @@ impl Config {
             github_redirect_uri: get("GITHUB_REDIRECT_URI"),
             public_url: get("PUBLIC_URL"),
             web_login_disabled: get("WEB_LOGIN_DISABLED") == "true",
+            key_fleet_limit: get("POOL_KEY_FLEET_LIMIT").parse().unwrap_or(0),
         }
     }
 }

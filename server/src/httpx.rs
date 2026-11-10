@@ -70,13 +70,22 @@ pub fn is_public(ip: IpAddr) -> bool {
         }
     }
 }
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct PublicResolver {
     allowed: HashSet<IpAddr>,
+    public: bool,
+}
+impl Default for PublicResolver {
+    fn default() -> Self {
+        Self {
+            allowed: HashSet::new(),
+            public: true,
+        }
+    }
 }
 impl PublicResolver {
     fn permits(&self, ip: IpAddr) -> bool {
-        is_public(ip) || self.allowed.contains(&ip)
+        self.public && is_public(ip) || self.allowed.contains(&ip)
     }
 }
 impl Resolve for PublicResolver {
@@ -138,6 +147,7 @@ impl Outbound {
     #[cfg(test)]
     pub fn local() -> Self {
         Self::build(PublicResolver {
+            public: false,
             allowed: ["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()]
                 .into_iter()
                 .collect(),

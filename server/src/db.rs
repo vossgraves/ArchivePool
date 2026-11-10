@@ -31,6 +31,8 @@ impl From<crypto::CryptoError> for Error {
 pub struct Db {
     pool: Option<PgPool>,
     ready: Arc<OnceCell<()>>,
+    #[cfg(test)]
+    statements: Arc<std::sync::Mutex<Vec<String>>>,
 }
 impl Db {
     pub fn open(url: &str, max: u32) -> Result<Self> {
@@ -55,6 +57,8 @@ impl Db {
         Ok(Self {
             pool,
             ready: Arc::new(OnceCell::new()),
+            #[cfg(test)]
+            statements: Arc::default(),
         })
     }
     pub fn pool(&self) -> Result<&PgPool> {
@@ -87,6 +91,8 @@ impl Db {
     }
     pub async fn rows(&self, sql: &str, args: Vec<Arg>) -> Result<Vec<Value>> {
         self.ensure().await?;
+        #[cfg(test)]
+        self.statements.lock().unwrap().push(sql.to_owned());
         rows(self.pool()?, sql, args).await
     }
     pub async fn one(&self, sql: &str, args: Vec<Arg>) -> Result<Option<Value>> {
@@ -94,6 +100,8 @@ impl Db {
     }
     pub async fn exec(&self, sql: &str, args: Vec<Arg>) -> Result<u64> {
         self.ensure().await?;
+        #[cfg(test)]
+        self.statements.lock().unwrap().push(sql.to_owned());
         Ok(query(sql, args)
             .execute(self.pool()?)
             .await?
@@ -112,6 +120,10 @@ impl Db {
             )
             .await;
     }
+    #[cfg(test)]
+    pub fn take_statements(&self) -> Vec<String> {
+        std::mem::take(&mut *self.statements.lock().unwrap())
+    }
 }
 #[derive(Clone)]
 pub enum Arg {
@@ -123,6 +135,7 @@ pub enum Arg {
     Time(DateTime<Utc>),
     Ints(Vec<i32>),
     Texts(Vec<String>),
+    NullJson,
     NullInt,
     NullText,
     NullTime,
@@ -197,6 +210,7 @@ pub fn query(
             Arg::Time(v) => q.bind(v),
             Arg::Ints(v) => q.bind(v),
             Arg::Texts(v) => q.bind(v),
+            Arg::NullJson => q.bind(None::<Value>),
             Arg::NullInt => q.bind(None::<i32>),
             Arg::NullText => q.bind(None::<String>),
             Arg::NullTime => q.bind(None::<DateTime<Utc>>),

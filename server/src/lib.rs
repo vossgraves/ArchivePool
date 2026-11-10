@@ -4,6 +4,7 @@ pub mod cache;
 pub mod config;
 pub mod crypto;
 pub mod db;
+pub mod health;
 pub mod httpx;
 pub mod pool;
 #[derive(Clone)]
@@ -13,6 +14,7 @@ pub struct App {
     pub cache: cache::Cache,
     pub rates: cache::RateLimit,
     pub outbound: httpx::Outbound,
+    pub endpoints: health::Endpoints,
 }
 impl App {
     pub fn new(config: config::Config) -> db::Result<Self> {
@@ -23,6 +25,10 @@ impl App {
             cache: cache::Cache::default(),
             rates: cache::RateLimit::default(),
             outbound: httpx::Outbound::new().map_err(|_| db::Error)?,
+            endpoints: health::Endpoints::default(),
         })
     }
 }
+pub mod snapshot;
+#[cfg(test)]
+pub mod test_support;
