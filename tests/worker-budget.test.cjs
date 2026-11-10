@@ -7,12 +7,13 @@ const { Miniflare, convertV4MiniflareOptions } = require(require.resolve('minifl
 
 test('SQLite Durable Object RPC shares a persistent ledger and disposes its session', async () => {
   const root = path.resolve(__dirname, '..')
-  const budget = fs.readFileSync(path.join(root, 'cloudflare/budget.mjs'), 'utf8').replace(/^export /gm, '')
+  const input = fs.readFileSync(path.join(root, 'cloudflare/input-limits.mjs'), 'utf8').replace(/^export /gm, '')
+  const budget = fs.readFileSync(path.join(root, 'cloudflare/budget.mjs'), 'utf8').replace(/^export /gm, '').replace(/^import .*\n/gm, '')
   const limits = fs.readFileSync(path.join(root, 'cloudflare/limits.mjs'), 'utf8').replace('import { BudgetLedger } from "./budget.mjs"', '')
   const options = { cf: false,
     modules: true, compatibilityDate: '2025-10-11',
     durableObjects: { BUDGET: { className: 'FreeTierBudget', useSQLite: true } },
-    script: `${budget}\n${limits}\nexport default { async fetch(request, env) {
+    script: `${input}\n${budget}\n${limits}\nexport default { async fetch(request, env) {
       const lease = await env.BUDGET.get(env.BUDGET.idFromName('global')).open();
       try {
         const outage = await lease.databaseUnavailable();

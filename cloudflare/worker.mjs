@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { AsyncLocalStorage } from "node:async_hooks"
 import openNext from "../.open-next/worker.js"
+import { boundedRequest } from "./input-limits.mjs"
 export { FreeTierBudget } from "./limits.mjs"
 export { DOQueueHandler, DOShardedTagCache, BucketCachePurge } from "../.open-next/worker.js"
 
@@ -10,6 +11,9 @@ const scope = globalThis[key] ??= new AsyncLocalStorage()
 export default {
   ...openNext,
   async fetch(request, env, ctx) {
+    const bounded = await boundedRequest(request)
+    if (bounded instanceof Response) return bounded
+    request = bounded
     const state = { namespace: env.FREE_TIER_BUDGET, env, tickets: {}, lease: null, cron: new URL(request.url).pathname.startsWith("/api/cron/") }
     const background = []
     const execution = new Proxy(ctx, {

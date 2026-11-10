@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-export const DAILY_LIMITS = { sql: 80_000, reads: 80_000, writes: 32, probes: 8_000 }
+import { ANONYMOUS_ADMISSIONS_PER_DAY } from "./input-limits.mjs"
+export const DAILY_LIMITS = { sql: 80_000, reads: 80_000, writes: 32, probes: 8_000, admissions: ANONYMOUS_ADMISSIONS_PER_DAY }
 export const SQL_AWAKE_MS = 10 * 60 * 60 * 1000
 export const ORDINARY_LIMITS = { sql: 72_000, reads: 72_000, probes: 4_000 }
 export const TICKET_MS = 20_000
 const WAKE_MS = 6 * 60_000
-const CHUNKS = { sql: 8, reads: 2, writes: 1, probes: 8 }
+const CHUNKS = { sql: 8, reads: 2, writes: 1, probes: 8, admissions: 1 }
 
 export class BudgetLedger {
   constructor(storage, now = Date.now) {
     this.storage = storage
     this.now = now
-    this.state = { ordinary: {}, ...(storage.get() ?? {}) }
+    this.state = { ordinary: {}, admissions: 0, ...(storage.get() ?? {}) }
   }
 
   reserve(kind, cron = false) {
@@ -53,7 +54,7 @@ export class BudgetLedger {
   resetDay(now) {
     const day = Math.floor(now / 86_400_000)
     if (this.state.day !== day) {
-      this.state = { day, sql: 0, reads: 0, writes: 0, probes: 0, awake: 0, wakeUntil: 0, schema: {}, ordinary: {},
+      this.state = { day, sql: 0, reads: 0, writes: 0, probes: 0, admissions: 0, awake: 0, wakeUntil: 0, schema: {}, ordinary: {},
         databaseFailureAt: this.state.databaseFailureAt, databaseUnavailableUntil: this.state.databaseUnavailableUntil }
     }
     return day

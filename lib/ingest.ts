@@ -8,6 +8,8 @@ import { ensureSchema } from "@/lib/db/ensure"
 import { runCheck, type CheckResult } from "@/lib/health"
 import { fingerprint, maskLabel, type Kind, type Service } from "@/lib/sources"
 import { fetchBudgetExceeded, rowFetchExhausted } from "@/lib/cf-env"
+import { reserveAnonymousAdmission } from "@/lib/resource-budget"
+import { SourceLimitError } from "@/cloudflare/input-limits.mjs"
 
 export interface IngestResult {
   ok: boolean
@@ -53,10 +55,11 @@ export async function ingestSource(
   payload: Record<string, unknown>,
   options: IngestOptions = {},
 ): Promise<IngestResult> {
-  await ensureSchema()
   if (kind === "account" && !atRestEncryptionEnabled()) {
     throw new Error("POOL_ENCRYPTION_KEY is required before account credentials can be accepted")
   }
+  encryptAtRest(payload)
+  await ensureSchema()
   const contributor = options.contributor?.trim().slice(0, 64) || null
   const expiresAt = options.expiresAt ?? null
   // Fingerprint, label and the live health check all run on the PLAINTEXT payload; only the value
@@ -97,6 +100,7 @@ export async function ingestSource(
   }
 
   const storedPayload = encryptAtRest(payload)
+  if (!contributor) await reserveAnonymousAdmission()
   const table = kind === "account" ? accountEntries : instanceEntries
 
   await db
@@ -163,6 +167,7 @@ export async function ingestSource(
  * detect those explicitly instead of returning a generic message.
  */
 export function describeSaveError(e: unknown): string {
+  if (e instanceof SourceLimitError) return e.message
   const msg = (e instanceof Error ? e.message : String(e ?? "")).toLowerCase()
   if (!databaseConfigured()) {
     return "The server has no database configured. Add DATABASE_URL (or the Hyperdrive binding, on Workers) in the host's environment."

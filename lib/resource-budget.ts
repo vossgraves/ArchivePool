@@ -2,8 +2,9 @@
 import "server-only"
 import type { AsyncLocalStorage } from "node:async_hooks"
 import { cfBindings } from "@/lib/cf-env"
+import { ANONYMOUS_ADMISSIONS_PER_DAY, SourceLimitError } from "@/cloudflare/input-limits.mjs"
 
-type Resource = "sql" | "reads" | "writes" | "probes"
+type Resource = "sql" | "reads" | "writes" | "probes" | "admissions"
 type Ticket = { amount: number; day: number; expiresAt: number }
 interface Lease {
   reserve(kind: Resource, cron: boolean): Promise<Ticket | null>
@@ -47,6 +48,17 @@ export async function chargeResource(kind: Resource): Promise<void> {
 
 export async function prepareResource(kind: Resource): Promise<void> {
   return allocate(kind, false)
+}
+
+export async function reserveAnonymousAdmission(): Promise<void> {
+  try {
+    if (scope()) return await chargeResource("admissions")
+    const { dbRateLimit } = await import("@/lib/rate-limit")
+    const day = Math.floor(Date.now() / 86_400_000)
+    const verdict = await dbRateLimit(`anonymous-ingest:${day}`, ANONYMOUS_ADMISSIONS_PER_DAY, 86_400_000)
+    if (verdict.ok) return
+  } catch { /* uncertain reservations remain spent and admission fails closed */ }
+  throw new SourceLimitError("The daily anonymous submission limit has been reached. Retry tomorrow.")
 }
 
 async function allocate(kind: Resource, spend: boolean): Promise<void> {
