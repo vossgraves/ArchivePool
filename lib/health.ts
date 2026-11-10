@@ -1214,6 +1214,7 @@ async function healQobuzAppSecret(
         await db.update(accountEntries).set({
           payload: sql`jsonb_set(${accountEntries.payload}, '{appSecret}', ${JSON.stringify(encrypted)}::jsonb)`,
         }).where(and(eq(accountEntries.fingerprint, entryFingerprint),
+          sql`${accountEntries.payload}->>'appId' = ${String(row.payload.appId ?? "")}`,
           sql`${accountEntries.payload}->>'appSecret' = ${String(row.payload.appSecret ?? "")}`))
       }
     }
@@ -1234,7 +1235,7 @@ async function renewQobuzToken(
   payload: Record<string, unknown>,
   oldFingerprint?: string,
   deadline?: AbortSignal,
-): Promise<{ token: string | null; detail: string; skip?: boolean }> {
+): Promise<{ token: string | null; detail: string; skip?: boolean; fingerprint?: string }> {
   if (!oldFingerprint) return { token: null, detail: "no fingerprint to update" }
 
   // Re-login is a credential refresh like Tidal's: single-flight it, or two concurrent checks
@@ -1298,24 +1299,25 @@ async function renewQobuzToken(
     token: fresh,
     ...(login.countryCode ? { countryCode: login.countryCode } : {}),
   }
+  const newFingerprint = fingerprint("qobuz", "account", nextPayload)
   // The row is matched on the OLD fingerprint and the fingerprint is rewritten alongside the
   // token: it derives from the token, so upserting on the new one would duplicate the row and
   // leave the dead entry behind. Claim and payload clear together in the same UPDATE.
   await finish({
     payload: nextPayload,
-    fingerprint: fingerprint("qobuz", "account", nextPayload),
+    fingerprint: newFingerprint,
   })
   if (!claim) {
     await db
       .update(accountEntries)
       .set({
         payload: encryptAtRest(nextPayload),
-        fingerprint: fingerprint("qobuz", "account", nextPayload),
+        fingerprint: newFingerprint,
       })
       .where(sql`fingerprint = ${oldFingerprint}`)
       .catch(() => { /* best-effort — the token still works this round */ })
   }
-  return { token: fresh, detail: "re-logged in" }
+  return { token: fresh, detail: "re-logged in", fingerprint: newFingerprint }
 }
 
 async function checkQobuzAccount(
@@ -1343,6 +1345,8 @@ async function checkQobuzAccount(
       }))
       if (renewed.token) {
         token = renewed.token
+        const renewedFingerprint = "fingerprint" in renewed ? renewed.fingerprint : undefined
+        if (typeof renewedFingerprint === "string") entryFingerprint = renewedFingerprint
         const retry = await timedFetch(
           `https://www.qobuz.com/api.json/0.2/user/get?app_id=${encodeURIComponent(appId)}&user_auth_token=${encodeURIComponent(token)}`,
           { headers: qobuzHeaders(appId, token) },

@@ -19,7 +19,7 @@ function mockDatabase(read, write = () => {}) {
       limit() { return b },
       returning() { return b },
       async execute() {
-        if (operation === 'select') return read(getTableName(table), fields)
+        if (operation === 'select') return read(getTableName(table), fields, where)
         const update = { table: getTableName(table), values, where }
         if (operation === 'update') updates.push(update)
         return write(operation, update) ?? [{ consecutiveFailures: 0, disabled: false }]
@@ -114,4 +114,37 @@ test('Tidal premium evidence handles wrong types, boolean priority, and unreadab
     { highestSoundQuality: 'HI_RES_LOSSLESS' },
   ]) assert.equal(premium(JSON.stringify(body)), true, JSON.stringify(body))
   for (const body of ['not json', 'null', '42', '{}']) assert.equal(premium(body), true)
+})
+
+test('Qobuz repair follows the renewed fingerprint and updates only that credential', async () => {
+  const {createHash}=require('node:crypto')
+  const dialect=new PgDialect()
+  let crypto, row
+  const db=mockDatabase((table,_fields,where)=> table==='account_entries' && dialect.sqlToQuery(where).params.includes(row.fingerprint) ? [row] : [],
+    (_operation, update)=>{
+      if (update.table!=='account_entries' || !dialect.sqlToQuery(update.where).params.includes(row.fingerprint)) return []
+      if (update.values.payload?.queryChunks) {
+        row.payload.appSecret=JSON.parse(dialect.sqlToQuery(update.values.payload).params[0])
+      } else if (update.values.payload) row.payload=update.values.payload
+      if (update.values.fingerprint) row.fingerprint=update.values.fingerprint
+      return update.values.refreshInFlightUntil ? [{claim:update.values.refreshInFlightUntil,payload:row.payload}] : []
+    })
+  const h=new Harness({workers:false,mocks:{'@/lib/db':{db},'./qobuz-oauth':{
+    QOBUZ_LOGIN_APP_ID:'fixture-app',qobuzLogin:async()=>({userAuthToken:'fresh-token'}),scrapeQobuzAppSecret:async()=> 'new-secret',
+  }}})
+  crypto=h.load('lib/crypto.ts')
+  const plain={token:'old-token',appId:'fixture-app',appSecret:'old-secret',username:'fixture',password:'fixture'}
+  row={fingerprint:'old-fingerprint',payload:crypto.encryptAtRest(plain),refreshCooldownUntil:null,refreshInFlightUntil:null,refreshBackoffMs:null}
+  h.fetch=async url=>{
+    const u=new URL(url)
+    if(u.pathname.endsWith('/user/get')) return u.searchParams.get('user_auth_token')==='old-token'
+      ? new Response('{}',{status:401}) : Response.json({id:1,quality:'lossless'})
+    assert.ok(u.pathname.endsWith('/track/getFileUrl'))
+    const expected=createHash('md5').update(`trackgetFileUrlformat_id5intentstreamtrack_id5966783${u.searchParams.get('request_ts')}new-secret`).digest('hex')
+    return u.searchParams.get('request_sig')===expected ? Response.json({url:'fixture'}) : new Response('InvalidRequestSignature',{status:400})
+  }
+  const result=await h.run(()=>h.load('lib/health.ts').runCheck('qobuz','account',{...plain},'old-fingerprint'))
+  assert.equal(result.value.ok,true)
+  assert.equal(crypto.decryptAtRest(row.payload).appSecret,'new-secret')
+  assert.equal(crypto.decryptAtRest(row.payload).token,'fresh-token')
 })
