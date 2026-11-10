@@ -76,8 +76,8 @@ impl Db {
             let applied:bool=sqlx::query_scalar("select to_regclass('public.archivepool_schema_rust_v1') is not null")
                 .persistent(false).fetch_one(&mut *tx).await?;
             if !applied {
-                sqlx::raw_sql(include_str!("../migrations/001_schema.sql")).execute(&mut *tx).await?;
-                sqlx::raw_sql(include_str!("../migrations/002_runtime.sql")).execute(&mut *tx).await?;
+                sqlx::Executor::execute(&mut *tx, include_str!("../migrations/001_schema.sql")).await?;
+                sqlx::Executor::execute(&mut *tx, include_str!("../migrations/002_runtime.sql")).await?;
                 sqlx::query("create table archivepool_schema_rust_v1 (applied_at timestamptz not null default now())")
                     .persistent(false).execute(&mut *tx).await?;
             }

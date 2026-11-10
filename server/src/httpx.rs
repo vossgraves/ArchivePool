@@ -255,12 +255,14 @@ impl Outbound {
             "content-type",
             HeaderValue::from_static("application/x-www-form-urlencoded"),
         );
-        let mut encoded = url::form_urlencoded::Serializer::new(String::new());
-        for (k, v) in form {
-            encoded.append_pair(k, v);
-        }
-        self.send(Method::POST, url, headers, encoded.finish().into_bytes())
-            .await
+        let bytes = {
+            let mut encoded = url::form_urlencoded::Serializer::new(String::new());
+            for (k, v) in form {
+                encoded.append_pair(k, v);
+            }
+            encoded.finish().into_bytes()
+        };
+        self.send(Method::POST, url, headers, bytes).await
     }
 }
 pub fn headers(entries: &[(&str, &str)]) -> HeaderMap {
