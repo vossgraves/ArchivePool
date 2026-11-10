@@ -120,7 +120,7 @@ export const sourceEntries = pgTable(
     okCount: integer("ok_count").notNull().default(0),
     disabled: boolean("disabled").notNull().default(false),
     removed: boolean("removed").notNull().default(false),
-  removedAt: timestamp("removed_at", { withTimezone: true }),
+    removedAt: timestamp("removed_at", { withTimezone: true }),
     lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
     lastLeasedAt: timestamp("last_leased_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
