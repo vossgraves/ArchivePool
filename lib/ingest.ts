@@ -58,6 +58,7 @@ export async function ingestSource(
   if (kind === "account" && !atRestEncryptionEnabled()) {
     throw new Error("POOL_ENCRYPTION_KEY is required before account credentials can be accepted")
   }
+  // Fail fast on an invalid encryption key or oversized plaintext/encrypted payload before touching the database.
   encryptAtRest(payload)
   await ensureSchema()
   const contributor = options.contributor?.trim().slice(0, 64) || null
