@@ -73,9 +73,6 @@ export function rateLimit(id: string, limit: number, windowMs: number): RateVerd
   // Evict stale buckets when the map grows past the cap: cheapest effective policy is dropping
   // entries whose window is fully expired, then the oldest by insertion order.
   if (buckets.size > MAX_BUCKETS) {
-    for (const [key, b] of buckets) {
-      if (b.hits.length === 0 || now - b.hits[b.hits.length - 1] >= windowMs) buckets.delete(key)
-    }
     while (buckets.size > MAX_BUCKETS) {
       const first = buckets.keys().next().value
       if (first === undefined) break

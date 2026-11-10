@@ -6,7 +6,7 @@ import { db } from "@/lib/db"
 import { instanceEntries } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
 import { runCheck } from "@/lib/health"
-import { FetchBudgetExhausted, fetchBudgetExceeded } from "@/lib/cf-env"
+import { cfBindings, FetchBudgetExhausted, fetchBudgetExceeded } from "@/lib/cf-env"
 import { fingerprint, isBlockedInstanceUrl, maskLabel, normalizeUrl, type Service } from "@/lib/sources"
 
 export interface InstanceSyncResult {
@@ -83,6 +83,7 @@ export async function syncInstanceUrls(
     detailLimit?: number
   } = {},
 ): Promise<InstanceSyncResult> {
+  if (cfBindings()) opts = { ...opts, limit: Math.min(opts.limit ?? 8, 10), concurrency: Math.min(opts.concurrency ?? 3, 3) }
   await ensureSchema()
 
   const recheckWindowMs = opts.recheckWindowMs ?? DEFAULT_RECHECK_WINDOW_MS

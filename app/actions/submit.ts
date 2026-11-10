@@ -6,6 +6,8 @@ import { describeSaveError, ingestSource } from "@/lib/ingest"
 import { isKind, isService, type Kind, type Service } from "@/lib/sources"
 import { getSessionUserId } from "@/lib/sessions"
 import { findUsernameById } from "@/lib/users"
+import { headers } from "next/headers"
+import { probeRateLimit } from "@/lib/probe-rate-limit"
 
 /**
  * Parses the contributor's declared expiry. Date-only input is pinned to the end of that day in
@@ -157,6 +159,8 @@ function validate(service: Service, kind: Kind, payload: Record<string, unknown>
 }
 
 export async function submitSource(_prev: SubmitState, form: FormData): Promise<SubmitState> {
+  const limited = probeRateLimit(await headers(), "submit")
+  if (limited) return { ok: false, message: "Too many submissions. Retry in five minutes." }
   const service = form.get("service")
   const kind = form.get("kind")
   if (!isService(service) || !isKind(kind)) {

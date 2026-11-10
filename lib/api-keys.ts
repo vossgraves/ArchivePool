@@ -2,7 +2,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 import { and, desc, eq, gt, ne, sql } from "drizzle-orm"
 import type { NextRequest } from "next/server"
-import { cfWaitUntil } from "@/lib/cf-env"
+import { snapshotDiscoveryIdentity } from "@/lib/discovery-key-snapshot"
 import { db } from "@/lib/db"
 import { ensureSchema } from "@/lib/db/ensure"
 import { apiKeys, apiKeyRequests, users } from "@/lib/db/schema"
@@ -88,30 +88,6 @@ async function findKeyRow(keyHash: string): Promise<KeyRow | null> {
   return { id: row.id, scope: row && isService(row.service) ? row.service : null, revoked: row.revoked }
 }
 
-// `use_count` drives the dashboard and lets an operator retire a legacy baked-in key. It does
-// not need per-request precision, and on Workers each bump is a Hyperdrive statement — so it
-// is sampled at most once a minute per key per isolate. A cold isolate may add one bump.
-const USAGE_BUMP_INTERVAL_MS = 60_000
-const usageBumpedAt = new Map<number, number>()
-
-function bumpKeyUsage(id: number): void {
-  const now = Date.now()
-  const last = usageBumpedAt.get(id)
-  if (last != null && now - last < USAGE_BUMP_INTERVAL_MS) return
-  if (usageBumpedAt.size > 5_000) usageBumpedAt.clear()
-  usageBumpedAt.set(id, now)
-  // Best-effort; never block the request on it. On Workers the write rides
-  // ctx.waitUntil — a response-scoped promise there is dropped at return.
-  cfWaitUntil(
-    db
-      .update(apiKeys)
-      .set({ useCount: sql`${apiKeys.useCount} + 1`, lastUsedAt: new Date() })
-      .where(eq(apiKeys.id, id))
-      .then(() => {})
-      .catch(() => {}),
-  )
-}
-
 /**
  * Validates the key and resolves its row id in one lookup, so per-key leasing needs no second
  * query. [alwaysEnforce] is for credential-bearing feeds; discovery feeds carry only URLs and
@@ -127,7 +103,7 @@ export async function identifyReadKey(req: NextRequest, alwaysEnforce = false): 
 
   // Gating off: allow, and skip the query entirely when nothing was presented.
   if (!enforced && !candidate) return { ok: true, keyId: null, scope: null }
-  if (!candidate) return { ok: false, keyId: null, scope: null }
+  if (!candidate || candidate.length > 512) return { ok: false, keyId: null, scope: null }
 
   const keyHash = hashKey(candidate)
   await ensureSchema()
@@ -141,7 +117,6 @@ export async function identifyReadKey(req: NextRequest, alwaysEnforce = false): 
   }
 
   if (!row || row.revoked) return { ok: false, keyId: null, scope: null }
-  bumpKeyUsage(row.id)
   return { ok: true, keyId: row.id, scope: row.scope }
 }
 
@@ -176,7 +151,7 @@ export async function identifyDiscoveryKey(req: NextRequest): Promise<ReadKeyIde
   const enforced = process.env.READ_KEYS_ENFORCED === "true"
   const candidate = extractKey(req)
   if (!enforced && !candidate) return { ok: true, keyId: null, scope: null }
-  if (!candidate) return { ok: false, keyId: null, scope: null }
+  if (!candidate || candidate.length > 512) return { ok: false, keyId: null, scope: null }
 
   const keyHash = hashKey(candidate)
   const now = Date.now()
@@ -211,6 +186,14 @@ export async function identifyDiscoveryKey(req: NextRequest): Promise<ReadKeyIde
   // 2) Database fallback: first poll for this key in this colo, or after the cache TTL.
   if (identity == null) {
     try {
+      identity = await snapshotDiscoveryIdentity(keyHash)
+      if (identity) {
+        await edgePut(cacheKey, JSON.stringify({ id: identity.keyId, scope: identity.scope, revoked: false }), DISCOVERY_KEY_CACHE_SEC)
+      }
+    } catch { /* SQL remains authoritative for keys not in the scheduled public snapshot. */ }
+  }
+  if (identity == null) {
+    try {
       await ensureSchema()
       const row = await findKeyRow(keyHash)
       identity =
@@ -228,7 +211,9 @@ export async function identifyDiscoveryKey(req: NextRequest): Promise<ReadKeyIde
       )
     } catch (err) {
       console.error("[auth] discovery key lookup failed:", err instanceof Error ? err.message : err)
-      return { ok: false, keyId: null, scope: null }
+      const denied = { ok: false, keyId: null, scope: null }
+      await edgePut(cacheKey, JSON.stringify({ revoked: true }), 60)
+      return denied
     }
   }
 

@@ -2,6 +2,7 @@
 import "server-only"
 import { AsyncLocalStorage } from "node:async_hooks"
 import { getCloudflareContext } from "@opennextjs/cloudflare"
+import { chargeResource } from "@/lib/resource-budget"
 
 /**
  * Access to Cloudflare Workers bindings (Hyperdrive, R2, …) when the app runs on
@@ -89,6 +90,7 @@ export class FetchBudgetExhausted extends Error {
 // per request; 40 leaves headroom for the route's own fetches (feed pulls, R2, retries).
 const FETCH_BUDGET = 40
 const fetchSpend = new WeakMap<object, number>()
+const fetchDenied = new WeakSet<object>()
 // Outstanding per-row reservations: a row holds its whole ceiling against the budget
 // from admission until it finishes, so concurrent starts can never oversubscribe the
 // remaining head-room. Without this, N workers each see a "full" budget and split it —
@@ -176,7 +178,7 @@ export function rowFetchExhausted(): boolean {
  */
 export function fetchBudgetExceeded(): boolean {
   const ctx = cfExecutionContext()
-  return ctx != null && (fetchSpend.get(ctx) ?? 0) >= FETCH_BUDGET
+  return ctx != null && (fetchDenied.has(ctx) || (fetchSpend.get(ctx) ?? 0) >= FETCH_BUDGET)
 }
 
 const MAX_REDIRECT_HOPS = 5
@@ -230,6 +232,11 @@ export async function budgetedFetch(url: string, init?: RequestInit): Promise<Re
   const firstOrigin = new URL(url).origin
   for (let hop = 0; ; hop++) {
     chargeFetch()
+    try { await chargeResource("probes") } catch {
+      const ctx = cfExecutionContext()
+      if (ctx) fetchDenied.add(ctx)
+      throw new FetchBudgetExhausted()
+    }
     // A hop to a DIFFERENT origin than the original request drops every credential
     // header — a redirect to attacker-controlled infrastructure must not inherit the
     // caller's Authorization/Cookie/provider tokens.

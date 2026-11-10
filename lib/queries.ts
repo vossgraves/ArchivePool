@@ -8,7 +8,7 @@ import { ensureSchema } from "./db/ensure"
 import { CATEGORIES, SERVICES, type Kind, type Service } from "./sources"
 import type { KeyScope } from "./api-keys"
 import { mapLimit } from "./concurrency"
-import { ensureFreshTidalToken, isTidalAccessExpired } from "./health"
+import { ensureFreshTidalCredential, isTidalAccessExpired, isTidalRefreshToken } from "./health"
 
 export interface CategoryStatus {
   service: Service
@@ -230,6 +230,8 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
       lastCheckedAt: accountEntries.lastCheckedAt,
       fingerprint: accountEntries.fingerprint,
       payload: accountEntries.payload,
+      keyLeasedAt: apiKeyLeases.leasedAt,
+      lastLeasedAt: accountEntries.lastLeasedAt,
     })
     .from(accountEntries)
     .leftJoin(apiKeyLeases, heldByKey)
@@ -237,7 +239,16 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
     // stranded on it — the slot refills from the rest of the pool.
     // A scoped key's row set is narrowed in SQL too, so it cannot even load another service's
     // credentials, let alone return them.
-    .where(and(accountServableWhere, scope == null ? undefined : eq(accountEntries.service, scope)))
+    .where(and(accountServableWhere, scope == null ? undefined : eq(accountEntries.service, scope), sql`${accountEntries.id} in (
+      select id from (
+        select a.id, a.service, row_number() over (partition by a.service order by
+          (l.key_id is not null) desc, a.premium desc, a.last_leased_at asc nulls first, a.id) as rank
+        from account_entries a left join api_key_leases l on l.entry_id = a.id
+          and l.key_id = ${keyId ?? -1} and l.leased_at > now() - interval '72 hours'
+        where not a.removed and not a.disabled and a.status in ('alive', 'preview')
+          and (a.expires_at is null or a.expires_at > now())
+      ) ranked where rank <= case when service = 'tidal' then 6 else 3 end
+    )`))
     // Held entries outrank even an unheld premium one: the app has these cached, and churning
     // them costs more than the better pick gains. NULLS FIRST because Postgres defaults to
     // NULLS LAST on ASC and a never-leased entry is the least recently used. `id` makes the
@@ -267,15 +278,15 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
       tidalChecked.add(r.id)
       const plain = decryptAtRest(r.payload)
       const stored = String(plain.token ?? "").trim()
-      const fresh = await ensureFreshTidalToken(plain, r.fingerprint).catch(() => null)
-      if (fresh != null && fresh !== stored) {
-        r.payload = encryptAtRest({ ...plain, token: fresh })
+      const fresh = await ensureFreshTidalCredential(plain, r.fingerprint).catch(() => null)
+      if (fresh != null) {
+        r.payload = encryptAtRest(fresh)
         return
       }
       // A credential that NEEDED a refresh and could not get one (claim lost, cooling,
       // provider down) must not be served — the stored token is already dead and the app
       // would just 401 on it. Exclude the entry from THIS lease; the next candidate moves up.
-      if (fresh == null && stored && isTidalAccessExpired(stored)) {
+      if (fresh == null && stored && (isTidalAccessExpired(stored) || isTidalRefreshToken(stored))) {
         tidalExcluded.add(r.id)
       }
     },
@@ -294,8 +305,10 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
       )
       .slice(0, LEASE_PER_CATEGORY_ACCOUNT)
     for (const r of rowsForService) {
-      leasedIds.push(r.id)
-      picked.push({ id: r.id, service })
+      if (!r.keyLeasedAt || Date.now() - new Date(r.keyLeasedAt).getTime() >= 24 * 60 * 60_000) {
+        leasedIds.push(r.id)
+        picked.push({ id: r.id, service })
+      }
     }
     return rowsForService.map((r) => toLeased(r, clientKey))
   }
@@ -313,7 +326,7 @@ export async function leaseAccounts(clientKey?: Buffer | null, keyId?: number | 
 
   await stampLeases(leasedIds, accountEntries)
   await recordKeyLeases(keyId ?? null, picked)
-  return { accounts, leasedCount: leasedIds.length }
+  return { accounts, leasedCount: Object.values(accounts).reduce((sum, entries) => sum + entries.length, 0) }
 }
 
 /** Kept separate from [leaseAccounts] so a caller can never receive tokens by asking for URLs. */
@@ -322,7 +335,13 @@ export async function leaseInstances(clientKey?: Buffer | null, scope?: KeyScope
   const rows = await db
     .select()
     .from(instanceEntries)
-    .where(and(instanceServableWhere, scope == null ? undefined : eq(instanceEntries.service, scope)))
+    .where(and(instanceServableWhere, scope == null ? undefined : eq(instanceEntries.service, scope), sql`${instanceEntries.id} in (
+      select id from (
+        select id, row_number() over (partition by service order by premium desc, last_leased_at asc nulls first, id) as rank
+        from instance_entries where not removed and not disabled and status in ('alive', 'preview')
+          and (expires_at is null or expires_at > now())
+      ) ranked where rank <= 10
+    )`))
     .orderBy(
       desc(instanceEntries.premium),
       sql`${instanceEntries.lastLeasedAt} asc nulls first`,
@@ -332,7 +351,9 @@ export async function leaseInstances(clientKey?: Buffer | null, scope?: KeyScope
   const leasedIds: number[] = []
   const group = (service: Service) => {
     const picked = rows.filter((r) => r.service === service).slice(0, LEASE_PER_CATEGORY_API)
-    for (const r of picked) leasedIds.push(r.id)
+    for (const r of picked) {
+      if (!r.lastLeasedAt || Date.now() - new Date(r.lastLeasedAt).getTime() >= 60 * 60_000) leasedIds.push(r.id)
+    }
     return picked.map((r) => toLeased(r, clientKey))
   }
 
@@ -444,6 +465,7 @@ export async function leaseReplacement(
       latencyMs: accountEntries.latencyMs,
       lastCheckedAt: accountEntries.lastCheckedAt,
       payload: accountEntries.payload,
+      fingerprint: accountEntries.fingerprint,
     })
     .from(accountEntries)
     .where(
@@ -466,6 +488,11 @@ export async function leaseReplacement(
     .limit(1)
 
   if (!row) return null
+  if (service === "tidal") {
+    const fresh = await ensureFreshTidalCredential(decryptAtRest(row.payload), row.fingerprint).catch(() => null)
+    if (!fresh) return null
+    row.payload = encryptAtRest(fresh)
+  }
 
   await stampLeases([row.id], accountEntries)
   await recordKeyLeases(keyId, [{ id: row.id, service }])
@@ -495,6 +522,7 @@ export async function releaseLease(keyId: number, entryId: number): Promise<bool
 export interface DiscoveryFeed {
   streaming: string[]
   api: string[]
+  stale?: boolean
 }
 
 function discoveryUrls(rows: { payload: unknown }[]): string[] {

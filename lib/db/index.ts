@@ -2,6 +2,7 @@
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres"
 import { Pool, type PoolConfig } from "pg"
 import { cfBindings, cfExecutionContext } from "@/lib/cf-env"
+import { chargeResource, prepareResource } from "@/lib/resource-budget"
 import * as schema from "./schema"
 
 /**
@@ -61,9 +62,27 @@ const requestBundles = new WeakMap<object, DbBundle>()
 
 function createBundle(): DbBundle {
   const created = new Pool({ connectionString: resolveConnectionString(), ...poolOptions() })
+  const connect = created.connect.bind(created)
+  created.connect = ((callback?: (err: unknown, client?: unknown, release?: unknown) => void) => {
+    const run = async () => { await prepareResource("sql"); return connect() }
+    if (callback) { void run().then((client) => callback(null, client, client.release.bind(client)), callback); return }
+    return run()
+  }) as typeof created.connect
   // An idle client dropped mid-request (Neon restart, socket reaped by the runtime) emits on the
   // pool; without a listener that is an uncaught exception that kills the whole isolate.
   created.on("error", (err) => console.error("[db] idle client error:", err.message))
+  created.on("connect", (client) => {
+    const query = client.query.bind(client)
+    client.query = ((...args: unknown[]) => {
+      const callback = typeof args[args.length - 1] === "function" ? args.pop() as (err: unknown, result?: unknown) => void : null
+      const run = async () => {
+        await chargeResource("sql")
+        return (query as (...params: unknown[]) => Promise<unknown>)(...args)
+      }
+      if (callback) { void run().then((result) => callback(null, result), callback); return }
+      return run()
+    }) as typeof client.query
+  })
   return { pool: created, db: drizzle(created, { schema }) }
 }
 

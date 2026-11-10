@@ -34,6 +34,7 @@ export interface StatusSnapshot {
   savedAt: number
   categories: CategoryStatus[]
   history: StatusHistory
+  stale?: boolean
 }
 
 const SNAPSHOT_KEY = "pool/status.json"
@@ -57,8 +58,7 @@ export async function readStatusSnapshot(): Promise<StatusSnapshot | null> {
   try {
     const parsed: unknown = JSON.parse(raw)
     if (!isSnapshot(parsed)) return null
-    if (Date.now() - parsed.savedAt > SNAPSHOT_TTL_MS) return null
-    return parsed
+    return Date.now() - parsed.savedAt > SNAPSHOT_TTL_MS ? { ...parsed, stale: true } : parsed
   } catch {
     return null
   }
@@ -78,7 +78,7 @@ async function putStatusSnapshot(
     categories,
     history: { days: HISTORY_DAYS, ...history },
   }
-  await kvPutText(SNAPSHOT_KEY, JSON.stringify(snapshot), Math.ceil(SNAPSHOT_TTL_MS / 1000))
+  await kvPutText(SNAPSHOT_KEY, JSON.stringify(snapshot))
 }
 
 /**

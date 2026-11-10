@@ -2,6 +2,7 @@
 import { sql } from "drizzle-orm"
 import { db } from "./index"
 import { kvGetText, kvPutText } from "@/lib/pool-cache"
+import { claimSchemaMigration, ResourceUnavailable } from "@/lib/resource-budget"
 
 /**
  * Bump whenever a statement is added below. The version is stored in KV after a clean run so
@@ -16,7 +17,7 @@ import { kvGetText, kvPutText } from "@/lib/pool-cache"
  * The gate is a KV read (one per isolate), not a query. When KV is absent or unreadable the
  * old run-every-process behaviour returns, so a non-Workers host is unchanged.
  */
-export const SCHEMA_VERSION = "2026-11-06.1"
+export const SCHEMA_VERSION = "2026-11-10.1"
 const SCHEMA_MARKER_KEY = "schema:applied"
 
 /** Idempotent schema migration, run once per deploy (Workers) / process (elsewhere). See docs/SCHEMA.md. */
@@ -222,6 +223,16 @@ const STATEMENTS: string[] = [
     value       jsonb NOT NULL DEFAULT '{}',
     updated_at  timestamptz NOT NULL DEFAULT now()
   )`,
+  `ALTER TABLE account_entries ADD COLUMN IF NOT EXISTS removed_at timestamptz`,
+  `ALTER TABLE instance_entries ADD COLUMN IF NOT EXISTS removed_at timestamptz`,
+  `CREATE INDEX IF NOT EXISTS idx_health_log_retention ON health_log (checked_at DESC, id DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_health_log_success ON health_log (entry_id, checked_at DESC) WHERE ok AND premium AND (detail IS NULL OR detail NOT LIKE 'app report%')`,
+  `CREATE INDEX IF NOT EXISTS idx_api_key_leases_retention ON api_key_leases (leased_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_rate_limit_retention ON rate_limit_buckets (window_start)`,
+  `CREATE INDEX IF NOT EXISTS idx_key_requests_retention ON api_key_requests (created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_github_claims_retention ON github_claims (created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_account_entries_removed ON account_entries (removed_at) WHERE removed`,
+  `CREATE INDEX IF NOT EXISTS idx_instance_entries_removed ON instance_entries (removed_at) WHERE removed`,
 ]
 
 const globalForMigrations = globalThis as unknown as { __poolSchemaEnsured?: Promise<void> }
@@ -237,6 +248,7 @@ async function schemaAlreadyApplied(): Promise<boolean> {
 export function ensureSchema(): Promise<void> {
   globalForMigrations.__poolSchemaEnsured ??= (async () => {
     if (await schemaAlreadyApplied()) return
+    if (!(await claimSchemaMigration(SCHEMA_VERSION))) throw new ResourceUnavailable()
 
     let failed = 0
     for (const statement of STATEMENTS) {

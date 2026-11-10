@@ -6,6 +6,7 @@ import { accountEntries, healthLog, instanceEntries } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
 import {
   FetchBudgetExhausted,
+  cfBindings,
   RowFetchBudgetExhausted,
   fetchBudgetExceeded,
   fetchHeadroom,
@@ -173,8 +174,9 @@ async function migrateAtRest(entry: Pick<PoolEntry, "id" | "kind" | "payload">) 
 export async function runHealthSweep(
   options: HealthSweepOptions | boolean = {},
 ): Promise<HealthSweepSummary> {
-  const { force = false, limit, cursor: rawCursor } =
+  const { force = false, limit: requestedLimit, cursor: rawCursor } =
     typeof options === "boolean" ? { force: options, cursor: undefined } : options
+  const limit = cfBindings() ? Math.min(requestedLimit ?? 8, 10) : requestedLimit
   await ensureSchema()
   const allEntries = await allPoolEntries()
   if (allEntries.some((entry) => entry.kind === "account") && !atRestEncryptionEnabled()) {
@@ -342,7 +344,6 @@ export async function runHealthSweep(
   })
   await Promise.all(workers)
 
-  await db.execute(sql`delete from health_log where checked_at < now() - interval '30 days'`)
   // `attempted` = stale rows this call consumed (checked + no-verdict skips); `remaining` =
   // stale rows it never reached. `skipped` reports every row that got no verdict this call —
   // fresh rows plus no-verdict skips — matching what the callers read it as.
@@ -423,7 +424,7 @@ export async function checkEntryById(id: number, deadline?: AbortSignal) {
   // A skipped result means the check never reached a verdict (refresh cooling, claim lost):
   // no counter advance, no verdict overwrite, no health_log row — it must not count for the
   // report path's failure accounting either.
-  if (result.skipped) {
+  if (result.skipped || fetchBudgetExceeded() || rowFetchExhausted()) {
     return {
       id: entry.id,
       ok: false,

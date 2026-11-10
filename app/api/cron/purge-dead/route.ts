@@ -8,6 +8,8 @@ import { accountEntries, instanceEntries } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
 import { writeInstanceSnapshot } from "@/lib/edge-snapshot"
 import { invalidate } from "@/lib/ttl-cache"
+import { purgeRetainedData } from "@/lib/retention"
+import { writeStatusSnapshot } from "@/lib/status-snapshot"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 60
@@ -64,6 +66,7 @@ export async function GET(req: NextRequest) {
     invalidate("status")
     invalidate("discovery:")
     if (instances.length > 0) await writeInstanceSnapshot()
+    await writeStatusSnapshot()
     invalidate("snapshot:")
   }
 
@@ -74,6 +77,7 @@ export async function GET(req: NextRequest) {
     accountIds: accounts.map((r) => r.id),
     instanceIds: instances.map((r) => r.id),
   })
+  await purgeRetainedData()
 
   return NextResponse.json({
     ok: true,

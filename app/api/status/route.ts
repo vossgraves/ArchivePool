@@ -4,6 +4,7 @@ import { edgeGet, edgePut, isNotModified, weakEtag } from "@/lib/edge-cache"
 import { HISTORY_DAYS, getPoolHistory, getStatus } from "@/lib/queries"
 import { readStatusSnapshot, type StatusSnapshot } from "@/lib/status-snapshot"
 import { STATUS_TTL_MS, cached } from "@/lib/ttl-cache"
+import { cfBindings } from "@/lib/cf-env"
 
 export const dynamic = "force-dynamic"
 
@@ -38,6 +39,7 @@ export async function GET(req: NextRequest) {
       generatedAt: new Date(snapshot.savedAt).toISOString(),
       categories: snapshot.categories,
       history: snapshot.history,
+      ...(snapshot.stale ? { stale: true } : {}),
     })
     await edgePut(EDGE_KEY, body, EDGE_TTL_SEC)
     return respond(body, req)
@@ -45,6 +47,7 @@ export async function GET(req: NextRequest) {
 
   let categories
   try {
+    if (cfBindings()) throw new Error("Status snapshot unavailable; waiting for the health sweep")
     // Cached for a few minutes: these figures only move when a health sweep runs, while the
     // board and any monitoring poll far more often, and every miss wakes the database compute
     // for five minutes (lib/ttl-cache.ts).

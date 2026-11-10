@@ -580,10 +580,20 @@ export async function ensureFreshTidalToken(
   entryFingerprint?: string,
   deadline?: AbortSignal,
 ): Promise<string | null> {
+  const fresh = await ensureFreshTidalCredential(payload, entryFingerprint, deadline)
+  return fresh ? String(fresh.token ?? "").trim() || null : null
+}
+
+export async function ensureFreshTidalCredential(
+  payload: Record<string, unknown>,
+  entryFingerprint?: string,
+  deadline?: AbortSignal,
+): Promise<Record<string, unknown> | null> {
   const token = String(payload.token ?? "").trim()
-  if (!token || isTidalRefreshToken(token)) return token || null
-  if (!isTidalAccessExpired(token)) return token
-  return (await tryRefreshTidalToken(payload, entryFingerprint, deadline)).token
+  if (!token) return null
+  if (!isTidalRefreshToken(token) && !isTidalAccessExpired(token)) return payload
+  const fresh = await tryRefreshTidalToken(payload, entryFingerprint, deadline)
+  return fresh.token ? fresh.payload ?? { ...payload, token: fresh.token } : null
 }
 
 // ── Refresh single-flight + backoff ─────────────────────────────────────────
@@ -593,8 +603,6 @@ export async function ensureFreshTidalToken(
 // just invalidated — python-tidal's threading.Lock pattern, stretched across serverless
 // instances. The claim outlives the worst probe (45 s) so a successor cannot win mid-refresh.
 const REFRESH_CLAIM_SECS = 60
-const REFRESH_LOSER_TRIES = 3
-const REFRESH_LOSER_WAIT_MS = 500
 // Cooldown tiers for the Tidal token endpoint: abuse_detected/429 doubles from 15 min up to
 // 6 h while it keeps arriving; a plain network/5xx failure cools for just 2 min. Either way the
 // check is skipped, never reported dead — the provider's rate limiter is not a verdict.
@@ -608,7 +616,6 @@ const GLOBAL_ABUSE_HITS = 5
 const GLOBAL_ABUSE_WINDOW_SECS = 60
 const GLOBAL_COOLDOWN_SECS = 2 * 60
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 interface RefreshRow {
   payload: Record<string, unknown>
@@ -709,7 +716,7 @@ async function finishRefresh(
 
 type RefreshGate =
   | { kind: "claim"; claim: RefreshClaim | null } // caller may POST — with claim.payload when set
-  | { kind: "serve"; token: string } // another instance's refresh landed — serve its token
+  | { kind: "serve"; token: string; payload: Record<string, unknown> }
   | { kind: "skip"; detail: string } // cooldown or lost claim — never a dead verdict
 
 /**
@@ -729,6 +736,10 @@ async function gateRefresh(
   if (!fingerprint) return { kind: "claim", claim: null } // no row identity → nothing to claim
   const row = await readRefreshRow(fingerprint)
   if (!row) return { kind: "claim", claim: null } // entry vanished mid-check
+  const currentToken = String(row.payload.token ?? "").trim()
+  if (globalBackoff && currentToken && currentToken !== knownToken && !isTidalRefreshToken(currentToken) && !isTidalAccessExpired(currentToken)) {
+    return { kind: "serve", token: currentToken, payload: row.payload }
+  }
   if (isLive(row.refreshCooldownUntil)) return { kind: "skip", detail: "refresh cooling" }
   if (globalBackoff && (await tidalAbuseBackoffActive())) {
     return { kind: "skip", detail: "shared Tidal refresh backoff" }
@@ -738,18 +749,16 @@ async function gateRefresh(
   const claimed = await claimRefresh(fingerprint)
   if (claimed) return { kind: "claim", claim: claimed }
 
-  for (let i = 0; i < REFRESH_LOSER_TRIES; i++) {
-    await sleep(REFRESH_LOSER_WAIT_MS)
+  {
     const cur = await readRefreshRow(fingerprint).catch(() => null)
     if (!cur) return { kind: "skip", detail: "entry removed mid-refresh" }
-    if (isLive(cur.refreshInFlightUntil)) continue
+    if (isLive(cur.refreshInFlightUntil)) return { kind: "skip", detail: "refresh claim held elsewhere" }
     // Claim resolved: a different stored token means the claimant's refresh succeeded.
     const fresh = String(cur.payload?.token ?? "").trim()
-    if (fresh && fresh !== knownToken) return { kind: "serve", token: fresh }
+    if (fresh && fresh !== knownToken) return { kind: "serve", token: fresh, payload: cur.payload }
     if (isLive(cur.refreshCooldownUntil)) return { kind: "skip", detail: "refresh cooling" }
     return { kind: "skip", detail: "refresh attempted by another instance" }
   }
-  return { kind: "skip", detail: "refresh claim held elsewhere" }
 }
 
 async function tidalAbuseBackoffActive(): Promise<boolean> {
@@ -838,7 +847,7 @@ async function tryRefreshTidalToken(
   payload: Record<string, unknown>,
   entryFingerprint?: string,
   deadline?: AbortSignal,
-): Promise<{ token: string | null; detail: string; skip?: boolean }> {
+): Promise<{ token: string | null; detail: string; skip?: boolean; payload?: Record<string, unknown> }> {
   // Single-flight + backoff gate BEFORE reading the credential: the claim returns the row's
   // current decrypted payload, and the refresh POST must use THAT — the caller's snapshot may
   // predate another instance's rotation, which would double-spend the (now invalid) token. A
@@ -847,13 +856,18 @@ async function tryRefreshTidalToken(
   let current = payload
   if (entryFingerprint) {
     const gate = await gateRefresh(entryFingerprint, String(payload.token ?? "").trim(), true)
-    if (gate.kind === "serve") return { token: gate.token, detail: "served after another check's refresh" }
+    if (gate.kind === "serve") return { token: gate.token, payload: gate.payload, detail: "served after another check's refresh" }
     if (gate.kind === "skip") return { token: null, detail: gate.detail, skip: true }
     claim = gate.claim
     if (claim) current = claim.payload
   }
   const finish = (outcome: Parameters<typeof finishRefresh>[2] = {}) =>
     entryFingerprint && claim ? finishRefresh(entryFingerprint, claim.claim, outcome) : Promise.resolve()
+  const claimedToken = String(current.token ?? "").trim()
+  if (claim && claimedToken !== String(payload.token ?? "").trim() && !isTidalRefreshToken(claimedToken) && !isTidalAccessExpired(claimedToken)) {
+    await finish()
+    return { token: claimedToken, payload: current, detail: "served current credential" }
+  }
 
   // Contributors are handed a single value labelled "Token" which is in fact the refresh token,
   // so fall back to it when no separate refreshToken was supplied. Without this every Tidal
@@ -931,7 +945,7 @@ async function tryRefreshTidalToken(
       // Only a scope rejection is worth retrying; anything else (bad token, revoked) fails both —
       // a rejected refresh, not a bare 401, is what marks the credential dead.
       if (err.error !== "invalid_scope") {
-        await finish()
+        await finish({ cooldownUntil: new Date(Date.now() + REFRESH_TRANSIENT_COOLDOWN_SECS * 1000) })
         return { token: null, detail: `refresh rejected: ${err.error ?? res.status}` }
       }
     }
@@ -949,8 +963,7 @@ async function tryRefreshTidalToken(
     // in the SAME update that releases the claim, so a waiting instance sees the new credential
     // and the cleared claim atomically. Tidal accounts live in account_entries; the fingerprint
     // is unique there.
-    if (entryFingerprint) {
-      const newPayload = {
+    const newPayload = {
         ...current,
         token: newToken,
         // Tidal does not always return a new refresh token. Keep the one just spent in that
@@ -958,6 +971,7 @@ async function tryRefreshTidalToken(
         // with the access token would otherwise leave the row with nothing to renew from.
         refreshToken: json.refresh_token || refreshToken,
       }
+    if (entryFingerprint) {
       if (claim) {
         await finish({ payload: newPayload })
       } else {
@@ -969,7 +983,7 @@ async function tryRefreshTidalToken(
       }
     }
 
-    return { token: newToken, detail: "refreshed" }
+    return { token: newToken, payload: newPayload, detail: "refreshed" }
   } catch (e) {
     // A budget refusal never reached the wire — nothing is known about the provider,
     // so the claim is released with NO cooldown and the throw propagates for the

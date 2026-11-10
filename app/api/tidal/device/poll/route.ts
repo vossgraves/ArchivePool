@@ -5,12 +5,15 @@ import { describeSaveError, ingestSource } from "@/lib/ingest"
 import { pollDeviceToken } from "@/lib/tidal-oauth"
 import { getSessionUserId } from "@/lib/sessions"
 import { findUsernameById } from "@/lib/users"
+import { probeRateLimit } from "@/lib/probe-rate-limit"
 
 export const dynamic = "force-dynamic"
 
 // Polls a Tidal device code. When the user has authorized, the resulting access token is
 // health-checked and added to the pool as a Tidal account, then we report the outcome.
 export async function POST(req: NextRequest) {
+  const limited = probeRateLimit(req.headers, "tidal-poll", 120)
+  if (limited) return limited
   let deviceCode = ""
   try {
     const body = (await req.json()) as { deviceCode?: string }

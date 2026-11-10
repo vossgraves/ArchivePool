@@ -2,6 +2,7 @@
 import "server-only"
 
 import { cfBindings } from "@/lib/cf-env"
+import { chargeResource } from "@/lib/resource-budget"
 
 /**
  * Small helpers over the `POOL_SNAPSHOTS` Workers KV namespace.
@@ -40,6 +41,7 @@ export async function kvGetText(key: string): Promise<string | null> {
   const kv = store()
   if (!kv) return null
   try {
+    await chargeResource("reads")
     return await kv.get(key)
   } catch (err) {
     console.error("[kv] read failed:", key, err instanceof Error ? err.message : err)
@@ -56,6 +58,7 @@ export async function kvPutText(
   const kv = store()
   if (!kv) return false
   try {
+    await chargeResource("writes")
     await kv.put(key, value, expirationTtl == null ? undefined : { expirationTtl })
     return true
   } catch (err) {

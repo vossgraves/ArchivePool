@@ -3,6 +3,7 @@ import "server-only"
 
 import { NextResponse, type NextRequest } from "next/server"
 import { identifyDiscoveryKey } from "@/lib/api-keys"
+import { cfBindings } from "@/lib/cf-env"
 import { edgeGet, edgePut, isNotModified, weakEtag } from "@/lib/edge-cache"
 import { readInstanceSnapshot, snapshotCacheControl } from "@/lib/edge-snapshot"
 import type { DiscoveryFeed } from "@/lib/queries"
@@ -76,6 +77,7 @@ async function loadDiscovery(service: Service): Promise<DiscoveryFeed | null> {
       readInstanceSnapshot(service),
     )
     if (snapshot) return snapshot
+    if (cfBindings()) return { ...EMPTY, stale: true }
     // No snapshot (KV unconfigured, copy missing or stale): the cached database read.
     return await cached(`discovery:${service}`, DISCOVERY_TTL_MS, () => getDiscovery(service))
   } catch {

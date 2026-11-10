@@ -57,6 +57,9 @@ const REPLACEMENT_WINDOW_MS = 60 * 60_000
 
 /** A side channel, not a truth source — the hourly sweep arbitrates. See docs/REPORT_ENDPOINT.md. */
 export async function POST(req: NextRequest) {
+  const ip = clientIp(req.headers)
+  const ipVerdict = rateLimit(`report-ip:${ip}`, REPORT_IP_LIMIT, REPORT_WINDOW_MS)
+  if (!ipVerdict.ok) return tooManyRequests(ipVerdict.retryAfterSec, "report")
   // Enforced only when READ_KEYS_ENFORCED is set, so a build with no baked key can still report.
   const identity = await identifyReadKey(req, false)
   if (!identity.ok) {
@@ -66,9 +69,6 @@ export async function POST(req: NextRequest) {
     )
   }
 
-  const ip = clientIp(req.headers)
-  const ipVerdict = rateLimit(`report-ip:${ip}`, REPORT_IP_LIMIT, REPORT_WINDOW_MS)
-  if (!ipVerdict.ok) return tooManyRequests(ipVerdict.retryAfterSec, "report")
   const presentedKey = readKeyFromRequest(req)
   if (presentedKey) {
     // Key + address, not the shared build key alone: one install's report loop must not spend
