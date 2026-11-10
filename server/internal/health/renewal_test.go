@@ -234,6 +234,32 @@ func TestTidalRefreshKeepsSpentTokenWhenNoneReturned(t *testing.T) {
 	}
 }
 
+// TestFreshTidalCredentialServesRotatedRefreshToken covers the lease-time renewal of an expired
+// access token when Tidal rotates the refresh token: the lease must carry the new refresh token,
+// because the one it started with is spent and an app could not refresh with it.
+func TestFreshTidalCredentialServesRotatedRefreshToken(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i + 1)
+	}
+	t.Setenv("POOL_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(key))
+	stubOutbound(t, map[string]func(*http.Request) (int, string){
+		tidalTokenRoute: func(*http.Request) (int, string) {
+			return 200, `{"access_token":"fresh-access","refresh_token":"fresh-refresh","expires_in":3600}`
+		},
+	})
+
+	expired := jwtWith(t, map[string]any{"exp": float64(time.Now().Add(-time.Hour).Unix())})
+	served, excluded := FreshTidalCredential(context.Background(), &recordingStore{}, "fp-1",
+		map[string]any{"token": expired, "refreshToken": "spent-refresh", "countryCode": "US"})
+	if excluded {
+		t.Fatal("a renewed credential was excluded from the lease")
+	}
+	if served["token"] != "fresh-access" || served["refreshToken"] != "fresh-refresh" || served["countryCode"] != "US" {
+		t.Fatalf("served = %v, want the renewed access and refresh tokens with the other fields kept", served)
+	}
+}
+
 // TestCheckTidalAccountRejectedAfterRenewalIsDead drives a check whose stored access token is
 // expired, renews it (rotating the refresh token), and then has Tidal reject the fresh token. The
 // follow-up refresh must spend the rotated refresh token: spending the one the check started with

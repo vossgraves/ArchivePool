@@ -832,7 +832,7 @@ func storedRefreshTokenRotated(payload map[string]any, spent string) bool {
 // Tidal access tokens live about an hour while the sweep runs every six, so a leased token was
 // routinely dead on arrival. Only the rows about to be served are refreshed: the lease handler
 // calls this for a bounded candidate list, never for the whole pool.
-func FreshTidalCredential(ctx context.Context, database *db.DB, entryFingerprint string, payload map[string]any) (map[string]any, bool) {
+func FreshTidalCredential(ctx context.Context, database tokenStore, entryFingerprint string, payload map[string]any) (map[string]any, bool) {
 	stored := strings.TrimSpace(str(payload["token"]))
 	if stored == "" {
 		// Nothing to serve and nothing to renew — the row cannot authenticate at all.
@@ -848,12 +848,9 @@ func FreshTidalCredential(ctx context.Context, database *db.DB, entryFingerprint
 		// would only make the app 401. Exclude the entry from this lease; the next candidate moves up.
 		return nil, true
 	}
-	next := map[string]any{}
-	for k, v := range payload {
-		next[k] = v
-	}
-	next["token"] = renewed.token
-	return next, false
+	// The whole renewed credential, not just the access token: when Tidal rotates the refresh token
+	// the one in `payload` is spent, and an app handed that one could never refresh on its own.
+	return renewed.payload, false
 }
 
 func encodeJSON(v map[string]any) string {
