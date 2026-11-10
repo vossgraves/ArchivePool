@@ -118,6 +118,17 @@ export function encryptAtRest(payload: Payload): Payload {
   return transformEncrypt(payload, key)
 }
 
+/**
+ * True when a stored payload still carries a credential field that is not encrypted, which is
+ * what a row written before at-rest encryption looks like.
+ */
+export function hasPlaintextSecret(payload: Payload): boolean {
+  return Object.entries(payload).some(
+    ([name, value]) =>
+      SENSITIVE_KEYS[name] === true && typeof value === "string" && value.length > 0 && !isEncrypted(value),
+  )
+}
+
 /** True only when database credential encryption is correctly configured. */
 export function atRestEncryptionEnabled(): boolean {
   return loadKey("POOL_ENCRYPTION_KEY") !== null

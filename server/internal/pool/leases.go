@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"archivepool/server/internal/crypto"
@@ -20,7 +21,38 @@ const (
 	// Not 24h: that matches the app's refresh cadence exactly, so every lease would expire just as
 	// the next refresh asked for a feed and the mechanism would degrade to reshuffling every time.
 	LEASE_TTL_HOURS = 72
+	// How many Tidal renewals a single lease request runs at once. Mirrors the Workers
+	// TIDAL_REFRESH_CONCURRENCY: enough to keep one lease request from serializing several provider
+	// round trips, low enough that a burst of lease requests cannot look like a refresh flood.
+	leaseRefreshConcurrency = 3
 )
+
+// eachConcurrent runs fn over items with at most `concurrency` goroutines, in item order. Used for
+// the bounded per-lease credential maintenance (see AccountLeaseMaintenance) — a lease request must
+// not serialize one provider round trip per candidate.
+func eachConcurrent[T any](ctx context.Context, items []T, concurrency int, fn func(T)) {
+	if len(items) == 0 {
+		return
+	}
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	for _, item := range items {
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(item T) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			fn(item)
+		}(item)
+	}
+	wg.Wait()
+}
 
 // servableSQL is the single definition of "may be handed to an app". `preview` counts — Tidal keys
 // commonly sit there while serving fine. A contributor-declared expiry that has passed also
@@ -92,10 +124,41 @@ type LeaseResult[T any] struct {
 	LeasedCount int
 }
 
+// servableForLease decides which of a service's candidate rows this lease may hand out, in order,
+// capped at `limit`. Pure, so the rule is testable without a database.
+//
+// Every service serves its first `limit` candidates. Tidal is the exception: once the freshness hook
+// ran, only rows inside its bounded window (`checked`) that it did not exclude are servable. An
+// excluded row holds a token that is already expired and could not be renewed, and a row the window
+// never reached may hold a token that is just as dead, so serving either would only make the app 401.
+func servableForLease(service Service, ids []int, hookRan bool, checked, excluded map[int]bool, limit int) []int {
+	served := make([]int, 0, limit)
+	for _, id := range ids {
+		if len(served) >= limit {
+			break
+		}
+		if service == ServiceTidal && hookRan && (!checked[id] || excluded[id]) {
+			continue
+		}
+		served = append(served, id)
+	}
+	return served
+}
+
 func toLeased(row db.Row, clientKey []byte) LeasedEntry {
+	return toLeasedWithPayload(row, clientKey, nil)
+}
+
+// toLeasedWithPayload builds one served entry, from the row's stored payload or from an override the
+// caller produced for this lease (a Tidal row whose access token was just renewed). The override is
+// a DECRYPTED payload, so end-to-end encryption for the client still happens here.
+func toLeasedWithPayload(row db.Row, clientKey []byte, override map[string]any) LeasedEntry {
 	// Decrypt at rest, re-encrypt for the client, so what leaves the server is ciphertext
 	// end-to-end. Routes fail closed when no key is available.
 	payload := crypto.DecryptAtRest(row.JSON("payload"))
+	if override != nil {
+		payload = override
+	}
 	// The contributor's own password is kept only so the pool can renew the account; no consumer of
 	// the pool may ever receive it, even encrypted.
 	delete(payload, "password")
@@ -118,10 +181,79 @@ func toLeased(row db.Row, clientKey []byte) LeasedEntry {
 	return out
 }
 
+// AccountLeaseMaintenance is the per-lease credential upkeep the caller supplies. The pool layer
+// owns no HTTP client — a Tidal access token expires roughly hourly while the sweep runs every six,
+// so a leased token was routinely dead on arrival, and only the layer that can reach the provider
+// may renew it.
+type AccountLeaseMaintenance struct {
+	// FreshTidalToken is called for at most LEASE_PER_CATEGORY_ACCOUNT*2 Tidal rows — enough that an
+	// excluded entry can still be substituted — and never for any other service.
+	FreshTidalToken FreshTidalTokenFunc
+}
+
+// FreshTidalTokenFunc receives a Tidal account's fingerprint and its DECRYPTED payload and returns
+// the payload to serve (with a currently valid access token), or excluded = true when the entry must
+// be left out of this lease because the credential it holds is already dead and could not be
+// renewed. The fingerprint is what lets the implementation persist a rotated credential back onto
+// the row: without it a lease can serve a fresh token while the row keeps the spent, single-use
+// refresh token.
+type FreshTidalTokenFunc func(ctx context.Context, fingerprint string, payload map[string]any) (fresh map[string]any, excluded bool)
+
+// tidalFreshness is what the lease-time freshness pass decided: the rows it cleared with a new
+// payload, the rows it excluded, and every row it attempted (the bounded window). A row outside
+// `checked` was never consulted, so its stored token may already be dead.
+type tidalFreshness struct {
+	freshPayloads map[int]map[string]any
+	excluded      map[int]bool
+	checked       map[int]bool
+}
+
+// refreshTidalCandidates runs the freshness hook over the bounded candidate list with the lease
+// refresh concurrency and merges the per-worker outcomes only AFTER the workers join. Each worker
+// hands its result to the collector over a channel: the hook runs concurrently, so writing straight
+// into the shared result maps would be a concurrent map write.
+func refreshTidalCandidates(ctx context.Context, candidates []db.Row, hook FreshTidalTokenFunc) tidalFreshness {
+	out := tidalFreshness{
+		freshPayloads: map[int]map[string]any{},
+		excluded:      map[int]bool{},
+		checked:       map[int]bool{},
+	}
+	results := make(chan tidalCandidateOutcome, len(candidates))
+	eachConcurrent(ctx, candidates, leaseRefreshConcurrency, func(row db.Row) {
+		payload := crypto.DecryptAtRest(row.JSON("payload"))
+		fresh, excluded := hook(ctx, row.Str("fingerprint"), payload)
+		results <- tidalCandidateOutcome{id: row.Int("id"), fresh: fresh, excluded: excluded}
+	})
+	close(results)
+	// Only a row whose hook returned counts as consulted: when ctx stops the workers early the rest
+	// were never looked at, and a row outside `checked` is not served.
+	for r := range results {
+		out.checked[r.id] = true
+		switch {
+		case r.excluded:
+			out.excluded[r.id] = true
+		case r.fresh != nil:
+			out.freshPayloads[r.id] = r.fresh
+		}
+	}
+	return out
+}
+
+// tidalCandidateOutcome is one worker's result, merged after every worker has joined.
+type tidalCandidateOutcome struct {
+	id       int
+	fresh    map[string]any
+	excluded bool
+}
+
 // LeaseAccounts leases account credentials per service: held-by-this-key first, then premium, then
 // least-recently-leased. A thin pool degrades to fewer entries rather than erroring; a nil keyID
 // collapses it to the plain global rotation and an empty scope to every service.
-func LeaseAccounts(ctx context.Context, database *db.DB, clientKey []byte, keyID *int, scope Service) (*LeaseResult[ServiceAccounts], error) {
+//
+// `maintenance` may be nil (no renewal is attempted). When it is supplied, a Tidal entry is served
+// only if it went through the freshness hook and was not excluded by it — a fallback from the
+// unchecked tail could serve what is already an expired token.
+func LeaseAccounts(ctx context.Context, database *db.DB, clientKey []byte, keyID *int, scope Service, maintenance *AccountLeaseMaintenance) (*LeaseResult[ServiceAccounts], error) {
 	database.EnsureSchema(ctx)
 
 	args := []any{}
@@ -143,18 +275,36 @@ func LeaseAccounts(ctx context.Context, database *db.DB, clientKey []byte, keyID
 		byService[s] = append(byService[s], row)
 	}
 
+	freshness := tidalFreshness{}
+	hookRan := false
+	if maintenance != nil && maintenance.FreshTidalToken != nil && (scope == "" || scope == ServiceTidal) {
+		hookRan = true
+		candidates := byService[string(ServiceTidal)]
+		if len(candidates) > LEASE_PER_CATEGORY_ACCOUNT*2 {
+			candidates = candidates[:LEASE_PER_CATEGORY_ACCOUNT*2]
+		}
+		// Bounded concurrency: each candidate is one provider round trip, and the list is short by
+		// design (twice what gets served).
+		freshness = refreshTidalCandidates(ctx, candidates, maintenance.FreshTidalToken)
+	}
+
 	leasedIDs := make([]int, 0, 16)
 	picked := make([]leaseRef, 0, 16)
 	group := func(service Service) []LeasedEntry {
 		rowsForService := byService[string(service)]
-		if len(rowsForService) > LEASE_PER_CATEGORY_ACCOUNT {
-			rowsForService = rowsForService[:LEASE_PER_CATEGORY_ACCOUNT]
-		}
-		out := make([]LeasedEntry, 0, len(rowsForService))
+		ids := make([]int, 0, len(rowsForService))
+		rowsByID := make(map[int]db.Row, len(rowsForService))
 		for _, r := range rowsForService {
-			leasedIDs = append(leasedIDs, r.Int("id"))
-			picked = append(picked, leaseRef{ID: r.Int("id"), Service: service})
-			out = append(out, toLeased(r, clientKey))
+			id := r.Int("id")
+			ids = append(ids, id)
+			rowsByID[id] = r
+		}
+		served := servableForLease(service, ids, hookRan, freshness.checked, freshness.excluded, LEASE_PER_CATEGORY_ACCOUNT)
+		out := make([]LeasedEntry, 0, len(served))
+		for _, id := range served {
+			leasedIDs = append(leasedIDs, id)
+			picked = append(picked, leaseRef{ID: id, Service: service})
+			out = append(out, toLeasedWithPayload(rowsByID[id], clientKey, freshness.freshPayloads[id]))
 		}
 		return out
 	}
@@ -337,7 +487,7 @@ func accountsLeaseQuery(heldByKey, scoped bool) string {
 		next += 2
 	}
 	query := `
-		select a.id, a.service, a.premium, a.status, a.latency_ms, a.last_checked_at, a.payload
+		select a.id, a.service, a.fingerprint, a.premium, a.status, a.latency_ms, a.last_checked_at, a.payload
 		from account_entries a
 		left join api_key_leases l on ` + held + `
 		where ` + accountServableSQL

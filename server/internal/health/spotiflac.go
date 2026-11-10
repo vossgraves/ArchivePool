@@ -53,9 +53,13 @@ type SpotiFlacSyncResult struct {
 // SyncSpotiFlacInstances pools SpotiFLAC's public instances through the shared instance-sync core.
 // SpotiFLAC publishes no account credentials — "no account required" is its design — so there is
 // nothing here to ingest as an account_entries row, only instance URLs.
+//
+// The list is kept verbatim, but `*.squid.wtf` is filtered out of it by the shared sync core
+// (pool.IsBlockedInstanceURL): monochrome blocks those hosts in its own client and ArchiveTune drops
+// them from whatever the pool serves, so probing them only spends fetches on an unused instance.
 func SyncSpotiFlacInstances(ctx context.Context, database *db.DB) (SpotiFlacSyncResult, error) {
-	tidal, tidalErr := SyncInstanceURLs(ctx, database, pool.ServiceTidal, spotiflacTidalInstances, "spotiflac", 0, 0)
-	qobuz, qobuzErr := SyncInstanceURLs(ctx, database, pool.ServiceQobuz, spotiflacQobuzInstances, "spotiflac", 0, 0)
+	tidal, tidalErr := SyncInstanceURLs(ctx, database, pool.ServiceTidal, spotiflacTidalInstances, "spotiflac", 0, 0, syncDetailLimit)
+	qobuz, qobuzErr := SyncInstanceURLs(ctx, database, pool.ServiceQobuz, spotiflacQobuzInstances, "spotiflac", 0, 0, syncDetailLimit)
 	if tidalErr != nil {
 		return SpotiFlacSyncResult{}, tidalErr
 	}
@@ -64,3 +68,7 @@ func SyncSpotiFlacInstances(ctx context.Context, database *db.DB) (SpotiFlacSync
 	}
 	return SpotiFlacSyncResult{Tidal: tidal, Qobuz: qobuz}, nil
 }
+
+// syncDetailLimit is how many per-candidate verdicts a feed echoes into the cron body: enough for a
+// whole list's failures to be named in the log, small enough that the body stays readable.
+const syncDetailLimit = 12

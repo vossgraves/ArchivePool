@@ -18,6 +18,9 @@ type IngestResult struct {
 	Status  string `json:"status"`
 	Premium bool   `json:"premium"`
 	Detail  string `json:"detail"`
+	// Skipped marks a check that reached no verdict: nothing was persisted and the contributor can
+	// simply retry.
+	Skipped bool `json:"skipped,omitempty"`
 }
 
 // IngestOptions carries the fields that must NOT live in the payload: the payload feeds the
@@ -56,6 +59,19 @@ func IngestSource(ctx context.Context, database *db.DB, service pool.Service, ki
 	fp := pool.Fingerprint(service, kind, payload)
 	label := pool.MaskLabel(service, kind, payload)
 	result := RunCheck(ctx, database, service, kind, payload, fp)
+
+	if result.Skipped {
+		// The check reached no verdict (refresh cooling/claim, or the host answered 429). Saying
+		// "rejected" would tell a contributor their source is bad when nothing was learned about it.
+		return IngestResult{
+			OK:      false,
+			Saved:   false,
+			Status:  string(result.Status),
+			Premium: result.Premium,
+			Detail:  "could not be verified — not a verdict (" + result.Detail + "); try again shortly",
+			Skipped: true,
+		}, nil
+	}
 
 	if !result.OK || !result.Premium {
 		detail := "rejected — working but no premium/lossless entitlement (" + result.Detail + ")"

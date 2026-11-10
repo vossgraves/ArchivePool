@@ -22,7 +22,12 @@ func logf(format string, args ...any) { log.Printf(format, args...) }
 const (
 	autoDisableAfter = 5
 	sweepConcurrency = 6
-	staleAfterMs     = 6 * 60 * 60 * 1000
+	// Deliberately shorter than the 6-hourly cron that drives the sweep (see
+	// .github/workflows/health-cron.yml): with a window equal to the cadence, a row checked just
+	// under six hours ago counts as fresh at the next run and is skipped again, so every row was
+	// really verified only every other run — which is also how long a Tidal account could sit on an
+	// hour-dead access token. Five hours guarantees each run sweeps every row.
+	staleAfterMs = 5 * 60 * 60 * 1000
 )
 
 // Entry is one pool row with its kind resolved from which table it came from. Ids are globally
@@ -166,14 +171,18 @@ func RunHealthSweep(ctx context.Context, database *db.DB, force bool) (SweepSumm
 	mapLimit(entries, sweepConcurrency, func(entry Entry) {
 		table := tableFor(entry.Kind)
 		plaintext := crypto.DecryptAtRest(entry.Payload)
-		// Migrate rows written by older deployments before checking: a Tidal check may rotate its
-		// refresh token, so migrating afterwards could overwrite the newly issued credential.
-		if stored, err := crypto.EncryptAtRest(plaintext); err == nil {
-			_, _ = database.Exec(ctx, `update `+table+` set payload = $1 where id = $2`,
-				encodeJSON(stored), entry.ID)
-		}
+		migrateAtRest(ctx, database, table, entry)
 
 		result := RunCheck(ctx, database, pool.Service(entry.Service), entry.Kind, plaintext, entry.Fingerprint)
+
+		// A skipped result never reached a verdict (the host's rate limiter answered): persist
+		// nothing — no counter advance, no verdict overwrite, no health_log row.
+		if result.Skipped {
+			mu.Lock()
+			summary.Skipped++
+			mu.Unlock()
+			return
+		}
 
 		nextConsecutive := 0
 		if !result.OK {
@@ -226,6 +235,29 @@ func RunHealthSweep(ctx context.Context, database *db.DB, force bool) (SweepSumm
 	return summary, nil
 }
 
+// payloadWriter is the one statement migrateAtRest issues.
+type payloadWriter interface {
+	Exec(ctx context.Context, sql string, args ...any) (string, error)
+}
+
+// migrateAtRest encrypts a row an older deployment stored in plaintext, before the check runs so a
+// rotation the check persists is never overwritten afterwards. Already-encrypted rows are left
+// alone and the write is conditional on the payload this run read: the lease path refreshes Tidal
+// credentials while a sweep is in flight, and writing the sweep's snapshot back unconditionally
+// would replace a rotated refresh token with the spent one.
+func migrateAtRest(ctx context.Context, database payloadWriter, table string, entry Entry) {
+	if !crypto.HasPlaintextSecret(entry.Payload) {
+		return
+	}
+	stored, err := crypto.EncryptAtRest(entry.Payload)
+	if err != nil {
+		return
+	}
+	_, _ = database.Exec(ctx,
+		`update `+table+` set payload = $1 where id = $2 and payload = $3::jsonb`,
+		encodeJSON(stored), entry.ID, encodeJSON(entry.Payload))
+}
+
 // CheckEntryByID re-verifies one entry with the same rules as the full sweep (auto-disable
 // threshold, health_log append, at-rest payload migration). Used by the admin panel so a single
 // suspect account can be re-verified without sweeping the whole pool.
@@ -241,14 +273,25 @@ func CheckEntryByID(ctx context.Context, database *db.DB, id int) (*CheckEntryRe
 
 	table := tableFor(entry.Kind)
 	plaintext := crypto.DecryptAtRest(entry.Payload)
-	// Migrate before checking: a Tidal check can rotate its refresh token, so writing the migrated
-	// payload afterwards would clobber the newly issued credential.
-	if stored, err := crypto.EncryptAtRest(plaintext); err == nil {
-		_, _ = database.Exec(ctx, `update `+table+` set payload = $1 where id = $2`,
-			encodeJSON(stored), entry.ID)
-	}
+	migrateAtRest(ctx, database, table, *entry)
 
 	result := RunCheck(ctx, database, pool.Service(entry.Service), entry.Kind, plaintext, entry.Fingerprint)
+
+	// A skipped result never reached a verdict: nothing is persisted (the report path relies on
+	// this being a no-op) and the entry keeps whatever it had.
+	if result.Skipped {
+		return &CheckEntryResult{
+			ID:                  entry.ID,
+			OK:                  false,
+			Status:              string(result.Status),
+			Premium:             result.Premium,
+			Detail:              result.Detail,
+			LatencyMs:           result.LatencyMs,
+			ConsecutiveFailures: entry.ConsecutiveFailures,
+			Disabled:            entry.Disabled,
+			Skipped:             true,
+		}, nil
+	}
 
 	nextConsecutive := 0
 	if !result.OK {
@@ -298,6 +341,9 @@ type CheckEntryResult struct {
 	LatencyMs           int    `json:"latencyMs"`
 	ConsecutiveFailures int    `json:"consecutiveFailures"`
 	Disabled            bool   `json:"disabled"`
+	// Skipped marks a probe that reached no verdict: nothing was persisted, so the counters above
+	// are the entry's unchanged ones.
+	Skipped bool `json:"skipped,omitempty"`
 }
 
 // AppendHealthLog records one check in the per-entry history.

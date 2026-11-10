@@ -128,6 +128,20 @@ func EncryptForClient(payload Payload, keyOverride []byte) Payload {
 // ClientEncryptionEnabled mirrors clientEncryptionEnabled(): true when POOL_CLIENT_KEY is set.
 func ClientEncryptionEnabled() bool { return LoadKey("POOL_CLIENT_KEY") != nil }
 
+// HasPlaintextSecret reports whether a stored payload still carries a credential field that is not
+// in the enc:1: format, which is what a row written before at-rest encryption looks like.
+func HasPlaintextSecret(payload Payload) bool {
+	for name, value := range payload {
+		if !sensitiveKeys[name] {
+			continue
+		}
+		if s, ok := value.(string); ok && s != "" && !strings.HasPrefix(s, Prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func hasSensitiveValue(payload Payload) bool {
 	for name, value := range payload {
 		if !sensitiveKeys[name] {

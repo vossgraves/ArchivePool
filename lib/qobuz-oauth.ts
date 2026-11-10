@@ -60,23 +60,29 @@ function fetchSignal(deadline?: AbortSignal): AbortSignal {
 /**
  * Signs in with Qobuz credentials. Returns the user_auth_token on success.
  * Throws a user-friendly Error on failure.
+ *
+ * `appId` defaults to the login-capable registration above. Callers that renew an existing entry
+ * pass the entry's own app_id first: Qobuz has several public registrations and only some accept
+ * `user/login`, so pinning every renewal to one of them makes a rotation on Qobuz's side look like
+ * a wrong password.
  */
 export async function qobuzLogin(
   username: string,
   password: string,
   deadline?: AbortSignal,
+  appId: string = QOBUZ_LOGIN_APP_ID,
 ): Promise<QobuzLoginResult> {
   const body = new URLSearchParams({
     username,
     email: username,
     password,
-    app_id: QOBUZ_LOGIN_APP_ID,
+    app_id: appId,
   })
   const res = await budgetedFetch(LOGIN_URL, {
     method: "POST",
     headers: {
       "content-type": "application/x-www-form-urlencoded",
-      "x-app-id": QOBUZ_LOGIN_APP_ID,
+      "x-app-id": appId,
       "user-agent": UA,
     },
     body,

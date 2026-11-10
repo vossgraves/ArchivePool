@@ -40,6 +40,9 @@ const BATCH_DEFAULT = 8
 // One instance check is 1–3 upstream fetches; a feed fetch adds one more. 10 keeps a
 // batch comfortably under the 50-subrequest ceiling.
 const BATCH_MAX = 10
+// Whole-sync mode runs many candidates at once, so it echoes only the first few verdicts — enough
+// for the log to name why this run's failures failed.
+const DETAIL_LIMIT = 12
 
 type FeedName = "monochrome" | "spotiflac-tidal" | "spotiflac-qobuz"
 
@@ -89,15 +92,18 @@ export async function GET(req: NextRequest) {
       note: spec.note,
       after,
       limit,
+      // Echo each candidate's verdict into the cron log. Without it an all-fail run only ever
+      // reports "12 checked, 12 failed", which is not diagnosable from the log alone.
+      detailLimit: limit,
     })
     return NextResponse.json({ ok: true, feed, ...result, ranAt: new Date().toISOString() })
   }
 
   // Whole-sync mode: unchanged behaviour for hosts that do not bound a request.
-  const monochrome = await syncMonochromeInstances().catch((e) => ({
+  const monochrome = await syncMonochromeInstances({ detailLimit: DETAIL_LIMIT }).catch((e) => ({
     error: e instanceof Error ? e.message : String(e),
   }))
-  const spotiflac = await syncSpotiFlacInstances().catch((e) => ({
+  const spotiflac = await syncSpotiFlacInstances({ detailLimit: DETAIL_LIMIT }).catch((e) => ({
     error: e instanceof Error ? e.message : String(e),
   }))
 
