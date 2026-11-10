@@ -40,3 +40,34 @@ jobs:
       - run: pnpm lint
       - run: pnpm test:limits
       - run: node tests/check-mutations.cjs
+  worker-bundle:
+    runs-on: ubuntu-latest
+    # Build and bundle with placeholders only; no secrets, database service, or
+    # Cloudflare account are needed. The dry run never uploads the Worker.
+    env:
+      DATABASE_URL: postgresql://postgres:ci-placeholder@127.0.0.1:55470/archivepool
+      ADMIN_TOKEN_HASH: "0000000000000000000000000000000000000000000000000000000000000000"
+      CRON_SECRET: ci-placeholder-cron
+      SESSION_SECRET: ci-placeholder-session
+      POOL_ENCRYPTION_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      POOL_CLIENT_KEY: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA="
+      READ_KEYS_ENFORCED: "true"
+      GITHUB_CLIENT_ID: ci-placeholder-id
+      GITHUB_CLIENT_SECRET: ci-placeholder-secret
+      NEXT_TELEMETRY_DISABLED: "1"
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:cf
+      - run: pnpm exec wrangler deploy --dry-run --outdir "${RUNNER_TEMP}/archivepool-worker-dry-run"
+      - name: Remove build outputs
+        if: always()
+        run: rm -rf .next .open-next "${RUNNER_TEMP}/archivepool-worker-dry-run"
