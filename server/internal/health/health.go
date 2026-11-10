@@ -963,15 +963,47 @@ func checkTidalAccount(ctx context.Context, database tokenStore, payload map[str
 		subURL := "https://api.tidal.com/v1/users/" + strconv.FormatInt(session.UserID, 10) +
 			"/subscription?countryCode=" + url.QueryEscape(session.CountryCode)
 		if sub, err := httpx.Get(ctx, subURL, headers(token), timeoutMs); err == nil {
-			if text, err := httpx.ReadText(sub); err == nil {
-				premium = tidalPremiumRe.MatchString(strings.ToLower(text))
+			// Only parse 2xx responses; treat error pages as missing entitlement info and stay optimistic
+			if sub.StatusCode >= 200 && sub.StatusCode < 300 {
+				if text, err := httpx.ReadText(sub); err == nil {
+					premium = tidalSubscriptionIsPremium(text)
+				}
 			}
+			sub.Body.Close()
 		}
 	}
 	return CheckResult{OK: true, Premium: premium, Status: classify(true, premium), LatencyMs: ms, Detail: "session ok"}
 }
 
-var tidalPremiumRe = regexp.MustCompile(`hi_res|hires|lossless|premium|hifi`)
+// tidalSubscriptionIsPremium reads Tidal's /users/{id}/subscription body. A keyword scan cannot work
+// here: every free account answers "premiumAccess":false, which contains "premium". Unreadable
+// bodies stay optimistic so a format change cannot disable the whole pool. Mirrors lib/health.ts.
+func tidalSubscriptionIsPremium(body string) bool {
+	var raw map[string]interface{}
+	if err := json.Unmarshal([]byte(body), &raw); err != nil {
+		return true // JSON parse error: stay optimistic
+	}
+
+	// premiumAccess as boolean wins if present
+	if v, ok := raw["premiumAccess"].(bool); ok {
+		return v
+	}
+
+	// subscription.type must be exactly "FREE" (case-insensitive comparison)
+	if sub, ok := raw["subscription"].(map[string]interface{}); ok {
+		if v, ok := sub["type"].(string); ok && strings.EqualFold(v, "FREE") {
+			return false
+		}
+	}
+
+	// highestSoundQuality: only LOSSLESS or HI_RES* count as premium
+	if v, ok := raw["highestSoundQuality"].(string); ok && v != "" {
+		q := strings.ToUpper(v)
+		return q == "LOSSLESS" || strings.HasPrefix(q, "HI_RES")
+	}
+
+	return true // Default to optimistic
+}
 
 func qobuzHeaders(appID, token string) map[string]string {
 	return map[string]string{
