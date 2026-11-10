@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"archivepool/server/internal/pool"
@@ -127,10 +128,14 @@ func TestCheckAmazonMusicInstance(t *testing.T) {
 	}
 }
 
-// TestRunCheckRoutesAmazonInstancesToTheirOwnProbe guards the dispatch: an Amazon instance whose
-// health document names an error must not fall through to the generic reachability rule, which
-// would accept the same 200.
-func TestRunCheckRoutesAmazonInstancesToTheirOwnProbe(t *testing.T) {
+// TestRunCheckRoutesEachServiceToItsOwnProbe guards the dispatch: a service with its own dialect
+// must not fall through to the generic reachability rule, which would accept the same 200 body.
+//
+// This is the dispatch that kept the pool's Tidal tier empty: a Tidal instance's root answers
+// `{"version","Repo"}`, so the generic rule judged it reachable-but-not-premium and the premium gate
+// rejected every healthy instance. Tidal rows must therefore reach the track probe, and a root body
+// alone must never be a pass.
+func TestRunCheckRoutesEachServiceToItsOwnProbe(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte(`{"status":"error"}`))
@@ -141,11 +146,224 @@ func TestRunCheckRoutesAmazonInstancesToTheirOwnProbe(t *testing.T) {
 	if result.OK || result.Status != pool.StatusDead {
 		t.Fatalf("Amazon instance probe not used: ok=%v status=%s", result.OK, result.Status)
 	}
-	// A Tidal instance with the same body stays on the generic path, where a 200 is reachable.
-	generic := RunCheck(context.Background(), nil, pool.ServiceTidal, pool.KindAPI, map[string]any{"baseUrl": srv.URL}, "")
-	if !generic.OK {
-		t.Fatalf("tidal instances must keep the generic reachability rule: %#v", generic)
+
+	// The same body on a Tidal row is not a verdict either: its root is not what gets probed, and a
+	// non-Tidal document proves nothing about streaming, so the row is dead until a manifest appears.
+	tidal := RunCheck(context.Background(), nil, pool.ServiceTidal, pool.KindAPI, map[string]any{"baseUrl": srv.URL}, "")
+	if tidal.OK || tidal.Status != pool.StatusDead {
+		t.Fatalf("tidal instances must be probed by track, not by root reachability: %#v", tidal)
 	}
+}
+
+// tidalRoute is one path an instance answers, as a status plus body.
+type tidalRoute struct {
+	status int
+	body   string
+}
+
+// tidalProbeHarness serves one instance's routes and records every request, so a case can assert
+// both the verdict and the exact probe the verdict was derived from.
+func tidalProbeHarness(t *testing.T, routes map[string]tidalRoute) (*httptest.Server, func() []string, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	requests := []string{}
+	userAgents := []string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests = append(requests, r.URL.Path+"?"+r.URL.RawQuery)
+		userAgents = append(userAgents, r.Header.Get("User-Agent"))
+		mu.Unlock()
+		route, ok := routes[r.URL.Path]
+		if !ok {
+			w.WriteHeader(404)
+			return
+		}
+		w.WriteHeader(route.status)
+		_, _ = w.Write([]byte(route.body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv,
+		func() []string { mu.Lock(); defer mu.Unlock(); return append([]string{}, requests...) },
+		func() []string { mu.Lock(); defer mu.Unlock(); return append([]string{}, userAgents...) }
+}
+
+// TestCheckTidalInstance pins the probe that decides Tidal instance admission: the two dialects the
+// app itself verifies (TidalAudioProvider.verifyInstance/probeTrackManifestsDialect), the verdicts
+// they map to, and the fact that a rate limiter is not a verdict.
+func TestCheckTidalInstance(t *testing.T) {
+	manifestRoute := "/trackManifests/"
+	trackRoute := "/track/"
+
+	cases := []struct {
+		name        string
+		routes      map[string]tidalRoute
+		wantOK      bool
+		wantPremium bool
+		wantStatus  pool.Status
+		wantSkipped bool
+		wantDetail  string
+		wantPaths   []string
+	}{
+		{
+			name: "manifest dialect reports a full stream",
+			routes: map[string]tidalRoute{
+				manifestRoute: {200, `{"data":{"data":{"attributes":{"trackPresentation":"FULL","assetPresentation":"FULL"}}}}`},
+			},
+			wantOK: true, wantPremium: true, wantStatus: pool.StatusAlive,
+			wantDetail: "trackManifests FULL", wantPaths: []string{manifestRoute},
+		},
+		{
+			// monochrome's own build reads the flatter nesting; the probe accepts both.
+			name: "manifest dialect accepts the flat nesting",
+			routes: map[string]tidalRoute{
+				manifestRoute: {200, `{"data":{"attributes":{"assetPresentation":"FULL"}}}`},
+			},
+			wantOK: true, wantPremium: true, wantStatus: pool.StatusAlive,
+			wantDetail: "trackManifests FULL", wantPaths: []string{manifestRoute},
+		},
+		{
+			name: "preview presentation means a backing account without a subscription",
+			routes: map[string]tidalRoute{
+				manifestRoute: {200, `{"data":{"data":{"attributes":{"trackPresentation":"PREVIEW"}}}}`},
+			},
+			wantOK: true, wantPremium: false, wantStatus: pool.StatusPreview,
+			wantDetail: "trackManifests PREVIEW", wantPaths: []string{manifestRoute},
+		},
+		{
+			// The old probe's exact failure: a 200 that says nothing about streaming must not pass.
+			name: "a body without a manifest document is not a pass",
+			routes: map[string]tidalRoute{
+				manifestRoute: {200, `{"version":"3.5","Repo":"https://github.com/binimum/hifi-api"}`},
+			},
+			wantOK: false, wantPremium: false, wantStatus: pool.StatusDead,
+			wantDetail: "without a manifest document", wantPaths: []string{manifestRoute},
+		},
+		{
+			name: "429 is rate limiting, not a verdict",
+			routes: map[string]tidalRoute{
+				manifestRoute: {429, `{"detail":"Too Many Requests"}`},
+			},
+			wantOK: false, wantPremium: false, wantStatus: pool.StatusPending, wantSkipped: true,
+			wantDetail: "429", wantPaths: []string{manifestRoute},
+		},
+		{
+			name: "a missing manifest route falls back to the 2.x track route",
+			routes: map[string]tidalRoute{
+				trackRoute: {200, `{"data":{"assetPresentation":"LOSSLESS","manifest":"bWFuaWZlc3Q="}}`},
+			},
+			wantOK: true, wantPremium: true, wantStatus: pool.StatusAlive,
+			wantDetail: "track LOSSLESS", wantPaths: []string{manifestRoute, trackRoute},
+		},
+		{
+			name: "2.x preview is reachable but not premium",
+			routes: map[string]tidalRoute{
+				trackRoute: {200, `{"data":{"assetPresentation":"PREVIEW","manifest":"bWFuaWZlc3Q="}}`},
+			},
+			wantOK: true, wantPremium: false, wantStatus: pool.StatusPreview,
+			wantDetail: "track PREVIEW", wantPaths: []string{manifestRoute, trackRoute},
+		},
+		{
+			// Reachable, but it has no manifest to serve — what a dead backing account answers.
+			name: "2.x answer without a manifest is not a pass",
+			routes: map[string]tidalRoute{
+				trackRoute: {200, `{"data":{"assetPresentation":"LOSSLESS","manifest":""}}`},
+			},
+			wantOK: false, wantPremium: false, wantStatus: pool.StatusDead,
+			wantDetail: "served no manifest", wantPaths: []string{manifestRoute, trackRoute},
+		},
+		{
+			name: "429 on the fallback route is rate limiting too",
+			routes: map[string]tidalRoute{
+				trackRoute: {429, `{"detail":"Too Many Requests"}`},
+			},
+			wantOK: false, wantPremium: false, wantStatus: pool.StatusPending, wantSkipped: true,
+			wantDetail: "429", wantPaths: []string{manifestRoute, trackRoute},
+		},
+		{
+			// A 500 is the instance itself not serving; the older endpoint would say the same, so the
+			// probe must not spend a second fetch asking it.
+			name: "a server error on the manifest route does not fall back",
+			routes: map[string]tidalRoute{
+				manifestRoute: {500, `{"detail":"backend down"}`},
+				trackRoute:    {200, `{"data":{"assetPresentation":"LOSSLESS","manifest":"bWFuaWZlc3Q="}}`},
+			},
+			wantOK: false, wantPremium: false, wantStatus: pool.StatusDead,
+			wantDetail: "trackManifests HTTP 500", wantPaths: []string{manifestRoute},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, requests, userAgents := tidalProbeHarness(t, tc.routes)
+			result := checkTidalInstance(context.Background(), map[string]any{"baseUrl": srv.URL})
+
+			if result.OK != tc.wantOK || result.Premium != tc.wantPremium || result.Status != tc.wantStatus {
+				t.Fatalf("ok=%v premium=%v status=%s, want ok=%v premium=%v status=%s (%s)",
+					result.OK, result.Premium, result.Status, tc.wantOK, tc.wantPremium, tc.wantStatus, result.Detail)
+			}
+			if result.Skipped != tc.wantSkipped {
+				t.Fatalf("skipped=%v, want %v", result.Skipped, tc.wantSkipped)
+			}
+			if !strings.Contains(result.Detail, tc.wantDetail) {
+				t.Fatalf("detail = %q, want it to contain %q", result.Detail, tc.wantDetail)
+			}
+
+			// The request itself is part of the contract: the trailing slash is load-bearing (the
+			// slashless form 307s and some instances answer 404 on the redirect), the query has to
+			// carry a real track and the FLAC format, and the UA must be the app's.
+			got := requests()
+			if len(got) != len(tc.wantPaths) {
+				t.Fatalf("probed %v, want %v", got, tc.wantPaths)
+			}
+			for i, path := range tc.wantPaths {
+				if !strings.HasPrefix(got[i], path+"?") {
+					t.Fatalf("probe %d = %q, want it to start with %q", i, got[i], path+"?")
+				}
+				if !strings.Contains(got[i], "id="+tidalProbeTrackID) {
+					t.Fatalf("probe %d = %q, want it to carry a real track id (%s)", i, got[i], tidalProbeTrackID)
+				}
+			}
+			for i, ua := range userAgents() {
+				if ua != tidalInstanceUA {
+					t.Fatalf("probe %d sent User-Agent %q, want %q", i, ua, tidalInstanceUA)
+				}
+			}
+		})
+	}
+
+	t.Run("manifest route carries the formats the app asks for", func(t *testing.T) {
+		srv, requests, _ := tidalProbeHarness(t, map[string]tidalRoute{
+			"/trackManifests/": {200, `{"data":{"data":{"attributes":{"trackPresentation":"FULL"}}}}`},
+		})
+		checkTidalInstance(context.Background(), map[string]any{"baseUrl": srv.URL})
+		got := requests()
+		if len(got) != 1 {
+			t.Fatalf("probed %v, want exactly the manifest route", got)
+		}
+		for _, want := range []string{"formats=FLAC", "adaptive=false", "manifestType=MPEG_DASH", "uriScheme=HTTPS", "usage=PLAYBACK"} {
+			if !strings.Contains(got[0], want) {
+				t.Fatalf("probe %q is missing %q", got[0], want)
+			}
+		}
+	})
+
+	t.Run("missing base url", func(t *testing.T) {
+		result := checkTidalInstance(context.Background(), map[string]any{})
+		if result.OK || result.Status != pool.StatusDead || !strings.Contains(result.Detail, "missing baseUrl") {
+			t.Fatalf("got %#v, want a dead result naming the missing base URL", result)
+		}
+	})
+
+	t.Run("a configured probe track overrides the default", func(t *testing.T) {
+		srv, requests, _ := tidalProbeHarness(t, map[string]tidalRoute{
+			"/trackManifests/": {200, `{"data":{"data":{"attributes":{"trackPresentation":"FULL"}}}}`},
+		})
+		checkTidalInstance(context.Background(), map[string]any{"baseUrl": srv.URL, "probeTrackId": "999"})
+		got := requests()
+		if len(got) != 1 || !strings.Contains(got[0], "id=999") {
+			t.Fatalf("probed %v, want the configured track", got)
+		}
+	})
 }
 
 // TestDescribeSaveError covers the configuration diagnosis every save path shows a contributor. These

@@ -125,7 +125,7 @@ func (s *Server) handleQobuzLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 1: sign in to Qobuz.
-	login, err := oauth.QobuzLogin(ctx, username, password)
+	login, err := oauth.QobuzLogin(ctx, username, password, oauth.QobuzLoginAppID)
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, errJSON("login_failed", errMessage(err)), nil)
 		return

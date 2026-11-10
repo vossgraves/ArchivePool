@@ -57,15 +57,23 @@ type QobuzLoginResult struct {
 
 // QobuzLogin signs in with Qobuz credentials. The error messages are user-facing and identical to
 // the TS, because the route returns them verbatim as `detail`.
-func QobuzLogin(ctx context.Context, username, password string) (QobuzLoginResult, error) {
+//
+// appID defaults to the login-capable registration above; callers that renew an existing entry pass
+// the entry's own app_id first. Qobuz has several public registrations and only some accept
+// `user/login`, so pinning every renewal to one of them makes a rotation on Qobuz's side look
+// exactly like a wrong password — which would dead-mark the whole pool at once.
+func QobuzLogin(ctx context.Context, username, password, appID string) (QobuzLoginResult, error) {
+	if appID == "" {
+		appID = QobuzLoginAppID
+	}
 	form := url.Values{
 		"username": {username},
 		"email":    {username},
 		"password": {password},
-		"app_id":   {QobuzLoginAppID},
+		"app_id":   {appID},
 	}
 	res, err := httpx.PostForm(ctx, qobuzLoginURL, map[string]string{
-		"x-app-id":   QobuzLoginAppID,
+		"x-app-id":   appID,
 		"user-agent": qobuzUA,
 	}, form, 12*time.Second)
 	if err != nil {

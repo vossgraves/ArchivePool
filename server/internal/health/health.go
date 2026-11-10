@@ -36,6 +36,9 @@ type CheckResult struct {
 	Status    pool.Status
 	LatencyMs int
 	Detail    string
+	// Skipped marks a probe that reached no verdict (the host's rate limiter answered, a refresh
+	// did not run): persistence must treat it as a no-op — no counter, no verdict, no health_log row.
+	Skipped bool
 }
 
 const (
@@ -83,12 +86,16 @@ var (
 func RunCheck(ctx context.Context, database *db.DB, service pool.Service, kind pool.Kind, payload map[string]any, entryFingerprint string) CheckResult {
 	if kind == pool.KindAPI {
 		// Amazon and Deezer instances publish their own liveness documents, so they are checked
-		// against those rather than through the generic reachability rule.
+		// against those rather than through the generic reachability rule. Tidal instances are
+		// checked by resolving a real track (checkTidalInstance) — their root URL cannot judge them.
 		if service == pool.ServiceDeezer {
 			return checkDeezerInstance(ctx, payload)
 		}
 		if service == pool.ServiceAmazonMusic {
 			return checkAmazonMusicInstance(ctx, payload)
+		}
+		if service == pool.ServiceTidal {
+			return checkTidalInstance(ctx, payload)
 		}
 		return checkAPI(ctx, payload)
 	}
@@ -102,7 +109,7 @@ func RunCheck(ctx context.Context, database *db.DB, service pool.Service, kind p
 	case pool.ServiceAmazonMusic:
 		return checkAmazonMusicAccount(payload)
 	default:
-		return checkQobuzAccount(ctx, payload)
+		return checkQobuzAccount(ctx, database, payload, entryFingerprint)
 	}
 }
 
@@ -399,6 +406,186 @@ func checkDeezerInstance(ctx context.Context, payload map[string]any) CheckResul
 	}
 }
 
+// Tidal instance probe constants.
+//
+// A HiFi-RestAPI/Monochrome instance publishes nothing useful at its root: `GET /` answers
+// `{"version": …, "Repo": …}` (binimum/hifi-api `main.py` `@app.get("/")`), so a root fetch can
+// neither prove the instance can stream nor detect its entitlement. The app's own health manager
+// (`ArchiveTune` `TidalAudioProvider.verifyInstance`) resolves a real track on the two dialects these
+// instances speak instead:
+//
+//   - `/trackManifests/` (HiFi-RestAPI 3.x, Monochrome): FULL/PREVIEW lives in
+//     `data.data.attributes.trackPresentation` (older builds: `assetPresentation`); a backing
+//     account without a subscription answers PREVIEW.
+//   - `/track/` (HiFi-RestAPI 2.x): `data.assetPresentation` plus a base64 manifest in
+//     `data.manifest` — the thing the instance actually has to return to serve audio.
+//
+// This replaced a `GET {baseUrl}` probe that could never admit these hosts: their root answers 200
+// with `{"version","Repo"}`, which carries no hi-res marker, so every healthy instance came back
+// `preview` and the premium gate rejected it — which is why the pool's Tidal API tier stayed empty.
+const (
+	tidalProbeTrackID = "155142501534011392"
+	// The UA the app sends on instance traffic (`TidalAudioProvider.DOWNLOAD_USER_AGENT`); community
+	// instances tune their WAF/bot rules per client, so it is kept identical on purpose.
+	tidalInstanceUA = "ArchiveTune-Android"
+)
+
+// checkTidalInstance probes a Tidal restream instance the way the app does — see the constants above.
+//
+// Verdicts, mirroring the app's InstanceHealth:
+//   - alive   2xx on either dialect with a FULL (non-preview) manifest document
+//   - preview reachable, but its backing account only serves 30 s previews (not dead — and, since
+//     the pool is premium-only, not pooled either)
+//   - dead    DNS/TLS/timeout, a 5xx/403/400, a body with no manifest, or a v2 body with no manifest
+//     string
+//   - pending + Skipped: the instance answered 429. Its rate limiter is not a verdict, so nothing is
+//     persisted and the next sweep re-probes it.
+func checkTidalInstance(ctx context.Context, payload map[string]any) CheckResult {
+	baseURL := strings.TrimRight(strings.TrimSpace(str(payload["baseUrl"])), "/")
+	if baseURL == "" {
+		return CheckResult{Status: pool.StatusDead, Detail: "missing baseUrl"}
+	}
+	trackID := strings.TrimSpace(str(payload["probeTrackId"]))
+	if trackID == "" {
+		trackID = tidalProbeTrackID
+	}
+	headers := map[string]string{"accept": "application/json", "user-agent": tidalInstanceUA}
+
+	// Trailing slash is load-bearing: these are FastAPI apps with redirect_slashes, and the slashless
+	// form answers 307 that some instances (and the official api.monochrome.tf) turn into a 404.
+	query := url.Values{}
+	query.Set("id", trackID)
+	query.Add("formats", "FLAC")
+	query.Set("adaptive", "false")
+	query.Set("manifestType", "MPEG_DASH")
+	query.Set("uriScheme", "HTTPS")
+	query.Set("usage", "PLAYBACK")
+
+	started := time.Now()
+	res, err := httpx.Get(ctx, baseURL+"/trackManifests/?"+query.Encode(), headers, timeoutMs)
+	if err != nil {
+		return CheckResult{Status: pool.StatusDead, Detail: httpx.Reason(err)}
+	}
+	ms := int(time.Since(started).Milliseconds())
+	status := res.StatusCode
+
+	if status == 429 {
+		_ = res.Body.Close()
+		return CheckResult{
+			Status:    pool.StatusPending,
+			LatencyMs: ms,
+			Detail:    "trackManifests HTTP 429 (rate limited, " + trackID + ")",
+			Skipped:   true,
+		}
+	}
+	if status >= 200 && status < 300 {
+		body, readErr := httpx.ReadLimitedText(res, 20000)
+		if readErr != nil {
+			return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: httpx.Reason(readErr)}
+		}
+		presentation, found := manifestPresentation(body)
+		if !found {
+			return CheckResult{
+				Status:    pool.StatusDead,
+				LatencyMs: ms,
+				Detail:    "trackManifests answered without a manifest document (" + trackID + ")",
+			}
+		}
+		if strings.EqualFold(presentation, "PREVIEW") {
+			return CheckResult{OK: true, Status: pool.StatusPreview, LatencyMs: ms, Detail: "trackManifests PREVIEW (" + trackID + ")"}
+		}
+		return CheckResult{OK: true, Premium: true, Status: pool.StatusAlive, LatencyMs: ms, Detail: "trackManifests " + presentation + " (" + trackID + ")"}
+	}
+	// Only a missing route earns the second dialect: any other non-2xx is the instance itself not
+	// serving, which the older endpoint would report the same way.
+	if status != 404 && status != 405 && status != 501 {
+		_ = res.Body.Close()
+		return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: "trackManifests HTTP " + strconv.Itoa(status)}
+	}
+	_ = res.Body.Close()
+
+	// HiFi-RestAPI 2.x dialect.
+	started = time.Now()
+	res, err = httpx.Get(ctx, baseURL+"/track/?id="+url.QueryEscape(trackID)+"&quality=LOSSLESS", headers, timeoutMs)
+	if err != nil {
+		return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: httpx.Reason(err)}
+	}
+	ms += int(time.Since(started).Milliseconds())
+	status = res.StatusCode
+	if status == 429 {
+		_ = res.Body.Close()
+		return CheckResult{
+			Status:    pool.StatusPending,
+			LatencyMs: ms,
+			Detail:    "track HTTP 429 (rate limited, " + trackID + ")",
+			Skipped:   true,
+		}
+	}
+	if status < 200 || status >= 300 {
+		_ = res.Body.Close()
+		return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: "track HTTP " + strconv.Itoa(status)}
+	}
+	body, readErr := httpx.ReadLimitedText(res, 20000)
+	if readErr != nil {
+		return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: httpx.Reason(readErr)}
+	}
+	var v2 struct {
+		Data struct {
+			AssetPresentation string `json:"assetPresentation"`
+			Manifest          string `json:"manifest"`
+		} `json:"data"`
+	}
+	if json.Unmarshal([]byte(body), &v2) != nil || v2.Data.AssetPresentation == "" && v2.Data.Manifest == "" {
+		return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: "track answered without a data object (" + trackID + ")"}
+	}
+	if strings.EqualFold(v2.Data.AssetPresentation, "PREVIEW") {
+		return CheckResult{OK: true, Status: pool.StatusPreview, LatencyMs: ms, Detail: "track PREVIEW (" + trackID + ")"}
+	}
+	if strings.TrimSpace(v2.Data.Manifest) == "" {
+		// Reachable, but it has no manifest to hand out — a dead backing account answers like this.
+		return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: "track answered but served no manifest (" + trackID + ")"}
+	}
+	return CheckResult{OK: true, Premium: true, Status: pool.StatusAlive, LatencyMs: ms, Detail: "track LOSSLESS (" + trackID + ")"}
+}
+
+// manifestPresentation reads the FULL/PREVIEW presentation out of a `trackManifests` document,
+// accepting both the hifi-api 3.x nesting (`data.data.attributes`) and the flatter shape some builds
+// answer (`data.attributes`). The second return says whether a manifest document was there at all.
+func manifestPresentation(body string) (string, bool) {
+	var doc struct {
+		Data struct {
+			Attributes *struct {
+				TrackPresentation string `json:"trackPresentation"`
+				AssetPresentation string `json:"assetPresentation"`
+			} `json:"attributes"`
+			Data *struct {
+				Attributes *struct {
+					TrackPresentation string `json:"trackPresentation"`
+					AssetPresentation string `json:"assetPresentation"`
+				} `json:"attributes"`
+			} `json:"data"`
+		} `json:"data"`
+	}
+	if json.Unmarshal([]byte(body), &doc) != nil {
+		return "", false
+	}
+	attributes := doc.Data.Attributes
+	if doc.Data.Data != nil && doc.Data.Data.Attributes != nil {
+		attributes = doc.Data.Data.Attributes
+	}
+	if attributes == nil {
+		return "", false
+	}
+	presentation := strings.TrimSpace(attributes.TrackPresentation)
+	if presentation == "" {
+		presentation = strings.TrimSpace(attributes.AssetPresentation)
+	}
+	if presentation == "" {
+		return "", false
+	}
+	return presentation, true
+}
+
 // numAttr mirrors the TS `Number(value ?? 0)` read of a health document's numeric field: a JSON
 // number passes through, a numeric string is coerced, an absent/null field is 0, and anything else
 // is NaN — which compares false exactly like the TS, so a garbage count never trips the
@@ -444,17 +631,49 @@ func decodeJWTPayload(jwt string) (map[string]any, bool) {
 	return nil, false
 }
 
+// tidalAccessMarginSecs is how long before its real expiry an access token counts as expired, so a
+// token that would die in transit is refreshed rather than served. Mirrors lib/health.ts.
+const tidalAccessMarginSecs = 300
+
+// isTidalAccessExpired reports whether a JWT access token is expired (or about to expire). A token
+// whose payload cannot be read is NOT treated as expired: the verdict would be a guess, and the
+// /sessions probe still catches a dead token.
+func isTidalAccessExpired(token string) bool {
+	payload, ok := decodeJWTPayload(token)
+	if !ok {
+		return false
+	}
+	exp, ok := payload["exp"].(float64)
+	if !ok || exp <= 0 {
+		return false
+	}
+	return exp <= float64(time.Now().Unix()+tidalAccessMarginSecs)
+}
+
+// tidalRefresh is the outcome of a refresh attempt: the token it produced, or why it could not run.
+//
+// `skip` marks an outcome that says NOTHING about the account — the provider's rate limiter (429 or
+// an `abuse_detected` body), a 5xx, a transport error. Callers report those as `pending` and never
+// as `dead`, exactly like the Workers implementation: otherwise one burst of rate limiting over the
+// Tidal token endpoint walks every account up the auto-disable ladder and empties the pool.
+type tidalRefresh struct {
+	token  string
+	detail string
+	skip   bool
+	// payload is the credential as it stands after a successful refresh. A caller that refreshes
+	// again in the same check must spend this one: the payload it started with may hold a refresh
+	// token this refresh just rotated away.
+	payload map[string]any
+}
+
 // tryRefreshTidalToken exchanges a refresh token for a fresh access token and writes it back, so
 // later checks use the new one.
-func tryRefreshTidalToken(ctx context.Context, database *db.DB, payload map[string]any, entryFingerprint string) string {
+func tryRefreshTidalToken(ctx context.Context, database tokenStore, payload map[string]any, entryFingerprint string) tidalRefresh {
 	// Contributors are handed a single value labelled "Token" which is in fact the refresh token, so
 	// fall back to it when no separate refreshToken was supplied.
-	refreshToken := strings.TrimSpace(str(payload["refreshToken"]))
+	refreshToken := effectiveRefreshToken(payload)
 	if refreshToken == "" {
-		refreshToken = strings.TrimSpace(str(payload["token"]))
-	}
-	if refreshToken == "" {
-		return ""
+		return tidalRefresh{detail: "no refresh token"}
 	}
 
 	// Requesting a superset of a token's granted scopes makes Tidal answer 400 invalid_scope on
@@ -477,45 +696,161 @@ func tryRefreshTidalToken(ctx context.Context, database *db.DB, payload map[stri
 		}
 		res, err := httpx.PostForm(ctx, tidalTokenURL, map[string]string{"user-agent": tidalUA}, form, timeoutMs)
 		if err != nil {
-			return ""
+			// The endpoint was unreachable — a property of the network, not of the credential.
+			return tidalRefresh{detail: "refresh transport error: " + httpx.Reason(err), skip: true}
 		}
 		if res.StatusCode >= 200 && res.StatusCode < 300 {
 			if err := httpx.ReadJSON(res, &body); err != nil {
-				return ""
+				return tidalRefresh{detail: "refresh answered unreadable JSON", skip: true}
 			}
 			ok = true
 			break
 		}
 		var oauthErr struct {
-			Error string `json:"error"`
+			Error       string `json:"error"`
+			Description string `json:"error_description"`
 		}
 		_ = httpx.ReadJSON(res, &oauthErr)
+		abuse := res.StatusCode == 429 || strings.Contains(strings.ToLower(oauthErr.Error+" "+oauthErr.Description), "abuse")
+		if abuse {
+			return tidalRefresh{
+				detail: "refresh rate-limited (HTTP " + strconv.Itoa(res.StatusCode) + ")",
+				skip:   true,
+			}
+		}
+		// A provider-side failure is transient: cool off and re-verify next sweep instead of writing
+		// a dead verdict over what may be a perfectly good account.
+		if res.StatusCode >= 500 {
+			return tidalRefresh{
+				detail: "refresh transient (HTTP " + strconv.Itoa(res.StatusCode) + ")",
+				skip:   true,
+			}
+		}
 		// Only a scope rejection is worth retrying; anything else (bad token, revoked) fails both.
 		if oauthErr.Error != "invalid_scope" {
-			return ""
+			// A refresh token is single-use: if the row now holds a different credential than the one
+			// this attempt spent, another check refreshed the account while this one was in flight,
+			// and the rejection is that race — not a dead account. (The Workers implementation
+			// prevents the race up front with its claim column; the Go port detects the outcome, which
+			// needs no schema of its own.)
+			if oauthErr.Error == "invalid_grant" &&
+				entryFingerprint != "" &&
+				storedCredentialChanged(ctx, database, entryFingerprint, refreshToken) {
+				return tidalRefresh{detail: "another check refreshed this account concurrently", skip: true}
+			}
+			return tidalRefresh{detail: "refresh rejected: " + firstNonEmpty(oauthErr.Error, strconv.Itoa(res.StatusCode))}
 		}
 	}
 	if !ok || body.AccessToken == "" {
-		return ""
+		return tidalRefresh{detail: "refresh failed"}
 	}
+
+	next := map[string]any{}
+	for k, v := range payload {
+		next[k] = v
+	}
+	next["token"] = body.AccessToken
+	// Tidal does not always return a new refresh token. Keep the one just spent in that case: for a
+	// contribution whose only field was the refresh token, overwriting `token` with the access token
+	// would otherwise leave the row with nothing to renew from.
+	next["refreshToken"] = firstNonEmpty(body.RefreshToken, refreshToken)
 
 	// Persist the refreshed token so it does not expire again on the next cycle. Best-effort: a
 	// database error must not fail the health check.
 	if entryFingerprint != "" {
-		next := map[string]any{}
-		for k, v := range payload {
-			next[k] = v
-		}
-		next["token"] = body.AccessToken
-		if body.RefreshToken != "" {
-			next["refreshToken"] = body.RefreshToken
-		}
 		if stored, err := crypto.EncryptAtRest(next); err == nil {
 			_, _ = database.Exec(ctx, `update account_entries set payload = $1 where fingerprint = $2`,
 				encodeJSON(stored), entryFingerprint)
 		}
 	}
-	return body.AccessToken
+	return tidalRefresh{token: body.AccessToken, detail: "refreshed", payload: next}
+}
+
+// firstNonEmpty returns the first non-blank candidate, for building a detail from either an OAuth
+// error code or a status code.
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// refreshFailureStatus maps a failed refresh onto the check's verdict: a skipped outcome (limiter,
+// outage) is `pending` so the row keeps its previous status, a rejected credential is `dead`.
+func refreshFailureStatus(refresh tidalRefresh) pool.Status {
+	if refresh.skip {
+		return pool.StatusPending
+	}
+	return pool.StatusDead
+}
+
+// storedCredentialChanged reports whether a row still holds the credential a failed refresh spent.
+// Tidal refresh tokens are single-use, so a row that now holds something else was refreshed by a
+// concurrent check — that rejection is a race, not a dead account.
+func storedCredentialChanged(ctx context.Context, database tokenStore, entryFingerprint, spent string) bool {
+	row, err := database.QueryRow(ctx,
+		`select payload from account_entries where fingerprint = $1`, entryFingerprint)
+	if err != nil || !row.Valid() {
+		return false
+	}
+	return storedRefreshTokenRotated(crypto.DecryptAtRest(row.JSON("payload")), spent)
+}
+
+// tokenStore is the database surface the Tidal refresh path needs: the row a failed attempt compares
+// its spent credential against and the UPDATE that persists a rotation. Narrowing it lets tests
+// prove the persistence with a recording stand-in instead of a live database.
+type tokenStore interface {
+	QueryRow(ctx context.Context, sql string, args ...any) (db.Row, error)
+	Exec(ctx context.Context, sql string, args ...any) (string, error)
+}
+
+// effectiveRefreshToken is the credential a refresh attempt on this payload spends: the dedicated
+// refreshToken when present, else the legacy single `token` field contributors paste.
+func effectiveRefreshToken(payload map[string]any) string {
+	if token := strings.TrimSpace(str(payload["refreshToken"])); token != "" {
+		return token
+	}
+	return strings.TrimSpace(str(payload["token"]))
+}
+
+// storedRefreshTokenRotated reports whether a row now holds a different refresh token than the one a
+// failed attempt spent. Only the effective refresh token is compared: a normal row's access `token`
+// always differs from the refresh token the attempt used, so counting either field as proof of a
+// rotation classifies every revoked credential as a race and never dead-marks it.
+func storedRefreshTokenRotated(payload map[string]any, spent string) bool {
+	current := effectiveRefreshToken(payload)
+	return current != "" && current != spent
+}
+
+// FreshTidalCredential is the pool's lease-time freshness hook (see pool.AccountLeaseMaintenance):
+// it returns the payload to SERVE for a Tidal account — with a currently valid access token — and
+// whether the entry must be left out of this lease because its stored token is already expired and
+// could not be renewed.
+//
+// Tidal access tokens live about an hour while the sweep runs every six, so a leased token was
+// routinely dead on arrival. Only the rows about to be served are refreshed: the lease handler
+// calls this for a bounded candidate list, never for the whole pool.
+func FreshTidalCredential(ctx context.Context, database tokenStore, entryFingerprint string, payload map[string]any) (map[string]any, bool) {
+	stored := strings.TrimSpace(str(payload["token"]))
+	if stored == "" {
+		// Nothing to serve and nothing to renew — the row cannot authenticate at all.
+		return nil, true
+	}
+	// A refresh token is what the app exchanges itself; it never expires on the lease path.
+	if isTidalRefreshToken(stored) || !isTidalAccessExpired(stored) {
+		return nil, false
+	}
+	renewed := tryRefreshTidalToken(ctx, database, payload, entryFingerprint)
+	if renewed.token == "" {
+		// It NEEDED a refresh and could not get one: the stored token is already dead, so serving it
+		// would only make the app 401. Exclude the entry from this lease; the next candidate moves up.
+		return nil, true
+	}
+	// The whole renewed credential, not just the access token: when Tidal rotates the refresh token
+	// the one in `payload` is spent, and an app handed that one could never refresh on its own.
+	return renewed.payload, false
 }
 
 func encodeJSON(v map[string]any) string {
@@ -526,7 +861,7 @@ func encodeJSON(v map[string]any) string {
 	return string(raw)
 }
 
-func checkTidalAccount(ctx context.Context, database *db.DB, payload map[string]any, entryFingerprint string) CheckResult {
+func checkTidalAccount(ctx context.Context, database tokenStore, payload map[string]any, entryFingerprint string) CheckResult {
 	token := strings.TrimSpace(str(payload["token"]))
 	if token == "" {
 		return CheckResult{Status: pool.StatusDead, Detail: "missing token"}
@@ -534,15 +869,43 @@ func checkTidalAccount(ctx context.Context, database *db.DB, payload map[string]
 	headers := func(t string) map[string]string {
 		return map[string]string{"authorization": "Bearer " + t, "user-agent": tidalUA}
 	}
+	// Every refresh below spends the credential the previous one left behind, never the payload the
+	// check started with: after a rotation that one holds a spent refresh token, and spending it
+	// again reads as a concurrent refresh and leaves a rejected account without a verdict.
+	current := payload
 
 	// A refresh token would 401 as a Bearer, so exchange it first rather than spending a round-trip
 	// proving that.
 	if isTidalRefreshToken(token) {
-		exchanged := tryRefreshTidalToken(ctx, database, payload, entryFingerprint)
-		if exchanged == "" {
-			return CheckResult{Status: pool.StatusDead, Detail: "refresh token rejected"}
+		exchanged := tryRefreshTidalToken(ctx, database, current, entryFingerprint)
+		if exchanged.token == "" {
+			return CheckResult{
+				Status:  refreshFailureStatus(exchanged),
+				Detail:  exchanged.detail,
+				Skipped: exchanged.skip,
+			}
 		}
-		token = exchanged
+		token = exchanged.token
+		current = exchanged.payload
+	}
+
+	// Tidal access tokens live about an hour while the sweep runs every few hours, so a locally
+	// expired token is the normal case rather than an error. Renew it up front so every sweep leaves
+	// the row with a fresh access token instead of waiting for something to ask for it (mirrors
+	// lib/health.ts, where the /sessions 401 path was the only renewal before).
+	if isTidalAccessExpired(token) {
+		renewed := tryRefreshTidalToken(ctx, database, current, entryFingerprint)
+		if renewed.token == "" {
+			// The account was never verified, so this is not a failure of the account: report the
+			// outage/limiter as pending and let the row keep its previous verdict.
+			return CheckResult{
+				Status:  refreshFailureStatus(renewed),
+				Detail:  renewed.detail,
+				Skipped: renewed.skip,
+			}
+		}
+		token = renewed.token
+		current = renewed.payload
 	}
 
 	started := time.Now()
@@ -565,17 +928,24 @@ func checkTidalAccount(ctx context.Context, database *db.DB, payload map[string]
 
 	// On 401 — attempt a refresh before giving up.
 	if status == 401 {
-		if refreshed := tryRefreshTidalToken(ctx, database, payload, entryFingerprint); refreshed != "" {
-			token = refreshed
-			started = time.Now()
-			retry, err := httpx.Get(ctx, "https://api.tidal.com/v1/sessions", headers(token), timeoutMs)
-			if err != nil {
-				return CheckResult{Status: pool.StatusDead, Detail: httpx.Reason(err)}
+		refreshed := tryRefreshTidalToken(ctx, database, current, entryFingerprint)
+		if refreshed.token == "" {
+			return CheckResult{
+				Status:    refreshFailureStatus(refreshed),
+				LatencyMs: ms,
+				Detail:    refreshed.detail,
+				Skipped:   refreshed.skip,
 			}
-			ms = int(time.Since(started).Milliseconds())
-			status = retry.StatusCode
-			body, _ = httpx.ReadText(retry)
 		}
+		token = refreshed.token
+		started = time.Now()
+		retry, err := httpx.Get(ctx, "https://api.tidal.com/v1/sessions", headers(token), timeoutMs)
+		if err != nil {
+			return CheckResult{Status: pool.StatusDead, Detail: httpx.Reason(err)}
+		}
+		ms = int(time.Since(started).Milliseconds())
+		status = retry.StatusCode
+		body, _ = httpx.ReadText(retry)
 	}
 
 	if status == 401 || status == 403 {
@@ -662,7 +1032,71 @@ func checkQobuzAppSecret(ctx context.Context, appID, appSecret, token string) (b
 	return true, "secret ok", ms
 }
 
-func checkQobuzAccount(ctx context.Context, payload map[string]any) CheckResult {
+// renewQobuzToken re-logs in with the entry's stored credentials and persists the new
+// user_auth_token. Qobuz has no refresh endpoint, so `user/login` is the only renewal there is.
+//
+// Returns the fresh token, a human-readable detail, and whether the failure was transient
+// (skip=true → no verdict, so the next sweep retries instead of the account being dead-marked).
+func renewQobuzToken(ctx context.Context, database *db.DB, payload map[string]any, entryFingerprint string) (string, string, bool) {
+	email := strings.TrimSpace(str(payload["username"]))
+	password := strings.TrimSpace(str(payload["password"]))
+	if email == "" || password == "" {
+		// Token-only contributions (a legacy one-shot, or one accepted before the site stored the
+		// password) can never be renewed. Say so explicitly: the reason is what tells an operator
+		// the account has to be re-added.
+		return "", "token dead, no stored email/password — auto-renewal impossible, re-add the account", false
+	}
+
+	var login oauth.QobuzLoginResult
+	failure := ""
+	rejectedOnAll := true
+	seen := map[string]bool{}
+	for _, appID := range []string{strings.TrimSpace(str(payload["appId"])), oauth.QobuzLoginAppID} {
+		if appID == "" || seen[appID] {
+			continue
+		}
+		seen[appID] = true
+		result, err := oauth.QobuzLogin(ctx, email, password, appID)
+		if err == nil {
+			login = result
+			break
+		}
+		failure = err.Error()
+		low := strings.ToLower(failure)
+		// A network throw or a flow change is not a verdict; only the provider naming the
+		// credentials as wrong is.
+		if !strings.Contains(low, "incorrect") && !strings.Contains(low, "rejected") {
+			rejectedOnAll = false
+		}
+	}
+	if login.UserAuthToken == "" {
+		return "", "re-login failed: " + failure, !rejectedOnAll
+	}
+
+	next := map[string]any{}
+	for k, v := range payload {
+		next[k] = v
+	}
+	next["token"] = login.UserAuthToken
+	if login.CountryCode != "" {
+		next["countryCode"] = login.CountryCode
+	}
+	if entryFingerprint != "" {
+		// The fingerprint derives from the token, so it is rewritten in the same UPDATE: upserting
+		// on the new one would duplicate the row and leave the dead entry behind.
+		if stored, err := crypto.EncryptAtRest(next); err == nil {
+			nextFingerprint := pool.Fingerprint(pool.ServiceQobuz, pool.KindAccount, next)
+			if _, err := database.Exec(ctx,
+				`update account_entries set payload = $1, fingerprint = $2 where fingerprint = $3`,
+				encodeJSON(stored), nextFingerprint, entryFingerprint); err != nil {
+				logf("[health] qobuz renewal persist failed: %v", err)
+			}
+		}
+	}
+	return login.UserAuthToken, "re-logged in", false
+}
+
+func checkQobuzAccount(ctx context.Context, database *db.DB, payload map[string]any, entryFingerprint string) CheckResult {
 	token := strings.TrimSpace(str(payload["token"]))
 	appID := strings.TrimSpace(str(payload["appId"]))
 	appSecret := strings.TrimSpace(str(payload["appSecret"]))
@@ -670,17 +1104,46 @@ func checkQobuzAccount(ctx context.Context, payload map[string]any) CheckResult 
 		return CheckResult{Status: pool.StatusDead, Detail: "missing token/appId/appSecret"}
 	}
 
-	userURL := "https://www.qobuz.com/api.json/0.2/user/get?app_id=" + url.QueryEscape(appID) +
-		"&user_auth_token=" + url.QueryEscape(token)
+	userURL := func(token string) string {
+		return "https://www.qobuz.com/api.json/0.2/user/get?app_id=" + url.QueryEscape(appID) +
+			"&user_auth_token=" + url.QueryEscape(token)
+	}
 	started := time.Now()
-	res, err := httpx.Get(ctx, userURL, qobuzHeaders(appID, token), timeoutMs)
+	res, err := httpx.Get(ctx, userURL(token), qobuzHeaders(appID, token), timeoutMs)
 	if err != nil {
 		return CheckResult{Status: pool.StatusDead, Detail: httpx.Reason(err)}
 	}
 	ms := int(time.Since(started).Milliseconds())
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
+
+	// A rejected token is renewed before any verdict is written: this is the auto-renewal the pool
+	// was missing entirely on the Go side.
+	if res.StatusCode == 401 || res.StatusCode == 403 {
 		_ = res.Body.Close()
-		return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: "HTTP " + strconv.Itoa(res.StatusCode)}
+		renewed, detail, skip := renewQobuzToken(ctx, database, payload, entryFingerprint)
+		if renewed == "" {
+			// A transient renewal failure (network, provider 5xx) says nothing about the account, so it
+			// is a skip and not a verdict. Skipped must travel with the pending status: a failure the
+			// sweep still counts can walk a healthy account up the auto-disable ladder.
+			status := pool.StatusDead
+			if skip {
+				status = pool.StatusPending
+			}
+			return CheckResult{Status: status, LatencyMs: ms, Detail: detail, Skipped: skip}
+		}
+		token = renewed
+		started = time.Now()
+		retry, err := httpx.Get(ctx, userURL(token), qobuzHeaders(appID, token), timeoutMs)
+		if err != nil {
+			return CheckResult{Status: pool.StatusDead, Detail: httpx.Reason(err)}
+		}
+		ms += int(time.Since(started).Milliseconds())
+		res = retry
+	}
+
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		status := res.StatusCode
+		_ = res.Body.Close()
+		return CheckResult{Status: pool.StatusDead, LatencyMs: ms, Detail: "HTTP " + strconv.Itoa(status)}
 	}
 	body, _ := httpx.ReadText(res)
 	lower := strings.ToLower(body)

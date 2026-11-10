@@ -7,7 +7,7 @@ import { instanceEntries } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
 import { runCheck } from "@/lib/health"
 import { FetchBudgetExhausted, fetchBudgetExceeded } from "@/lib/cf-env"
-import { fingerprint, maskLabel, normalizeUrl, type Service } from "@/lib/sources"
+import { fingerprint, isBlockedInstanceUrl, maskLabel, normalizeUrl, type Service } from "@/lib/sources"
 
 export interface InstanceSyncResult {
   fetched: number // unique URLs handed in (the whole candidate list, before any slicing)
@@ -17,6 +17,13 @@ export interface InstanceSyncResult {
   updated: number // already existed, status updated
   failed: number // health check did not pass
   rejected: number // reachable but not premium/hi-res — not added (new) per pool policy
+  /** Probes that reached no verdict (the host's own rate limiter answered 429): nothing is
+   *  persisted, and the next sweep re-probes them. */
+  deferred: number
+  /** Per-candidate verdicts for this slice, bounded to `opts.detailLimit`. The cron log is the
+   *  only place a failed candidate's reason is visible, and "12 checked, 12 failed" with no
+   *  reason is exactly what made the all-fail runs undiagnosable. */
+  results?: { url: string; status: string; ok: boolean; premium: boolean; detail: string }[]
   /** Present only when the call was bounded (opts.limit): keyset cursor for the next
    *  slice — repeat with after=batch.nextAfter until done. */
   batch?: {
@@ -66,18 +73,33 @@ const DEFAULT_CONCURRENCY = 5
 export async function syncInstanceUrls(
   service: Service,
   urls: string[],
-  opts: { note?: string; recheckWindowMs?: number; concurrency?: number; after?: string; limit?: number } = {},
+  opts: {
+    note?: string
+    recheckWindowMs?: number
+    concurrency?: number
+    after?: string
+    limit?: number
+    /** Cap on per-candidate verdicts echoed back in `results` (0 disables). */
+    detailLimit?: number
+  } = {},
 ): Promise<InstanceSyncResult> {
   await ensureSchema()
 
   const recheckWindowMs = opts.recheckWindowMs ?? DEFAULT_RECHECK_WINDOW_MS
   const concurrency = opts.concurrency ?? DEFAULT_CONCURRENCY
+  const detailLimit = Math.max(0, opts.detailLimit ?? 0)
 
   // Sorted so a bounded run can keyset-paginate on `after` — a live feed refetched
   // between calls may grow or shrink, but a >-cursor over the sorted set still converges
   // (a brand-new URL simply lands in a later or next sweep).
+  // Upstream-blocked hosts are dropped here, in the shared core, so no feed can reintroduce them.
   const allUrls = Array.from(
-    new Set(urls.map((u) => normalizeUrl(u)).filter((u) => u.startsWith("http"))),
+    new Set(
+      urls
+        .map((u) => normalizeUrl(String(u)))
+        .filter((u) => u.startsWith("http"))
+        .filter((u) => !isBlockedInstanceUrl(u)),
+    ),
   ).sort()
   const startIndex = opts.after == null ? 0 : allUrls.findIndex((u) => u > opts.after!)
   const from = startIndex < 0 ? allUrls.length : startIndex
@@ -91,7 +113,9 @@ export async function syncInstanceUrls(
     updated: 0,
     failed: 0,
     rejected: 0,
+    deferred: 0,
   }
+  if (detailLimit > 0) result.results = []
   if (opts.limit != null) {
     result.batch = {
       total: allUrls.length,
@@ -139,6 +163,21 @@ export async function syncInstanceUrls(
     // error handling. Discard it — this candidate counts as unfinished, the batch
     // stops, and nextAfter already points before it for the next call to resume.
     if (fetchBudgetExceeded()) throw new FetchBudgetExhausted()
+    if (result.results && result.results.length < detailLimit) {
+      result.results.push({
+        url: baseUrl,
+        status: check.status,
+        ok: check.ok,
+        premium: check.premium,
+        detail: check.detail,
+      })
+    }
+    // A probe that reached no verdict (the host's own rate limiter answered, or a refresh did not
+    // run) says nothing about the instance: nothing is persisted and the next sweep re-probes it.
+    if (check.skipped) {
+      result.deferred++
+      return
+    }
     result.checked++
 
     if (!check.ok) {

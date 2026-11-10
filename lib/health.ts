@@ -5,7 +5,7 @@ import { db } from "@/lib/db"
 import { accountEntries, poolState } from "@/lib/db/schema"
 import { decryptAtRest, encryptAtRest } from "@/lib/crypto"
 import { budgetedFetch, FetchBudgetExhausted, RowFetchBudgetExhausted } from "./cf-env"
-import { qobuzLogin, scrapeQobuzAppSecret, type QobuzLoginResult } from "./qobuz-oauth"
+import { QOBUZ_LOGIN_APP_ID, qobuzLogin, scrapeQobuzAppSecret, type QobuzLoginResult } from "./qobuz-oauth"
 import { TIDAL_CLIENT_ID, TIDAL_CLIENT_SECRET } from "./tidal-oauth"
 import { fingerprint, type Kind, type Service, type Status } from "./sources"
 
@@ -168,6 +168,197 @@ async function checkApi(service: Service, payload: Record<string, unknown>, dead
     return { ok: true, premium, status: classify(true, premium), latencyMs: ms, detail: `HTTP ${res.status}` }
   } catch (e) {
     return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: reason(e) }
+  }
+}
+
+/**
+ * Tidal instance probes.
+ *
+ * A HiFi-RestAPI/Monochrome instance publishes nothing useful at its root: `GET /` answers
+ * `{"version": …, "Repo": …}` (binimum/hifi-api `main.py` `@app.get("/")`), so a root fetch can
+ * neither prove the instance can stream nor detect its entitlement. The app's own health manager
+ * (`ArchiveTune` `TidalAudioProvider.verifyInstance`) therefore resolves a real track on the two
+ * dialects these instances speak:
+ *
+ *  - `/trackManifests/` (HiFi-RestAPI 3.x, Monochrome): the FULL/PREVIEW presentation lives in
+ *    `data.data.attributes.trackPresentation` (older builds: `assetPresentation`). A backing
+ *    account without a subscription answers `PREVIEW` — 30-second cuts.
+ *  - `/track/` (HiFi-RestAPI 2.x): `data.assetPresentation` plus a base64 manifest in
+ *    `data.manifest`, which is what the instance actually needs to return to serve audio.
+ *
+ * The pool probes the same two routes with the same parameters, so an instance is admitted only
+ * when it can resolve a lossless track — the same bar the app applies — instead of being judged
+ * by hi-res markers in an HTML root page.
+ *
+ * This replaced a `GET {baseUrl}` probe ("reachable when < 500") that could never admit these
+ * hosts: their root answers 200 with `{"version","Repo"}`, which contains no hi-res marker, so
+ * every healthy instance came back `preview` and was rejected by the premium gate.
+ */
+const TIDAL_PROBE_TRACK_ID = "155142501534011392"
+/**
+ * The UA the app sends on instance traffic (`TidalAudioProvider.DOWNLOAD_USER_AGENT`). Kept
+ * identical on purpose — community instances tune their WAF/bot rules per client.
+ */
+const TIDAL_INSTANCE_UA = "ArchiveTune-Android"
+/** Manifest formats the app asks for when it wants lossless (`FLAC` for LOSSLESS). */
+const TIDAL_MANIFEST_FORMATS = ["FLAC"]
+
+/** Narrow an unknown JSON value to an object, or null. */
+function jsonObject(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null
+}
+
+/** Read a JSON string field, trimmed; anything else reads as "". */
+function textField(value: unknown): string {
+  return typeof value === "string" ? value.trim() : ""
+}
+
+/**
+ * Tidal instance probe: resolve a real lossless track, on the `/trackManifests/` dialect first and
+ * the older `/track/` dialect when the instance does not implement it. See the constants above for
+ * why the root URL is not a probe.
+ *
+ * Verdicts, mirroring the app's `InstanceHealth`:
+ *  - `alive`   — 2xx on either dialect with a FULL (non-preview) manifest document.
+ *  - `preview` — reachable, but its backing account only serves 30 s previews. The pool is
+ *                premium-only, so instance-sync declines it — but it is NOT a dead instance, and
+ *                the entry keeps its row instead of being reported as failing.
+ *  - `dead`    — DNS/TLS/timeout, a 5xx/403/400, a body with no manifest, or a v2 body without a
+ *                manifest string.
+ *  - `pending` + `skipped` — the instance answered 429. Its rate limiter is not a verdict: nothing
+ *                is persisted and the next sweep re-probes.
+ * The `detail` records which dialect answered and what went wrong, so the cron log names the
+ * reason (it was previously an unexplained `HTTP 0`-class failure for every candidate).
+ */
+async function checkTidalInstance(
+  payload: Record<string, unknown>,
+  deadline?: AbortSignal,
+): Promise<CheckResult> {
+  const baseUrl = String(payload.baseUrl ?? "").trim().replace(/\/+$/, "")
+  if (!baseUrl) return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: "missing baseUrl" }
+  const trackId = String(payload.probeTrackId ?? "").trim() || TIDAL_PROBE_TRACK_ID
+  const headers = { accept: "application/json", "user-agent": TIDAL_INSTANCE_UA }
+
+  // Trailing slash is load-bearing: these are FastAPI apps with redirect_slashes, and the slashless
+  // form answers 307 that some instances (and the official api.monochrome.tf) turn into a 404.
+  const manifestParams = new URLSearchParams({ id: trackId })
+  for (const format of TIDAL_MANIFEST_FORMATS) manifestParams.append("formats", format)
+  manifestParams.set("adaptive", "false")
+  manifestParams.set("manifestType", "MPEG_DASH")
+  manifestParams.set("uriScheme", "HTTPS")
+  manifestParams.set("usage", "PLAYBACK")
+
+  let elapsed = 0
+  try {
+    const v3 = await timedFetch(`${baseUrl}/trackManifests/?${manifestParams.toString()}`, { headers }, deadline)
+    elapsed = v3.ms
+    if (v3.res.status === 429) {
+      return {
+        ok: false,
+        premium: false,
+        status: "pending",
+        latencyMs: elapsed,
+        detail: `trackManifests HTTP 429 (rate limited, ${trackId})`,
+        skipped: true,
+      }
+    }
+    if (v3.res.ok) {
+      const parsed = jsonObject(await v3.res.json().catch(() => null))
+      const data = jsonObject(parsed?.data)
+      // hifi-api 3.x wraps the document one level deeper than Monochrome's own frontend expects.
+      const attributes =
+        jsonObject(jsonObject(data?.data)?.attributes) ?? jsonObject(data?.attributes) ?? null
+      const presentation = (
+        textField(attributes?.trackPresentation) || textField(attributes?.assetPresentation)
+      ).toUpperCase()
+      if (!attributes || !presentation) {
+        return {
+          ok: false,
+          premium: false,
+          status: "dead",
+          latencyMs: elapsed,
+          detail: `trackManifests answered without a manifest document (${trackId})`,
+        }
+      }
+      if (presentation === "PREVIEW") {
+        return {
+          ok: true,
+          premium: false,
+          status: "preview",
+          latencyMs: elapsed,
+          detail: `trackManifests PREVIEW (${trackId})`,
+        }
+      }
+      return {
+        ok: true,
+        premium: true,
+        status: "alive",
+        latencyMs: elapsed,
+        detail: `trackManifests ${presentation} (${trackId})`,
+      }
+    }
+    // Only a missing route earns the second dialect: any other non-2xx is the instance itself
+    // not serving, which the older endpoint would report the same way.
+    if (v3.res.status !== 404 && v3.res.status !== 405 && v3.res.status !== 501) {
+      return {
+        ok: false,
+        premium: false,
+        status: "dead",
+        latencyMs: elapsed,
+        detail: `trackManifests HTTP ${v3.res.status}`,
+      }
+    }
+  } catch (e) {
+    return { ok: false, premium: false, status: "dead", latencyMs: 0, detail: reason(e) }
+  }
+
+  // HiFi-RestAPI 2.x dialect.
+  try {
+    const v2 = await timedFetch(
+      `${baseUrl}/track/?id=${encodeURIComponent(trackId)}&quality=LOSSLESS`,
+      { headers },
+      deadline,
+    )
+    elapsed += v2.ms
+    if (v2.res.status === 429) {
+      return {
+        ok: false,
+        premium: false,
+        status: "pending",
+        latencyMs: elapsed,
+        detail: `track HTTP 429 (rate limited, ${trackId})`,
+        skipped: true,
+      }
+    }
+    if (!v2.res.ok) {
+      return { ok: false, premium: false, status: "dead", latencyMs: elapsed, detail: `track HTTP ${v2.res.status}` }
+    }
+    const data = jsonObject(jsonObject(await v2.res.json().catch(() => null))?.data)
+    if (!data) {
+      return {
+        ok: false,
+        premium: false,
+        status: "dead",
+        latencyMs: elapsed,
+        detail: `track answered without a data object (${trackId})`,
+      }
+    }
+    if (textField(data.assetPresentation).toUpperCase() === "PREVIEW") {
+      return { ok: true, premium: false, status: "preview", latencyMs: elapsed, detail: `track PREVIEW (${trackId})` }
+    }
+    if (!textField(data.manifest)) {
+      // Reachable, but it has no manifest to hand out — a dead backing account answers like this.
+      return {
+        ok: false,
+        premium: false,
+        status: "dead",
+        latencyMs: elapsed,
+        detail: `track answered but served no manifest (${trackId})`,
+      }
+    }
+    return { ok: true, premium: true, status: "alive", latencyMs: elapsed, detail: `track LOSSLESS (${trackId})` }
+  } catch (e) {
+    return { ok: false, premium: false, status: "dead", latencyMs: elapsed, detail: reason(e) }
   }
 }
 
@@ -762,8 +953,10 @@ async function tryRefreshTidalToken(
       const newPayload = {
         ...current,
         token: newToken,
-        // Tidal sometimes rotates the refresh token; keep the new one if provided.
-        ...(json.refresh_token ? { refreshToken: json.refresh_token } : {}),
+        // Tidal does not always return a new refresh token. Keep the one just spent in that
+        // case: for a contribution whose only field was the refresh token, overwriting `token`
+        // with the access token would otherwise leave the row with nothing to renew from.
+        refreshToken: json.refresh_token || refreshToken,
       }
       if (claim) {
         await finish({ payload: newPayload })
@@ -844,6 +1037,26 @@ async function checkTidalAccount(
         }
       }
       token = exchanged.token
+    }
+
+    // Tidal access tokens live about an hour while the sweep runs every few hours, so a locally
+    // expired token is the normal case rather than an error. Renew it up front: relying on the
+    // /sessions 401 below wastes a round-trip and, more importantly, left rows holding an expired
+    // token until something asked for them. Refreshing here means every sweep hands the pool a
+    // fresh access token for every Tidal account.
+    if (isTidalAccessExpired(token)) {
+      const renewed = await tryRefreshTidalToken(payload, entryFingerprint, deadline)
+      if (!renewed.token) {
+        return {
+          ok: false,
+          premium: false,
+          status: renewed.skip ? "pending" : "dead",
+          latencyMs: 0,
+          detail: renewed.detail,
+          skipped: renewed.skip ?? false,
+        }
+      }
+      token = renewed.token
     }
 
     // Validate the OAuth access token against Tidal's session endpoint.
@@ -1023,19 +1236,40 @@ async function renewQobuzToken(
   const password = String(current.password ?? "").trim()
   if (!email || !password) {
     await finish()
-    return { token: null, detail: "no stored credential to renew with" }
+    // Nothing to re-login with: the row was contributed token-only (the site's own sign-in always
+    // stores the password, so this is a legacy/one-shot contribution). Say so explicitly — the
+    // reason is what tells an operator that the account has to be re-added, because Qobuz has no
+    // refresh endpoint and no amount of retrying can renew it.
+    return {
+      token: null,
+      detail: "token dead, no stored email/password — auto-renewal impossible, re-add the account",
+    }
   }
 
-  let login: QobuzLoginResult
-  try {
-    login = await qobuzLogin(email, password, deadline)
-  } catch (e) {
+  // Qobuz has several public app registrations and only some accept `user/login`. Try the pair the
+  // entry was captured with first, then the login-capable pair: pinning every renewal to one of
+  // them would let a rotation on Qobuz's side look exactly like a wrong password, and dead-mark
+  // the whole pool. A credential rejection only counts as a verdict when EVERY pair says so.
+  const storedAppId = String(current.appId ?? "").trim()
+  const loginPairs = [...new Set([storedAppId, QOBUZ_LOGIN_APP_ID].filter((id) => id !== ""))]
+  let login: QobuzLoginResult | null = null
+  let failure = ""
+  let rejectedOnAll = true
+  for (const appId of loginPairs) {
+    try {
+      login = await qobuzLogin(email, password, deadline, appId)
+      break
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "error"
+      failure = message
+      // A network throw is not a verdict — same split as the Tidal refresh, where a transient
+      // failure must not kill the account.
+      if (!/incorrect|rejected/i.test(message)) rejectedOnAll = false
+    }
+  }
+  if (!login) {
     await finish()
-    // A credential rejection is a verdict; a network throw is not — same split as the Tidal
-    // refresh, where a transient failure must not kill the account.
-    const message = e instanceof Error ? e.message : "error"
-    const rejected = /incorrect|rejected/i.test(message)
-    return { token: null, detail: `re-login failed: ${message}`, skip: !rejected }
+    return { token: null, detail: `re-login failed: ${failure}`, skip: !rejectedOnAll }
   }
   const fresh = login.userAuthToken
   if (!fresh) {
@@ -1480,9 +1714,11 @@ export async function runCheck(
   deadline?: AbortSignal,
 ): Promise<CheckResult> {
   // Amazon and Deezer instances publish their own liveness documents, so they are checked
-  // against those rather than through the generic reachability rule.
+  // against those rather than through the generic reachability rule. Tidal instances are checked
+  // by resolving a real track (see checkTidalInstance) — a root fetch cannot judge them.
   if (kind === "api" && service === "deezer") return checkDeezerInstance(payload, deadline)
   if (kind === "api" && service === "amazon-music") return checkAmazonMusicInstance(payload, deadline)
+  if (kind === "api" && service === "tidal") return checkTidalInstance(payload, deadline)
   if (kind === "api") return checkApi(service, payload, deadline)
   if (service === "tidal") return checkTidalAccount(payload, entryFingerprint, deadline)
   if (service === "deezer") return checkDeezerAccount(payload, entryFingerprint, deadline)

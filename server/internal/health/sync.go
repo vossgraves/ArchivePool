@@ -20,9 +20,25 @@ type InstanceSyncResult struct {
 	Updated  int `json:"updated"`  // already existed, status updated
 	Failed   int `json:"failed"`   // health check did not pass
 	Rejected int `json:"rejected"` // reachable but not premium/hi-res — not added (new) per pool policy
+	// Deferred counts probes that reached no verdict (the host's own rate limiter answered 429):
+	// nothing is persisted and the next sweep re-probes them.
+	Deferred int `json:"deferred"`
+	// Results holds each candidate's verdict, so a cron log can name why this run's failures failed.
+	// "12 checked, 12 failed" on its own is not diagnosable — and the host's own reason (HTTP status,
+	// transport error, PREVIEW presentation) is the only thing that tells them apart.
+	Results []InstanceCheckResult `json:"results,omitempty"`
 	// Locked reports that another run held the job lease and this one did nothing. Absent from a
 	// normal run, so the monochrome/SpotiFLAC response body is unchanged.
 	Locked bool `json:"locked,omitempty"`
+}
+
+// InstanceCheckResult is one candidate's verdict inside InstanceSyncResult.Results.
+type InstanceCheckResult struct {
+	URL     string `json:"url"`
+	Status  string `json:"status"`
+	OK      bool   `json:"ok"`
+	Premium bool   `json:"premium"`
+	Detail  string `json:"detail"`
 }
 
 // Instances checked more recently than this are skipped, so a sweep never hammers live hosts.
@@ -48,7 +64,7 @@ const syncLeaseTTL = 15 * time.Minute
 // shared community lists, and two instances syncing the same fingerprint each derive the row's next
 // state from a stale read of its check history, so an entry can end up with the loser's older status
 // and last_checked_at while its counters claim both runs were recorded.
-func SyncInstanceURLs(ctx context.Context, database *db.DB, service pool.Service, urls []string, note string, recheckWindow time.Duration, concurrency int) (InstanceSyncResult, error) {
+func SyncInstanceURLs(ctx context.Context, database *db.DB, service pool.Service, urls []string, note string, recheckWindow time.Duration, concurrency int, detailLimit int) (InstanceSyncResult, error) {
 	database.EnsureSchema(ctx)
 
 	if lease, ok, err := database.ClaimJob(ctx, "instance-sync", syncLeaseTTL); err != nil {
@@ -69,12 +85,13 @@ func SyncInstanceURLs(ctx context.Context, database *db.DB, service pool.Service
 		concurrency = defaultSyncConcurrency
 	}
 
-	// Normalize and de-duplicate, preserving the first occurrence.
+	// Normalize and de-duplicate, preserving the first occurrence. Upstream-blocked hosts are
+	// dropped here, in the shared core, so no feed can reintroduce them.
 	seen := map[string]bool{}
 	allURLs := make([]string, 0, len(urls))
 	for _, u := range urls {
 		normalized := pool.NormalizeURL(u)
-		if !hasHTTPPrefix(normalized) || seen[normalized] {
+		if !hasHTTPPrefix(normalized) || seen[normalized] || pool.IsBlockedInstanceURL(normalized) {
 			continue
 		}
 		seen[normalized] = true
@@ -132,11 +149,27 @@ func SyncInstanceURLs(ctx context.Context, database *db.DB, service pool.Service
 			}
 		}
 
+		check := RunCheck(ctx, database, service, pool.KindAPI, payload, "")
+
 		mu.Lock()
+		if detailLimit > 0 && len(result.Results) < detailLimit {
+			result.Results = append(result.Results, InstanceCheckResult{
+				URL:     baseURL,
+				Status:  string(check.Status),
+				OK:      check.OK,
+				Premium: check.Premium,
+				Detail:  check.Detail,
+			})
+		}
+		// A probe that reached no verdict (the host's rate limiter answered) says nothing about the
+		// instance: nothing is persisted and the next sweep re-probes it.
+		if check.Skipped {
+			result.Deferred++
+			mu.Unlock()
+			return
+		}
 		result.Checked++
 		mu.Unlock()
-
-		check := RunCheck(ctx, database, service, pool.KindAPI, payload, "")
 
 		if !check.OK {
 			mu.Lock()

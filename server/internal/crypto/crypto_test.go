@@ -213,3 +213,25 @@ func toHex(b []byte) string {
 	}
 	return string(out)
 }
+
+func TestHasPlaintextSecret(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload Payload
+		want    bool
+	}{
+		{"plaintext credential", Payload{"token": "abc"}, true},
+		{"encrypted credential", Payload{"token": Prefix + "aXY=:Y3Q="}, false},
+		{"one encrypted, one plaintext", Payload{"token": Prefix + "aXY=:Y3Q=", "refreshToken": "abc"}, true},
+		{"empty credential", Payload{"token": ""}, false},
+		{"non-sensitive field", Payload{"baseUrl": "https://example.invalid"}, false},
+		{"non-string credential", Payload{"token": 5}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := HasPlaintextSecret(tc.payload); got != tc.want {
+				t.Errorf("HasPlaintextSecret(%v) = %v, want %v", tc.payload, got, tc.want)
+			}
+		})
+	}
+}
