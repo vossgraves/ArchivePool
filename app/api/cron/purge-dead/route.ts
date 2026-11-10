@@ -51,12 +51,12 @@ export async function GET(req: NextRequest) {
   await ensureSchema()
   const accounts = await db
     .update(accountEntries)
-    .set({ removed: true })
+    .set({ removed: true, removedAt: new Date() })
     .where(eligible(accountEntries))
     .returning({ id: accountEntries.id })
   const instances = await db
     .update(instanceEntries)
-    .set({ removed: true })
+    .set({ removed: true, removedAt: new Date() })
     .where(eligible(instanceEntries))
     .returning({ id: instanceEntries.id })
 

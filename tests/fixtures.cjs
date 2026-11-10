@@ -19,6 +19,9 @@ async function seed({ tidalExpired = false, accounts = 3, instances = 10, stale 
   await p.query('TRUNCATE users, account_entries, instance_entries, api_keys, api_key_leases, api_key_requests, github_claims, audit_log, health_log, rate_limit_buckets, pool_state RESTART IDENTITY CASCADE')
   await p.query("INSERT INTO users(id,username,password_hash,github_id,github_login,role) VALUES (1,'fixture','github',123,'fixture','admin'), (2,'legacy','old',null,'','user')")
   await p.query("INSERT INTO api_keys(id,name,key_hash,prefix,user_id) VALUES(1,'app',$1,'atp_aaaaaa',1)", [hashKey(KEY)])
+  await p.query("INSERT INTO api_keys(id,name,key_hash,prefix,user_id) VALUES(2,'legacy',$1,'atp_bbbbbb',2)", [hashKey('atp_' + 'b'.repeat(48))])
+  await p.query("INSERT INTO api_key_requests(id,user_id,subject,reason,status) VALUES(1,1,'pending','fixture reason','pending'), (2,1,'approved','fixture reason','approved')")
+  await p.query("INSERT INTO github_claims(id,github_id,github_login,username) VALUES(1,123,'fixture','legacy')")
   let id = 10
   for (const service of ['tidal','qobuz','deezer','apple-music','amazon-music']) {
     for (let n = 0; n < accounts; n++) {
@@ -32,6 +35,8 @@ async function seed({ tidalExpired = false, accounts = 3, instances = 10, stale 
   await p.query("SELECT setval('source_entry_id_seq', $1, false)",[id+100])
   await p.query("SELECT setval('users_id_seq', 100, false)")
   await p.query("SELECT setval('api_keys_id_seq', 100, false)")
+  await p.query("SELECT setval('api_key_requests_id_seq', 100, false)")
+  await p.query("SELECT setval('github_claims_id_seq', 100, false)")
   await p.end()
 }
 async function snapshots(h, { stale = false } = {}) {

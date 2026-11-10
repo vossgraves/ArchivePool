@@ -33,6 +33,11 @@ class CountingPool extends pg.Pool {
     super({ ...options, connectionString: localDatabase() })
     databases.add(this)
     this.on('connect', (client) => {
+      const connectionState = sqlScope.getStore()
+      if (connectionState) {
+        connectionState.cost.connections++
+        client.connection.stream.on('data', chunk => { connectionState.cost.dbBytes += chunk.length })
+      }
       const query = client.query.bind(client)
       client.query = (...args) => {
         const state = sqlScope.getStore()
@@ -52,7 +57,9 @@ class CountingPool extends pg.Pool {
   }
 }
 class Harness {
-  constructor({ baseline = false, check = false, workers = true } = {}) {
+  constructor({ baseline = false, check = false, workers = true, mocks = {}, expose = {} } = {}) {
+    this.mocks = mocks
+    this.expose = expose
     this.baseline = baseline
     this.check = check
     this.workers = workers
@@ -62,7 +69,7 @@ class Harness {
     this.cookie = undefined
     this.failDb = false
     this.fetch = async (url) => { throw new Error(`Missing fetch fixture: ${url}`) }
-    this.kv.set('schema:applied', baseline ? '2026-11-06.1' : '2026-11-10.1')
+    this.kv.set('schema:applied', baseline ? '2026-11-06.1' : '2026-11-10.2')
     this.namespace = { idFromName: () => 'global', get: () => ({ open: async () => ({
       reserve: async (kind) => this.denyBudget ? null : ({ amount: kind === 'sql' ? 8 : kind === 'reads' ? 2 : 1, day: Math.floor(Date.now()/86400000), expiresAt: Date.now() + 20000 }),
       claimSchema: async () => true,
@@ -85,9 +92,11 @@ class Harness {
       output = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } }).outputText
       compileCache.set(cacheKey, output)
     }
+    if (this.expose[path.relative(root, file)]) output += `\nexports.__test = { ${this.expose[path.relative(root, file)].join(', ')} };`
     const requireFrom = Module.createRequire(file)
     const h = this
     function localRequire(name) {
+      if (Object.hasOwn(h.mocks, name)) return h.mocks[name]
       if (name === 'server-only') return {}
       if (name === 'pg') return { ...pg, Pool: CountingPool }
       if (name === 'next/headers') return {
@@ -126,7 +135,7 @@ class Harness {
     return m.exports
   }
   async run(callback, { headers = {} } = {}) {
-    const state = { h: this, headers: new Headers(headers), cost: { sql: 0, reads: 0, writes: 0, matches: 0, puts: 0, fetch: 0 }, sql: [], driverCpuUs: 0, background: [], ctx: {} }
+  const state = { h: this, headers: new Headers(headers), cost: { sql: 0, reads: 0, writes: 0, matches: 0, puts: 0, fetch: 0, connections: 0, dbBytes: 0 }, sql: [], driverCpuUs: 0, background: [], ctx: {} }
     state.ctx.waitUntil = (work) => state.background.push(work)
     globalThis.caches = { default: {
       match: async (req) => { state.cost.matches++; const body = this.edge.get(req.url); return body ? new Response(body) : undefined },

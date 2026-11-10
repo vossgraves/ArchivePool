@@ -33,95 +33,45 @@ export interface CategoryStatus {
  */
 export async function getStatus(): Promise<CategoryStatus[]> {
   await ensureSchema()
-  const accounts = await db
-    .select({
-      service: accountEntries.service,
-      status: accountEntries.status,
-      premium: accountEntries.premium,
-      disabled: accountEntries.disabled,
-      lastCheckedAt: accountEntries.lastCheckedAt,
-    })
-    .from(accountEntries)
-    .where(eq(accountEntries.removed, false))
-  const instances = await db
-    .select({
-      service: instanceEntries.service,
-      status: instanceEntries.status,
-      premium: instanceEntries.premium,
-      disabled: instanceEntries.disabled,
-      lastCheckedAt: instanceEntries.lastCheckedAt,
-    })
-    .from(instanceEntries)
-    .where(eq(instanceEntries.removed, false))
-
-  const rows = [
-    ...accounts.map((r) => ({ ...r, kind: "account" as const })),
-    ...instances.map((r) => ({ ...r, kind: "api" as const })),
-  ]
-
-  // Uptime is the 14-day pass rate of real health checks (sweeps and report-triggered verifies),
-  // read from health_log with the same scope as the history chart: synthetic 'app report:' marker
-  // rows are not checks and are excluded, and only entries still in the pool (removed = false)
-  // count. The lifetime check_count/ok_count columns cannot express any of that — they never
-  // decay, they count report verifies on the same handful of leased entries, and a dead entry
-  // keeps accruing failures every sweep until an admin removes it, so the figure slid ever
-  // downward on a healthy pool.
-  const uptimeRows = (
-    await db.execute(sql`
-      with entries as (
-        select id, service, 'account' as kind from account_entries where removed = false
-        union all
-        select id, service, 'api' as kind from instance_entries where removed = false
-      )
-      select e.service as service, e.kind as kind,
-             count(*)::int as checks,
-             count(*) filter (where h.ok)::int as ok
-      from health_log h
-      join entries e on e.id = h.entry_id
+  const result = await db.execute(sql`
+    with entries as materialized (
+      select id, service, 'account' as kind, status, premium, disabled, last_checked_at
+      from account_entries where not removed
+      union all
+      select id, service, 'api' as kind, status, premium, disabled, last_checked_at
+      from instance_entries where not removed
+    ), stats as (
+      select service, kind, count(*)::int as total,
+        count(*) filter (where not disabled and status in ('alive', 'preview'))::int as alive,
+        count(*) filter (where not disabled and status = 'alive' and premium)::int as premium,
+        count(*) filter (where status = 'dead')::int as dead,
+        count(*) filter (where status = 'pending')::int as pending,
+        max(last_checked_at) as last_checked_at
+      from entries group by service, kind
+    ), uptime as (
+      select e.service, e.kind, count(*)::int as checks,
+        count(*) filter (where h.ok)::int as ok
+      from health_log h join entries e on e.id = h.entry_id
       where h.checked_at >= now() - make_interval(days => ${HISTORY_DAYS})
         and (h.detail is null or h.detail not like 'app report%')
-      group by 1, 2
-    `)
-  ).rows as unknown as { service: string; kind: string; checks: number; ok: number }[] | undefined
-  const uptimeByCategory = new Map((uptimeRows ?? []).map((r) => [`${r.service}|${r.kind}`, r] as const))
-
+      group by e.service, e.kind
+    )
+    select stats.*, uptime.checks, uptime.ok from stats
+    left join uptime using (service, kind)
+  `)
+  const rows = result.rows as { service: string; kind: string; total: number; alive: number;
+    premium: number; dead: number; pending: number; last_checked_at: Date | null;
+    checks: number | null; ok: number | null }[]
   return CATEGORIES.map((cat) => {
-    const items = rows.filter((r) => r.service === cat.service && r.kind === cat.kind)
-    // Disabled entries are served to nobody, so they must not read as alive here.
-    const alive = items.filter((r) => !r.disabled && (r.status === "alive" || r.status === "preview")).length
-    const premium = items.filter((r) => !r.disabled && r.status === "alive" && r.premium).length
-    const dead = items.filter((r) => r.status === "dead").length
-    const pending = items.filter((r) => r.status === "pending").length
-    const uptime = uptimeByCategory.get(`${cat.service}|${cat.kind}`)
-    const uptimePct =
-      uptime && Number(uptime.checks) > 0
-        ? Math.round((Number(uptime.ok) / Number(uptime.checks)) * 1000) / 10
-        : null
-    const lastChecked = items
-      .map((r) => r.lastCheckedAt)
-      .filter(Boolean)
-      .sort()
-      .pop()
-
-    let health: CategoryStatus["health"] = "unknown"
-    if (items.length > 0) {
-      if (alive > 0 && premium > 0) health = "operational"
-      else if (alive > 0) health = "degraded"
-      else health = "down"
-    }
-
+    const row = rows.find((r) => r.service === cat.service && r.kind === cat.kind)
+    const total = row?.total ?? 0
+    const alive = row?.alive ?? 0
+    const premium = row?.premium ?? 0
     return {
-      service: cat.service,
-      kind: cat.kind,
-      label: cat.label,
-      total: items.length,
-      alive,
-      premium,
-      dead,
-      pending,
-      uptimePct,
-      lastCheckedAt: lastChecked ? new Date(lastChecked).toISOString() : null,
-      health,
+      ...cat, total, alive, premium, dead: row?.dead ?? 0, pending: row?.pending ?? 0,
+      uptimePct: row?.checks ? Math.round((Number(row.ok) / Number(row.checks)) * 1000) / 10 : null,
+      lastCheckedAt: row?.last_checked_at ? new Date(row.last_checked_at).toISOString() : null,
+      health: total === 0 ? "unknown" : alive > 0 ? premium > 0 ? "operational" : "degraded" : "down",
     }
   })
 }

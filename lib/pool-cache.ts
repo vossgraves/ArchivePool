@@ -37,13 +37,14 @@ function store(): KVStore | null {
 }
 
 /** Read [key], or null when the binding is absent, the key is missing or KV fails. Never throws. */
-export async function kvGetText(key: string): Promise<string | null> {
+export async function kvGetText(key: string, failClosed = false): Promise<string | null> {
   const kv = store()
   if (!kv) return null
   try {
     await chargeResource("reads")
     return await kv.get(key)
   } catch (err) {
+    if (failClosed) throw err
     console.error("[kv] read failed:", key, err instanceof Error ? err.message : err)
     return null
   }

@@ -32,11 +32,11 @@ export async function POST(req: NextRequest) {
 
   await db
     .update(accountEntries)
-    .set({ removed: true })
+    .set({ removed: true, removedAt: new Date() })
     .where(and(eq(accountEntries.status, "dead"), eq(accountEntries.removed, false)))
   await db
     .update(instanceEntries)
-    .set({ removed: true })
+    .set({ removed: true, removedAt: new Date() })
     .where(and(eq(instanceEntries.status, "dead"), eq(instanceEntries.removed, false)))
 
   await recordAudit(req, actor, "entry.purge_dead", "entries", {

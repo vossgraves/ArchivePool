@@ -6,7 +6,7 @@ import { cfBindings } from "@/lib/cf-env"
 type Resource = "sql" | "reads" | "writes" | "probes"
 type Ticket = { amount: number; day: number; expiresAt: number }
 interface Lease {
-  reserve(kind: Resource): Promise<Ticket | null>
+  reserve(kind: Resource, cron: boolean): Promise<Ticket | null>
   claimSchema(version: string): Promise<boolean>
 }
 interface BudgetScope {
@@ -14,6 +14,7 @@ interface BudgetScope {
   lease: Promise<Lease> | null
   tickets: Partial<Record<Resource, Ticket>>
   pending?: Promise<void>
+  cron?: boolean
 }
 
 export class ResourceUnavailable extends Error {
@@ -51,7 +52,7 @@ async function allocate(kind: Resource, spend: boolean): Promise<void> {
     const now = Date.now()
     let ticket = state.tickets[kind]
     if (!ticket || ticket.amount === 0 || ticket.day !== Math.floor(now / 86_400_000) || ticket.expiresAt <= now) {
-      ticket = (await (await lease(state)).reserve(kind)) ?? undefined
+      ticket = (await (await lease(state)).reserve(kind, state.cron === true)) ?? undefined
       if (!ticket) throw new ResourceUnavailable()
       state.tickets[kind] = ticket
     }

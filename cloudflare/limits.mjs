@@ -7,7 +7,7 @@ class ResourceLease extends RpcTarget {
     super()
     this.ledger = ledger
   }
-  reserve(kind) { return this.ledger.reserve(kind) }
+  reserve(kind, cron) { return this.ledger.reserve(kind, cron) }
   claimSchema(version) { return this.ledger.claimSchema(version) }
 }
 

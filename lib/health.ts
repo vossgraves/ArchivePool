@@ -1051,6 +1051,7 @@ async function checkTidalAccount(
         }
       }
       token = exchanged.token
+      payload = exchanged.payload ?? { ...payload, token }
     }
 
     // Tidal access tokens live about an hour while the sweep runs every few hours, so a locally
@@ -1071,6 +1072,7 @@ async function checkTidalAccount(
         }
       }
       token = renewed.token
+      payload = renewed.payload ?? { ...payload, token }
     }
 
     // Validate the OAuth access token against Tidal's session endpoint.
@@ -1083,6 +1085,7 @@ async function checkTidalAccount(
       const refreshed = await tryRefreshTidalToken(payload, entryFingerprint, deadline)
       if (refreshed.token) {
         token = refreshed.token
+        payload = refreshed.payload ?? { ...payload, token }
         const retry = await timedFetch(
           "https://api.tidal.com/v1/sessions",
           { headers: tidalHeaders(token) },
@@ -1103,7 +1106,7 @@ async function checkTidalAccount(
     }
 
     if (res.status === 401 || res.status === 403) {
-      return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: "token rejected" }
+      return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: "token rejected", skipped: false }
     }
     if (!res.ok) {
       return { ok: false, premium: false, status: "dead", latencyMs: ms, detail: `HTTP ${res.status}` }

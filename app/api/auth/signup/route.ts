@@ -15,7 +15,7 @@ export async function POST(req: NextRequest) {
         detail:
           "Password sign-up is unavailable on this deployment — use Sign in with GitHub instead (/api/auth/github/start), which also covers legacy username claims.",
       },
-      { status: 503, headers: { "cache-control": "private, no-store" } },
+      { status: 503, headers: { "cache-control": "private, no-store", "retry-after": "60" } },
     )
   }
   let body: { username?: string; password?: string }

@@ -10,7 +10,7 @@ const scope = globalThis[key] ??= new AsyncLocalStorage()
 export default {
   ...openNext,
   async fetch(request, env, ctx) {
-    const state = { namespace: env.FREE_TIER_BUDGET, tickets: {}, lease: null }
+    const state = { namespace: env.FREE_TIER_BUDGET, tickets: {}, lease: null, cron: new URL(request.url).pathname.startsWith("/api/cron/") }
     const background = []
     const execution = new Proxy(ctx, {
       get(target, name) {

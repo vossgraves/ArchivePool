@@ -2,7 +2,8 @@
 import { sql } from "drizzle-orm"
 import { db } from "./index"
 import { kvGetText, kvPutText } from "@/lib/pool-cache"
-import { claimSchemaMigration, ResourceUnavailable } from "@/lib/resource-budget"
+import { ResourceUnavailable } from "@/lib/resource-budget"
+import { cfBindings } from "@/lib/cf-env"
 
 /**
  * Bump whenever a statement is added below. The version is stored in KV after a clean run so
@@ -17,7 +18,7 @@ import { claimSchemaMigration, ResourceUnavailable } from "@/lib/resource-budget
  * The gate is a KV read (one per isolate), not a query. When KV is absent or unreadable the
  * old run-every-process behaviour returns, so a non-Workers host is unchanged.
  */
-export const SCHEMA_VERSION = "2026-11-10.1"
+export const SCHEMA_VERSION = "2026-11-10.2"
 const SCHEMA_MARKER_KEY = "schema:applied"
 
 /** Idempotent schema migration, run once per deploy (Workers) / process (elsewhere). See docs/SCHEMA.md. */
@@ -233,6 +234,12 @@ const STATEMENTS: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_github_claims_retention ON github_claims (created_at)`,
   `CREATE INDEX IF NOT EXISTS idx_account_entries_removed ON account_entries (removed_at) WHERE removed`,
   `CREATE INDEX IF NOT EXISTS idx_instance_entries_removed ON instance_entries (removed_at) WHERE removed`,
+  `CREATE INDEX IF NOT EXISTS idx_audit_log_retention ON audit_log (created_at DESC, id DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_account_entries_contributor ON account_entries (contributor)`,
+  `CREATE INDEX IF NOT EXISTS idx_instance_entries_contributor ON instance_entries (contributor)`,
+  `CREATE INDEX IF NOT EXISTS idx_instance_entries_expires ON instance_entries (expires_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_key_requests_recent ON api_key_requests (ip_address, user_agent, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_users_recent ON users (created_ip, created_ua, created_at)`,
 ]
 
 const globalForMigrations = globalThis as unknown as { __poolSchemaEnsured?: Promise<void> }
@@ -242,13 +249,15 @@ const globalForMigrations = globalThis as unknown as { __poolSchemaEnsured?: Pro
  * database: the whole point is to spend zero statements on a warm schema.
  */
 async function schemaAlreadyApplied(): Promise<boolean> {
-  return (await kvGetText(SCHEMA_MARKER_KEY)) === SCHEMA_VERSION
+  return (await kvGetText(SCHEMA_MARKER_KEY, true)) === SCHEMA_VERSION
 }
 
 export function ensureSchema(): Promise<void> {
   globalForMigrations.__poolSchemaEnsured ??= (async () => {
     if (await schemaAlreadyApplied()) return
-    if (!(await claimSchemaMigration(SCHEMA_VERSION))) throw new ResourceUnavailable()
+    // Even a once-only DDL pass exceeds Free's CPU allowance. Apply migrations outside
+    // Workers and publish the marker after rollout; reads never bootstrap a database.
+    if (cfBindings()) throw new ResourceUnavailable()
 
     let failed = 0
     for (const statement of STATEMENTS) {

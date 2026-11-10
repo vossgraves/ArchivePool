@@ -9,3 +9,9 @@ CREATE INDEX IF NOT EXISTS idx_key_requests_retention ON api_key_requests (creat
 CREATE INDEX IF NOT EXISTS idx_github_claims_retention ON github_claims (created_at);
 CREATE INDEX IF NOT EXISTS idx_account_entries_removed ON account_entries (removed_at) WHERE removed;
 CREATE INDEX IF NOT EXISTS idx_instance_entries_removed ON instance_entries (removed_at) WHERE removed;
+CREATE INDEX IF NOT EXISTS idx_audit_log_retention ON audit_log (created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_account_entries_contributor ON account_entries (contributor);
+CREATE INDEX IF NOT EXISTS idx_instance_entries_contributor ON instance_entries (contributor);
+CREATE INDEX IF NOT EXISTS idx_instance_entries_expires ON instance_entries (expires_at);
+CREATE INDEX IF NOT EXISTS idx_key_requests_recent ON api_key_requests (ip_address, user_agent, created_at);
+CREATE INDEX IF NOT EXISTS idx_users_recent ON users (created_ip, created_ua, created_at);

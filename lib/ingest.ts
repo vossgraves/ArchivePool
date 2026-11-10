@@ -6,6 +6,7 @@ import { accountEntries, instanceEntries } from "@/lib/db/schema"
 import { ensureSchema } from "@/lib/db/ensure"
 import { runCheck, type CheckResult } from "@/lib/health"
 import { fingerprint, maskLabel, type Kind, type Service } from "@/lib/sources"
+import { fetchBudgetExceeded, rowFetchExhausted } from "@/lib/cf-env"
 
 export interface IngestResult {
   ok: boolean
@@ -66,7 +67,7 @@ export async function ingestSource(
   // A check that reached no verdict (a Tidal refresh cooling down, or the instance's own rate
   // limiter answering 429) is not a rejection: nothing was learned about the source, so telling the
   // contributor it failed would be wrong. Nothing is persisted and they can retry.
-  if (result.skipped) {
+  if (result.skipped || fetchBudgetExceeded() || rowFetchExhausted()) {
     return {
       ok: false,
       saved: false,
@@ -114,6 +115,7 @@ export async function ingestSource(
       lastCheckedAt: new Date(),
       ...(result.ok ? { lastOkAt: sql`now()` } : {}),
       removed: false,
+      removedAt: null,
       disabled: false,
       contributor,
       expiresAt,
@@ -136,6 +138,7 @@ export async function ingestSource(
         ...(result.ok ? { lastOkAt: sql`now()` } : {}),
         lastCheckedAt: new Date(),
         removed: false,
+        removedAt: null,
         // Credit sticks to whoever contributed the entry first. A re-submission that revives a
         // dead credential must not steal the byline, and an anonymous re-submit must not erase
         // an existing credit — so keep the stored value when there is one.

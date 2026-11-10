@@ -89,6 +89,8 @@ export class FetchBudgetExhausted extends Error {
 // uses, so every request gets its own budget. Workers free tier allows 50 subrequests
 // per request; 40 leaves headroom for the route's own fetches (feed pulls, R2, retries).
 const FETCH_BUDGET = 40
+const RESPONSE_BYTES = 256 * 1024
+const responseSpend = new WeakMap<object, number>()
 const fetchSpend = new WeakMap<object, number>()
 const fetchDenied = new WeakSet<object>()
 // Outstanding per-row reservations: a row holds its whole ceiling against the budget
@@ -245,9 +247,9 @@ export async function budgetedFetch(url: string, init?: RequestInit): Promise<Re
         ? init?.headers
         : stripCredentialHeaders(init?.headers)
     const res = await fetch(current, { ...init, method, body, headers, redirect: "manual" })
-    if (!REDIRECT_STATUSES.has(res.status) || hop >= MAX_REDIRECT_HOPS) return res
+    if (!REDIRECT_STATUSES.has(res.status) || hop >= MAX_REDIRECT_HOPS) return boundedResponse(res)
     const location = res.headers.get("location")
-    if (!location) return res
+    if (!location) return boundedResponse(res)
     try {
       await res.body?.cancel()
     } catch {
@@ -262,6 +264,30 @@ export async function budgetedFetch(url: string, init?: RequestInit): Promise<Re
       body = null
     }
   }
+}
+
+function boundedResponse(res: Response): Response {
+  const ctx = cfExecutionContext()
+  if (!ctx || !res.body) return res
+  const reader = res.body.getReader()
+  return new Response(new ReadableStream({
+    async pull(controller) {
+      const chunk = await reader.read()
+      if (chunk.done) { controller.close(); return }
+      const used = (responseSpend.get(ctx) ?? 0) + chunk.value.byteLength
+      responseSpend.set(ctx, used)
+      // Bound parsing and bundle scans as well as fetch count; slicing text after reading it
+      // still lets an instance force the entire response into memory.
+      if (used > RESPONSE_BYTES) {
+        fetchDenied.add(ctx)
+        await reader.cancel()
+        controller.error(new FetchBudgetExhausted())
+        return
+      }
+      controller.enqueue(chunk.value)
+    },
+    cancel(reason) { return reader.cancel(reason) },
+  }), { status: res.status, statusText: res.statusText, headers: res.headers })
 }
 
 export function cfWaitUntil(work: Promise<unknown>): void {

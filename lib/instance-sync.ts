@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import "server-only"
-import { eq, sql } from "drizzle-orm"
+import { and, eq, inArray, sql } from "drizzle-orm"
 import { encryptAtRest } from "@/lib/crypto"
 import { db } from "@/lib/db"
 import { instanceEntries } from "@/lib/db/schema"
@@ -138,7 +138,9 @@ export async function syncInstanceUrls(
       removed: instanceEntries.removed,
     })
     .from(instanceEntries)
-    .where(eq(instanceEntries.service, service))
+    .where(and(eq(instanceEntries.service, service), inArray(instanceEntries.fingerprint,
+      work.map((baseUrl) => fingerprint(service, "api", { baseUrl })),
+    )))
 
   const fingerprintMap = new Map(existingRows.map((r) => [r.fingerprint, r]))
 
@@ -243,6 +245,7 @@ export async function syncInstanceUrls(
         ...(check.ok ? { lastOkAt: sql`now()` } : {}),
         disabled: false,
         removed: false,
+        removedAt: null,
       })
       .onConflictDoUpdate({
         target: instanceEntries.fingerprint,
@@ -254,6 +257,7 @@ export async function syncInstanceUrls(
           consecutiveFailures: 0,
           disabled: false,
           removed: false,
+          removedAt: null,
           checkCount: sql`${instanceEntries.checkCount} + 1`,
           okCount: sql`${instanceEntries.okCount} + 1`,
           ...(check.ok ? { lastOkAt: sql`now()` } : {}),

@@ -95,7 +95,7 @@ async function sweepBatch(force: boolean, cursor: SweepCursor | null) {
       from instance_entries where not removed and (expires_at is null or expires_at > now())
     ), stale as materialized (select * from entries where ${stale}),
     queue as materialized (select * from stale where ${after}),
-    batch as (select * from queue order by (status = 'pending') desc, last_checked_at asc nulls first, id limit 13)
+    batch as (select * from queue order by (status = 'pending') desc, floor(extract(epoch from coalesce(last_checked_at, 'epoch'::timestamptz)) * 1000), id limit 13)
     select (select count(*) from entries)::int as total,
       ((select count(*) from entries) - (select count(*) from stale))::int as fresh,
       (select count(*) from queue)::int as remaining, row_to_json(batch) as entry
@@ -181,8 +181,7 @@ function afterCursor(e: PoolEntry, c: SweepCursor): boolean {
   const k = cursorKey(e)
   // The order is pending DESC (parked rows first), then lastCheckedAt ASC, then id
   // ASC — so "after the cursor" means a LOWER pending rank, or equal rank with a
-  // greater ts, or equal ts with a greater id. (No test harness exists in this
-  // repo; keep this comparator structurally identical to the sort above.)
+  // greater ts, or equal ts with a greater id.
   return k.pending < c.pending || (k.pending === c.pending && (k.ts > c.ts || (k.ts === c.ts && k.id > c.id)))
 }
 

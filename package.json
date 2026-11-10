@@ -13,7 +13,7 @@
     "deploy:cf": "CF_BUILD=1 opennextjs-cloudflare build && opennextjs-cloudflare deploy",
     "cf-typegen": "wrangler types",
     "typecheck": "tsc --noEmit --incremental false",
-    "test:limits": "node --test --test-concurrency=1 tests/*.cjs",
+    "test:limits": "node --test --test-concurrency=1 tests/*.test.cjs",
     "measure:limits": "node tests/measure.cjs"
   },
   "dependencies": {
